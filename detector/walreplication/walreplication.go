@@ -37,12 +37,21 @@ type Detector struct {
 	publication string
 	backoffBase time.Duration
 	backoffCap  time.Duration
+	txMetadata  bool
 	logger      *slog.Logger
+}
+
+// txState tracks the current transaction when txMetadata is enabled.
+type txState struct {
+	xid        uint32
+	commitTime time.Time
+	seq        int
 }
 
 // New creates a WAL logical replication detector for the given publication.
 // Duration parameters default to sensible values when zero.
-func New(dbURL string, publication string, backoffBase, backoffCap time.Duration, logger *slog.Logger) *Detector {
+// When txMetadata is true, events include transaction info (xid, commit_time, seq).
+func New(dbURL string, publication string, backoffBase, backoffCap time.Duration, txMetadata bool, logger *slog.Logger) *Detector {
 	if backoffBase <= 0 {
 		backoffBase = defaultBackoffBase
 	}
@@ -57,6 +66,7 @@ func New(dbURL string, publication string, backoffBase, backoffCap time.Duration
 		publication: publication,
 		backoffBase: backoffBase,
 		backoffCap:  backoffCap,
+		txMetadata:  txMetadata,
 		logger:      logger.With("detector", source),
 	}
 }
@@ -156,6 +166,7 @@ func (d *Detector) run(ctx context.Context, events chan<- event.Event) error {
 	clientXLogPos := consistentPoint
 	nextStatusDeadline := time.Now().Add(standbyStatusInterval)
 	relations := make(map[uint32]*pglogrepl.RelationMessage)
+	var currentTx *txState // non-nil during a transaction when txMetadata is enabled
 
 	for {
 		if time.Now().After(nextStatusDeadline) {
@@ -220,23 +231,40 @@ func (d *Detector) run(ctx context.Context, events chan<- event.Event) error {
 			case *pglogrepl.RelationMessage:
 				relations[m.RelationID] = m
 
+			case *pglogrepl.BeginMessage:
+				if d.txMetadata {
+					currentTx = &txState{xid: m.Xid, commitTime: m.CommitTime}
+				}
+
+			case *pglogrepl.CommitMessage:
+				currentTx = nil
+
 			case *pglogrepl.InsertMessage:
-				if err := d.emitEvent(ctx, events, relations, m.RelationID, "INSERT", m.Tuple, nil); err != nil {
+				if currentTx != nil {
+					currentTx.seq++
+				}
+				if err := d.emitEvent(ctx, events, relations, m.RelationID, "INSERT", m.Tuple, nil, currentTx); err != nil {
 					return err
 				}
 
 			case *pglogrepl.UpdateMessage:
-				if err := d.emitEvent(ctx, events, relations, m.RelationID, "UPDATE", m.NewTuple, m.OldTuple); err != nil {
+				if currentTx != nil {
+					currentTx.seq++
+				}
+				if err := d.emitEvent(ctx, events, relations, m.RelationID, "UPDATE", m.NewTuple, m.OldTuple, currentTx); err != nil {
 					return err
 				}
 
 			case *pglogrepl.DeleteMessage:
-				if err := d.emitEvent(ctx, events, relations, m.RelationID, "DELETE", nil, m.OldTuple); err != nil {
+				if currentTx != nil {
+					currentTx.seq++
+				}
+				if err := d.emitEvent(ctx, events, relations, m.RelationID, "DELETE", nil, m.OldTuple, currentTx); err != nil {
 					return err
 				}
 
-			case *pglogrepl.BeginMessage, *pglogrepl.CommitMessage, *pglogrepl.TruncateMessage, *pglogrepl.TypeMessage, *pglogrepl.OriginMessage:
-				// Ignored — immediate emission, no transaction buffering.
+			case *pglogrepl.TruncateMessage, *pglogrepl.TypeMessage, *pglogrepl.OriginMessage:
+				// Ignored.
 			}
 		}
 	}
@@ -251,6 +279,7 @@ func (d *Detector) emitEvent(
 	op string,
 	newTuple *pglogrepl.TupleData,
 	oldTuple *pglogrepl.TupleData,
+	tx *txState,
 ) error {
 	rel, ok := relations[relationID]
 	if !ok {
@@ -292,6 +321,14 @@ func (d *Detector) emitEvent(
 	if err != nil {
 		d.logger.Error("create event failed", "error", err)
 		return nil
+	}
+
+	if tx != nil {
+		ev.Transaction = &event.TransactionInfo{
+			Xid:        tx.xid,
+			CommitTime: tx.commitTime,
+			Seq:        tx.seq,
+		}
 	}
 
 	select {

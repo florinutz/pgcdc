@@ -49,6 +49,7 @@ func init() {
 	f.String("metrics-addr", "", "standalone metrics/health server address (e.g. :9090)")
 	f.String("detector", "listen_notify", "detector type: listen_notify or wal")
 	f.String("publication", "", "PostgreSQL publication name (required for --detector wal)")
+	f.Bool("tx-metadata", false, "include transaction metadata in WAL events (xid, commit_time, seq)")
 
 	// File adapter flags.
 	f.String("file-path", "", "file adapter output path")
@@ -75,6 +76,7 @@ func init() {
 	mustBindPFlag("metrics_addr", f.Lookup("metrics-addr"))
 	mustBindPFlag("detector.type", f.Lookup("detector"))
 	mustBindPFlag("detector.publication", f.Lookup("publication"))
+	mustBindPFlag("detector.tx_metadata", f.Lookup("tx-metadata"))
 	mustBindPFlag("file.path", f.Lookup("file-path"))
 	mustBindPFlag("file.max_size", f.Lookup("file-max-size"))
 	mustBindPFlag("file.max_files", f.Lookup("file-max-files"))
@@ -152,7 +154,7 @@ func runListen(cmd *cobra.Command, args []string) error {
 	case "listen_notify", "":
 		det = listennotify.New(cfg.DatabaseURL, cfg.Channels, cfg.Detector.BackoffBase, cfg.Detector.BackoffCap, logger)
 	case "wal":
-		det = walreplication.New(cfg.DatabaseURL, cfg.Detector.Publication, cfg.Detector.BackoffBase, cfg.Detector.BackoffCap, logger)
+		det = walreplication.New(cfg.DatabaseURL, cfg.Detector.Publication, cfg.Detector.BackoffBase, cfg.Detector.BackoffCap, cfg.Detector.TxMetadata, logger)
 	default:
 		return fmt.Errorf("unknown detector type: %q (expected listen_notify or wal)", cfg.Detector.Type)
 	}

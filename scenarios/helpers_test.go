@@ -475,6 +475,37 @@ func updateRow(t *testing.T, connStr, table string, id int, data map[string]any)
 	}
 }
 
+// insertRowsInTx inserts multiple rows in a single transaction.
+func insertRowsInTx(t *testing.T, connStr, table string, rows []map[string]any) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	conn, err := pgx.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("insertRowsInTx connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		t.Fatalf("insertRowsInTx begin: %v", err)
+	}
+	for _, data := range rows {
+		jsonData, err := json.Marshal(data)
+		if err != nil {
+			t.Fatalf("insertRowsInTx marshal: %v", err)
+		}
+		_, err = tx.Exec(ctx, fmt.Sprintf("INSERT INTO %s (data) VALUES ($1)", table), jsonData)
+		if err != nil {
+			_ = tx.Rollback(ctx)
+			t.Fatalf("insertRowsInTx exec: %v", err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("insertRowsInTx commit: %v", err)
+	}
+}
+
 func deleteRow(t *testing.T, connStr, table string, id int) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -494,11 +525,22 @@ func deleteRow(t *testing.T, connStr, table string, id int) {
 // startWALPipeline wires WAL detector -> bus -> adapters and starts them in an errgroup.
 func startWALPipeline(t *testing.T, connStr string, publication string, adapters ...adapter.Adapter) {
 	t.Helper()
+	startWALPipelineWithOpts(t, connStr, publication, false, adapters...)
+}
+
+// startWALPipelineWithTxMetadata is like startWALPipeline but enables transaction metadata.
+func startWALPipelineWithTxMetadata(t *testing.T, connStr string, publication string, adapters ...adapter.Adapter) {
+	t.Helper()
+	startWALPipelineWithOpts(t, connStr, publication, true, adapters...)
+}
+
+func startWALPipelineWithOpts(t *testing.T, connStr string, publication string, txMetadata bool, adapters ...adapter.Adapter) {
+	t.Helper()
 
 	logger := testLogger()
 	ctx, cancel := context.WithCancel(context.Background())
 
-	det := walreplication.New(connStr, publication, 0, 0, logger)
+	det := walreplication.New(connStr, publication, 0, 0, txMetadata, logger)
 	b := bus.New(64, logger)
 
 	g, gCtx := errgroup.WithContext(ctx)

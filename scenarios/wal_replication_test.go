@@ -63,6 +63,28 @@ func TestScenario_WALReplication(t *testing.T) {
 		}
 	})
 
+	t.Run("no transaction metadata by default", func(t *testing.T) {
+		// The existing pipeline has txMetadata=false. Verify events omit the field.
+		capture.drain()
+		insertRow(t, connStr, "wal_orders", map[string]any{"check": "no_tx"})
+		line := capture.waitLine(t, 10*time.Second)
+
+		var ev event.Event
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			t.Fatalf("invalid JSON: %v", err)
+		}
+		if ev.Transaction != nil {
+			t.Errorf("expected nil transaction metadata, got %+v", ev.Transaction)
+		}
+
+		// Also verify the field is absent from the raw JSON.
+		var raw map[string]json.RawMessage
+		json.Unmarshal([]byte(line), &raw)
+		if _, ok := raw["transaction"]; ok {
+			t.Error("expected 'transaction' key absent from JSON, but it was present")
+		}
+	})
+
 	t.Run("update and delete captured", func(t *testing.T) {
 		capture.drain()
 
@@ -123,6 +145,73 @@ func TestScenario_WALReplication(t *testing.T) {
 		json.Unmarshal(deleteEv.Payload, &deletePayload)
 		if deletePayload["row"] == nil {
 			t.Error("delete payload.row is nil, expected old row data")
+		}
+	})
+}
+
+func TestScenario_WALTransactionMetadata(t *testing.T) {
+	connStr := startPostgres(t)
+
+	// Use a separate table and publication for this scenario.
+	createTable(t, connStr, "wal_tx_orders")
+	createPublication(t, connStr, "pgpipe_wal_tx_orders", "wal_tx_orders")
+
+	capture := newLineCapture()
+	startWALPipelineWithTxMetadata(t, connStr, "pgpipe_wal_tx_orders", stdout.New(capture, testLogger()))
+
+	time.Sleep(3 * time.Second)
+
+	t.Run("transaction metadata present", func(t *testing.T) {
+		// Insert two rows in a single transaction.
+		insertRowsInTx(t, connStr, "wal_tx_orders", []map[string]any{
+			{"item": "alpha"},
+			{"item": "beta"},
+		})
+
+		line1 := capture.waitLine(t, 10*time.Second)
+		line2 := capture.waitLine(t, 10*time.Second)
+
+		var ev1, ev2 event.Event
+		if err := json.Unmarshal([]byte(line1), &ev1); err != nil {
+			t.Fatalf("invalid JSON for event 1: %v", err)
+		}
+		if err := json.Unmarshal([]byte(line2), &ev2); err != nil {
+			t.Fatalf("invalid JSON for event 2: %v", err)
+		}
+
+		// Both events must have transaction metadata.
+		if ev1.Transaction == nil {
+			t.Fatal("event 1 missing transaction metadata")
+		}
+		if ev2.Transaction == nil {
+			t.Fatal("event 2 missing transaction metadata")
+		}
+
+		// Same transaction: xid and commit_time must match.
+		if ev1.Transaction.Xid != ev2.Transaction.Xid {
+			t.Errorf("xid mismatch: event1=%d, event2=%d", ev1.Transaction.Xid, ev2.Transaction.Xid)
+		}
+		if !ev1.Transaction.CommitTime.Equal(ev2.Transaction.CommitTime) {
+			t.Errorf("commit_time mismatch: event1=%v, event2=%v",
+				ev1.Transaction.CommitTime, ev2.Transaction.CommitTime)
+		}
+
+		// Sequence within the transaction.
+		if ev1.Transaction.Seq != 1 {
+			t.Errorf("event 1 seq = %d, want 1", ev1.Transaction.Seq)
+		}
+		if ev2.Transaction.Seq != 2 {
+			t.Errorf("event 2 seq = %d, want 2", ev2.Transaction.Seq)
+		}
+
+		// Xid must be non-zero.
+		if ev1.Transaction.Xid == 0 {
+			t.Error("transaction xid is 0")
+		}
+
+		// CommitTime must be recent (within last minute).
+		if time.Since(ev1.Transaction.CommitTime) > time.Minute {
+			t.Errorf("commit_time too old: %v", ev1.Transaction.CommitTime)
 		}
 	})
 }

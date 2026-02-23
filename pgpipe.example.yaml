@@ -21,6 +21,7 @@ detector:
   backoff_base: 5s
   backoff_cap: 60s
   # publication: pgpipe_orders  # required when type=wal (CREATE PUBLICATION name)
+  # tx_metadata: false          # include transaction metadata in WAL events (xid, commit_time, seq)
 
 webhook:
   url: https://example.com/webhook
