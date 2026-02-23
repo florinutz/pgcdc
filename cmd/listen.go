@@ -13,6 +13,7 @@ import (
 	embeddingadapter "github.com/florinutz/pgcdc/adapter/embedding"
 	execadapter "github.com/florinutz/pgcdc/adapter/exec"
 	fileadapter "github.com/florinutz/pgcdc/adapter/file"
+	icebergadapter "github.com/florinutz/pgcdc/adapter/iceberg"
 	"github.com/florinutz/pgcdc/adapter/pgtable"
 	"github.com/florinutz/pgcdc/adapter/sse"
 	"github.com/florinutz/pgcdc/adapter/stdout"
@@ -82,6 +83,29 @@ func init() {
 	f.String("embedding-table", "", "destination pgvector table (default: pgcdc_embeddings)")
 	f.String("embedding-db-url", "", "PostgreSQL URL for pgvector table (default: same as --db)")
 	f.Int("embedding-dimension", 0, "vector dimension (default: 1536)")
+
+	// Iceberg adapter flags.
+	f.String("iceberg-catalog", "hadoop", "Iceberg catalog type: hadoop, rest, sql")
+	f.String("iceberg-catalog-uri", "", "REST catalog URL")
+	f.String("iceberg-warehouse", "", "Iceberg warehouse path (s3://... or local path)")
+	f.String("iceberg-namespace", "pgcdc", "Iceberg namespace (dot-separated)")
+	f.String("iceberg-table", "", "Iceberg table name")
+	f.String("iceberg-mode", "append", "Iceberg write mode: append or upsert")
+	f.String("iceberg-schema", "raw", "Iceberg schema mode: auto or raw")
+	f.StringSlice("iceberg-pk", nil, "primary key columns for upsert mode (repeatable)")
+	f.Duration("iceberg-flush-interval", 0, "Iceberg flush interval (default 1m)")
+	f.Int("iceberg-flush-size", 0, "Iceberg flush size in events (default 10000)")
+
+	mustBindPFlag("iceberg.catalog_type", f.Lookup("iceberg-catalog"))
+	mustBindPFlag("iceberg.catalog_uri", f.Lookup("iceberg-catalog-uri"))
+	mustBindPFlag("iceberg.warehouse", f.Lookup("iceberg-warehouse"))
+	mustBindPFlag("iceberg.namespace", f.Lookup("iceberg-namespace"))
+	mustBindPFlag("iceberg.table", f.Lookup("iceberg-table"))
+	mustBindPFlag("iceberg.mode", f.Lookup("iceberg-mode"))
+	mustBindPFlag("iceberg.schema_mode", f.Lookup("iceberg-schema"))
+	mustBindPFlag("iceberg.primary_keys", f.Lookup("iceberg-pk"))
+	mustBindPFlag("iceberg.flush_interval", f.Lookup("iceberg-flush-interval"))
+	mustBindPFlag("iceberg.flush_size", f.Lookup("iceberg-flush-size"))
 
 	mustBindPFlag("embedding.api_url", f.Lookup("embedding-api-url"))
 	mustBindPFlag("embedding.api_key", f.Lookup("embedding-api-key"))
@@ -158,6 +182,7 @@ func runListen(cmd *cobra.Command, args []string) error {
 	hasPGTable := false
 	hasWS := false
 	hasEmbedding := false
+	hasIceberg := false
 	for _, name := range cfg.Adapters {
 		switch name {
 		case "stdout":
@@ -176,8 +201,10 @@ func runListen(cmd *cobra.Command, args []string) error {
 			hasWS = true
 		case "embedding":
 			hasEmbedding = true
+		case "iceberg":
+			hasIceberg = true
 		default:
-			return fmt.Errorf("unknown adapter: %q (expected stdout, webhook, sse, file, exec, pg_table, ws, or embedding)", name)
+			return fmt.Errorf("unknown adapter: %q (expected stdout, webhook, sse, file, exec, pg_table, ws, embedding, or iceberg)", name)
 		}
 	}
 	if hasWebhook && cfg.Webhook.URL == "" {
@@ -197,6 +224,15 @@ func runListen(cmd *cobra.Command, args []string) error {
 	}
 	if hasEmbedding && len(cfg.Embedding.Columns) == 0 {
 		return fmt.Errorf("embedding adapter requires at least one column; use --embedding-columns or set embedding.columns in config")
+	}
+	if hasIceberg && cfg.Iceberg.Warehouse == "" {
+		return fmt.Errorf("iceberg adapter requires a warehouse; use --iceberg-warehouse or set iceberg.warehouse in config")
+	}
+	if hasIceberg && cfg.Iceberg.Table == "" {
+		return fmt.Errorf("iceberg adapter requires a table name; use --iceberg-table or set iceberg.table in config")
+	}
+	if hasIceberg && cfg.Iceberg.Mode == "upsert" && len(cfg.Iceberg.PrimaryKeys) == 0 {
+		return fmt.Errorf("iceberg upsert mode requires primary keys; use --iceberg-pk or set iceberg.primary_keys in config")
 	}
 
 	logger := slog.Default()
@@ -278,6 +314,22 @@ func runListen(cmd *cobra.Command, args []string) error {
 				cfg.Embedding.Timeout,
 				cfg.Embedding.BackoffBase,
 				cfg.Embedding.BackoffCap,
+				logger,
+			)))
+		case "iceberg":
+			opts = append(opts, pgcdc.WithAdapter(icebergadapter.New(
+				cfg.Iceberg.CatalogType,
+				cfg.Iceberg.CatalogURI,
+				cfg.Iceberg.Warehouse,
+				cfg.Iceberg.Namespace,
+				cfg.Iceberg.Table,
+				cfg.Iceberg.Mode,
+				cfg.Iceberg.SchemaMode,
+				cfg.Iceberg.PrimaryKeys,
+				cfg.Iceberg.FlushInterval,
+				cfg.Iceberg.FlushSize,
+				cfg.Iceberg.BackoffBase,
+				cfg.Iceberg.BackoffCap,
 				logger,
 			)))
 		}

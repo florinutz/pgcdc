@@ -20,6 +20,7 @@ type Config struct {
 	Detector        DetectorConfig  `mapstructure:"detector"`
 	Snapshot        SnapshotConfig  `mapstructure:"snapshot"`
 	Embedding       EmbeddingConfig `mapstructure:"embedding"`
+	Iceberg         IcebergConfig   `mapstructure:"iceberg"`
 }
 
 type BusConfig struct {
@@ -88,6 +89,21 @@ type EmbeddingConfig struct {
 	BackoffCap  time.Duration `mapstructure:"backoff_cap"`
 }
 
+type IcebergConfig struct {
+	CatalogType   string        `mapstructure:"catalog_type"`
+	CatalogURI    string        `mapstructure:"catalog_uri"`
+	Warehouse     string        `mapstructure:"warehouse"`
+	Namespace     string        `mapstructure:"namespace"`
+	Table         string        `mapstructure:"table"`
+	Mode          string        `mapstructure:"mode"`
+	SchemaMode    string        `mapstructure:"schema_mode"`
+	PrimaryKeys   []string      `mapstructure:"primary_keys"`
+	FlushInterval time.Duration `mapstructure:"flush_interval"`
+	FlushSize     int           `mapstructure:"flush_size"`
+	BackoffBase   time.Duration `mapstructure:"backoff_base"`
+	BackoffCap    time.Duration `mapstructure:"backoff_cap"`
+}
+
 type DetectorConfig struct {
 	Type        string        `mapstructure:"type"`
 	BackoffBase time.Duration `mapstructure:"backoff_base"`
@@ -144,6 +160,16 @@ func Default() Config {
 			Type:        "listen_notify",
 			BackoffBase: 5 * time.Second,
 			BackoffCap:  60 * time.Second,
+		},
+		Iceberg: IcebergConfig{
+			CatalogType:   "hadoop",
+			Namespace:     "pgcdc",
+			Mode:          "append",
+			SchemaMode:    "raw",
+			FlushInterval: 1 * time.Minute,
+			FlushSize:     10000,
+			BackoffBase:   5 * time.Second,
+			BackoffCap:    60 * time.Second,
 		},
 		Embedding: EmbeddingConfig{
 			Model:       "text-embedding-3-small",

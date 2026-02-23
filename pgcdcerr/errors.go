@@ -75,3 +75,17 @@ func (e *EmbeddingDeliveryError) Error() string {
 func (e *EmbeddingDeliveryError) Unwrap() error {
 	return e.Err
 }
+
+// IcebergFlushError indicates that the Iceberg adapter failed to flush after consecutive attempts.
+type IcebergFlushError struct {
+	Attempts int
+	Err      error
+}
+
+func (e *IcebergFlushError) Error() string {
+	return fmt.Sprintf("iceberg flush failed after %d consecutive attempts: %v", e.Attempts, e.Err)
+}
+
+func (e *IcebergFlushError) Unwrap() error {
+	return e.Err
+}

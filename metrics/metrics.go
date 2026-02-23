@@ -88,4 +88,36 @@ var (
 		Name: "pgcdc_embedding_tokens_total",
 		Help: "Total number of tokens consumed by the embedding API.",
 	})
+
+	IcebergFlushes = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "pgcdc_iceberg_flushes_total",
+		Help: "Total number of Iceberg flush operations.",
+	}, []string{"mode"})
+
+	IcebergFlushSize = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "pgcdc_iceberg_flush_size",
+		Help:    "Number of events per Iceberg flush.",
+		Buckets: []float64{10, 100, 500, 1000, 5000, 10000, 50000},
+	})
+
+	IcebergFlushDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "pgcdc_iceberg_flush_duration_seconds",
+		Help:    "Duration of Iceberg flush operations.",
+		Buckets: prometheus.DefBuckets,
+	})
+
+	IcebergBufferSize = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "pgcdc_iceberg_buffer_size",
+		Help: "Current number of events buffered for Iceberg flush.",
+	})
+
+	IcebergDataFilesWritten = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "pgcdc_iceberg_data_files_written_total",
+		Help: "Total number of Parquet data files written.",
+	})
+
+	IcebergBytesWritten = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "pgcdc_iceberg_bytes_written_total",
+		Help: "Total bytes written to Iceberg storage.",
+	})
 )

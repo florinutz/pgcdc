@@ -21,6 +21,7 @@ Each scenario = one file, one user journey, happy path + one critical failure.
 | 15 | Snapshot | `snapshot_test.go` | Snapshot exports 100 existing rows as SNAPSHOT events through stdout adapter | Non-existent table returns clear error |
 | 16 | Snapshot-first | `snapshot_first_test.go` | WAL detector exports existing rows as SNAPSHOT events then transitions to live WAL streaming with zero gap | `--snapshot-first` without WAL detector or table errors cleanly (covered in CLI validation) |
 | 17 | Embedding delivery | `embedding_test.go` | NOTIFY → detector → bus → embedding adapter calls OpenAI-compatible API and UPSERTs vector into pgvector table; UPDATE re-embeds; DELETE removes vector | API returns 500 twice then succeeds; adapter retries and event eventually delivered |
+| 18 | Iceberg append | `iceberg_test.go` | NOTIFY → detector → bus → iceberg adapter buffers events, flushes to Parquet data files with Avro manifests and Iceberg v2 metadata.json via hadoop catalog | Write failure (read-only dir): adapter retries on next flush and events eventually written |
 
 ## Adding a new scenario
 
