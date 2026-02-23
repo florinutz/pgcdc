@@ -39,8 +39,10 @@ type SSEConfig struct {
 }
 
 type DetectorConfig struct {
+	Type        string        `mapstructure:"type"`
 	BackoffBase time.Duration `mapstructure:"backoff_base"`
 	BackoffCap  time.Duration `mapstructure:"backoff_cap"`
+	Publication string        `mapstructure:"publication"`
 }
 
 func Default() Config {
@@ -68,6 +70,7 @@ func Default() Config {
 			IdleTimeout:       120 * time.Second,
 		},
 		Detector: DetectorConfig{
+			Type:        "listen_notify",
 			BackoffBase: 5 * time.Second,
 			BackoffCap:  60 * time.Second,
 		},

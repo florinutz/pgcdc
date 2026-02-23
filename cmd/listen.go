@@ -13,7 +13,9 @@ import (
 	"github.com/florinutz/pgpipe/adapter/sse"
 	"github.com/florinutz/pgpipe/adapter/stdout"
 	"github.com/florinutz/pgpipe/adapter/webhook"
+	"github.com/florinutz/pgpipe/detector"
 	"github.com/florinutz/pgpipe/detector/listennotify"
+	"github.com/florinutz/pgpipe/detector/walreplication"
 	"github.com/florinutz/pgpipe/internal/config"
 	"github.com/florinutz/pgpipe/internal/server"
 	"github.com/spf13/cobra"
@@ -41,6 +43,8 @@ func init() {
 	f.Int("retries", 5, "webhook max retries")
 	f.String("signing-key", "", "HMAC signing key for webhook")
 	f.String("metrics-addr", "", "standalone metrics/health server address (e.g. :9090)")
+	f.String("detector", "listen_notify", "detector type: listen_notify or wal")
+	f.String("publication", "", "PostgreSQL publication name (required for --detector wal)")
 
 	mustBindPFlag("channels", f.Lookup("channel"))
 	mustBindPFlag("adapters", f.Lookup("adapter"))
@@ -50,6 +54,8 @@ func init() {
 	mustBindPFlag("webhook.max_retries", f.Lookup("retries"))
 	mustBindPFlag("webhook.signing_key", f.Lookup("signing-key"))
 	mustBindPFlag("metrics_addr", f.Lookup("metrics-addr"))
+	mustBindPFlag("detector.type", f.Lookup("detector"))
+	mustBindPFlag("detector.publication", f.Lookup("publication"))
 }
 
 func runListen(cmd *cobra.Command, args []string) error {
@@ -60,11 +66,14 @@ func runListen(cmd *cobra.Command, args []string) error {
 	}
 
 	// Validation.
-	if len(cfg.Channels) == 0 {
-		return fmt.Errorf("no channels specified; use --channel or set channels in config file")
-	}
 	if cfg.DatabaseURL == "" {
 		return fmt.Errorf("no database URL specified; use --db, set database_url in config, or export PGPIPE_DATABASE_URL")
+	}
+	if cfg.Detector.Type != "wal" && len(cfg.Channels) == 0 {
+		return fmt.Errorf("no channels specified; use --channel or set channels in config file")
+	}
+	if cfg.Detector.Type == "wal" && cfg.Detector.Publication == "" {
+		return fmt.Errorf("WAL detector requires a publication; use --publication or set detector.publication in config")
 	}
 
 	// Validate adapters and check webhook requirement early.
@@ -93,7 +102,15 @@ func runListen(cmd *cobra.Command, args []string) error {
 	defer stop()
 
 	// Create detector.
-	det := listennotify.New(cfg.DatabaseURL, cfg.Channels, cfg.Detector.BackoffBase, cfg.Detector.BackoffCap, logger)
+	var det detector.Detector
+	switch cfg.Detector.Type {
+	case "listen_notify", "":
+		det = listennotify.New(cfg.DatabaseURL, cfg.Channels, cfg.Detector.BackoffBase, cfg.Detector.BackoffCap, logger)
+	case "wal":
+		det = walreplication.New(cfg.DatabaseURL, cfg.Detector.Publication, cfg.Detector.BackoffBase, cfg.Detector.BackoffCap, logger)
+	default:
+		return fmt.Errorf("unknown detector type: %q (expected listen_notify or wal)", cfg.Detector.Type)
+	}
 
 	// Build pipeline options.
 	opts := []pgpipe.Option{

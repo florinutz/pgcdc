@@ -4,14 +4,14 @@
 
 Lightweight PostgreSQL Change Data Capture. No Kafka. No NATS. Just your PG and a single binary.
 
-pgpipe captures changes from PostgreSQL via LISTEN/NOTIFY and delivers them to webhooks, SSE streams, or stdout -- with zero external dependencies beyond PostgreSQL itself.
+pgpipe captures changes from PostgreSQL via LISTEN/NOTIFY or WAL logical replication and delivers them to webhooks, SSE streams, or stdout -- with zero external dependencies beyond PostgreSQL itself.
 
 ```
 PostgreSQL                    pgpipe (single binary)
-┌──────────┐    LISTEN    ┌────────────┐     ┌───────────┐
-│  Table    │────────────▶│  Detector   │────▶│   Bus     │
-│  Trigger  │  NOTIFY     │ (reconnect) │     │ (fan-out) │
-└──────────┘             └────────────┘     └─────┬─────┘
+┌──────────┐    LISTEN   ┌─────────────┐     ┌───────────┐
+│  Table   │────────────▶│  Detector   │────▶│   Bus     │
+│  Trigger │  NOTIFY     │ (reconnect) │     │ (fan-out) │
+└──────────┘             └─────────────┘     └─────┬─────┘
                                                    │
                                     ┌──────────────┼──────────────┐
                                     ▼              ▼              ▼
@@ -84,6 +84,25 @@ pgpipe listen -c pgpipe:orders -a sse --sse-addr :8080 --db postgres://...
 # multiple adapters at once
 pgpipe listen -c pgpipe:orders -a stdout -a webhook -u https://example.com/hook --db postgres://...
 ```
+
+### Alternative: WAL Logical Replication
+
+No triggers needed. Captures changes directly from the PostgreSQL write-ahead log.
+
+**Prerequisites:** PostgreSQL must have `wal_level=logical` (check with `SHOW wal_level;`).
+
+```bash
+# 1. Generate publication SQL
+pgpipe init --table orders --detector wal
+
+# 2. Apply it
+pgpipe init --table orders --detector wal | psql mydb
+
+# 3. Start listening via WAL
+pgpipe listen --detector wal --publication pgpipe_orders --db postgres://localhost:5432/mydb
+```
+
+WAL replication events use the same format as LISTEN/NOTIFY (`channel: pgpipe:<table>`, same payload structure), so all adapters and SSE filtering work identically regardless of detector type.
 
 ## Configuration
 
@@ -203,10 +222,14 @@ pgpipe listen [flags]
       --db string            PostgreSQL connection string (env: PGPIPE_DATABASE_URL)
       --retries int          Webhook max retries (default 5)
       --signing-key string   HMAC signing key for webhook
+      --detector string      Detector type: listen_notify or wal (default "listen_notify")
+      --publication string   PostgreSQL publication name (required for --detector wal)
 
 pgpipe init [flags]
       --table string         Table name (required)
       --channel string       Channel name (default: pgpipe:<table>)
+      --detector string      Detector type: listen_notify or wal (default "listen_notify")
+      --publication string   Publication name for WAL (default: pgpipe_<table>)
 
 pgpipe version
 ```
@@ -250,7 +273,7 @@ make clean          # remove build artifacts
 
 pgpipe is built around three core abstractions:
 
-- **Detector** -- sources of change events (LISTEN/NOTIFY today, WAL replication in v2)
+- **Detector** -- sources of change events (LISTEN/NOTIFY or WAL logical replication)
 - **Bus** -- fans out events from detectors to adapters via buffered Go channels
 - **Adapter** -- delivers events to destinations (stdout, webhook, SSE)
 

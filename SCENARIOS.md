@@ -12,6 +12,7 @@ Each scenario = one file, one user journey, happy path + one critical failure.
 | 6 | CLI validation | `cli_validation_test.go` | `pgpipe listen` errors on missing --db, missing --channel, unknown adapter, webhook without --url | N/A (all failure paths) |
 | 7 | Trigger SQL generation | `trigger_sql_test.go` | `pgpipe init --table orders` outputs valid SQL that can be executed against PG | Invalid table name rejected, invalid channel name rejected |
 | 8 | Health endpoint | `health_endpoint_test.go` | GET /healthz returns 200 + `{"status":"ok"}` when SSE server is running | CORS preflight returns correct headers |
+| 9 | WAL replication | `wal_replication_test.go` | WAL logical replication captures INSERT/UPDATE/DELETE without triggers, events match LISTEN/NOTIFY format | UPDATE includes old row, DELETE includes deleted row |
 
 ## Adding a new scenario
 

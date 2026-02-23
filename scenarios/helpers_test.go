@@ -24,6 +24,7 @@ import (
 	"github.com/florinutz/pgpipe/adapter"
 	"github.com/florinutz/pgpipe/bus"
 	"github.com/florinutz/pgpipe/detector/listennotify"
+	"github.com/florinutz/pgpipe/detector/walreplication"
 	"github.com/jackc/pgx/v5"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -48,6 +49,12 @@ func TestMain(m *testing.M) {
 			"POSTGRES_USER":     "pgpipe",
 			"POSTGRES_PASSWORD": "pgpipe",
 			"POSTGRES_DB":       "pgpipe_test",
+		},
+		Cmd: []string{
+			"postgres",
+			"-c", "wal_level=logical",
+			"-c", "max_replication_slots=4",
+			"-c", "max_wal_senders=4",
 		},
 		WaitingFor: wait.ForLog("database system is ready to accept connections").WithOccurrence(2),
 	}
@@ -384,6 +391,114 @@ func startPipeline(t *testing.T, connStr string, channels []string, adapters ...
 	ctx, cancel := context.WithCancel(context.Background())
 
 	det := listennotify.New(connStr, channels, 0, 0, logger)
+	b := bus.New(64, logger)
+
+	g, gCtx := errgroup.WithContext(ctx)
+	g.Go(func() error { return b.Start(gCtx) })
+	g.Go(func() error { return det.Start(gCtx, b.Ingest()) })
+
+	for _, a := range adapters {
+		sub, err := b.Subscribe()
+		if err != nil {
+			cancel()
+			t.Fatalf("subscribe %s: %v", a.Name(), err)
+		}
+		a := a
+		g.Go(func() error { return a.Start(gCtx, sub) })
+	}
+
+	t.Cleanup(func() {
+		cancel()
+		g.Wait()
+	})
+}
+
+// ─── WAL replication helpers ────────────────────────────────────────────────
+
+func createTable(t *testing.T, connStr, table string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	conn, err := pgx.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("createTable connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	sql := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (id SERIAL PRIMARY KEY, data JSONB DEFAULT '{}')`, table)
+	if _, err := conn.Exec(ctx, sql); err != nil {
+		t.Fatalf("createTable: %v", err)
+	}
+
+	// Set REPLICA IDENTITY to FULL so UPDATE/DELETE include old row data.
+	identity := fmt.Sprintf(`ALTER TABLE %s REPLICA IDENTITY FULL`, table)
+	if _, err := conn.Exec(ctx, identity); err != nil {
+		t.Fatalf("createTable set replica identity: %v", err)
+	}
+}
+
+func createPublication(t *testing.T, connStr, pubName, table string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	conn, err := pgx.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("createPublication connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	sql := fmt.Sprintf(`CREATE PUBLICATION %s FOR TABLE %s`, pubName, table)
+	if _, err := conn.Exec(ctx, sql); err != nil {
+		t.Fatalf("createPublication: %v", err)
+	}
+}
+
+func updateRow(t *testing.T, connStr, table string, id int, data map[string]any) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := pgx.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("updateRow connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	jsonData, err := json.Marshal(data)
+	if err != nil {
+		t.Fatalf("updateRow marshal: %v", err)
+	}
+	_, err = conn.Exec(ctx, fmt.Sprintf("UPDATE %s SET data = $1 WHERE id = $2", table), jsonData, id)
+	if err != nil {
+		t.Fatalf("updateRow: %v", err)
+	}
+}
+
+func deleteRow(t *testing.T, connStr, table string, id int) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := pgx.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("deleteRow connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	_, err = conn.Exec(ctx, fmt.Sprintf("DELETE FROM %s WHERE id = $1", table), id)
+	if err != nil {
+		t.Fatalf("deleteRow: %v", err)
+	}
+}
+
+// startWALPipeline wires WAL detector -> bus -> adapters and starts them in an errgroup.
+func startWALPipeline(t *testing.T, connStr string, publication string, adapters ...adapter.Adapter) {
+	t.Helper()
+
+	logger := testLogger()
+	ctx, cancel := context.WithCancel(context.Background())
+
+	det := walreplication.New(connStr, publication, 0, 0, logger)
 	b := bus.New(64, logger)
 
 	g, gCtx := errgroup.WithContext(ctx)

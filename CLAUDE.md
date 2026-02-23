@@ -1,6 +1,6 @@
 # pgpipe
 
-PostgreSQL LISTEN/NOTIFY event streaming to webhooks, SSE, and stdout.
+PostgreSQL change data capture (LISTEN/NOTIFY or WAL logical replication) streaming to webhooks, SSE, and stdout.
 
 ## Quick Start
 
@@ -22,7 +22,8 @@ Signal (SIGINT/SIGTERM)
 Context ──> Pipeline (pgpipe.go orchestrates everything)
               |
   Detector ──> Bus (fan-out) ──> Adapter (stdout)
-  (listennotify)    |          ──> Adapter (webhook)
+  (listennotify     |          ──> Adapter (webhook)
+   or walreplication)
                     |          ──> Adapter (SSE broker) ──> HTTP server
                     |
               ingest chan        subscriber chans (one per adapter)
@@ -91,7 +92,7 @@ Context ──> Pipeline (pgpipe.go orchestrates everything)
 
 ## Dependencies
 
-Direct deps (keep minimal): `pgx/v5` (PG driver), `cobra` + `viper` (CLI/config), `chi/v5` (HTTP router), `google/uuid` (UUIDv7), `errgroup` (concurrency), `prometheus/client_golang` (metrics), `testcontainers-go` (test only).
+Direct deps (keep minimal): `pgx/v5` (PG driver), `pglogrepl` (WAL logical replication protocol), `cobra` + `viper` (CLI/config), `chi/v5` (HTTP router), `google/uuid` (UUIDv7), `errgroup` (concurrency), `prometheus/client_golang` (metrics), `testcontainers-go` (test only).
 
 ## Testing
 
@@ -172,6 +173,7 @@ adapter/        Output adapter interface + implementations
 bus/            Event fan-out
 detector/       Change detection interface + implementations
   listennotify/ PostgreSQL LISTEN/NOTIFY
+  walreplication/ PostgreSQL WAL logical replication
 event/          Event model
 health/         Component health checker
 metrics/        Prometheus metrics definitions

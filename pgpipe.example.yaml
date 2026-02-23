@@ -17,8 +17,10 @@ bus:
   buffer_size: 1024
 
 detector:
+  type: listen_notify   # "listen_notify" (default) or "wal"
   backoff_base: 5s
   backoff_cap: 60s
+  # publication: pgpipe_orders  # required when type=wal (CREATE PUBLICATION name)
 
 webhook:
   url: https://example.com/webhook
