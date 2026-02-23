@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/florinutz/pgpipe/internal/pgpipeerr"
+	"github.com/florinutz/pgpipe/pgpipeerr"
 )
 
 func TestErrBusClosed(t *testing.T) {

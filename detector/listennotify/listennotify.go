@@ -9,8 +9,8 @@ import (
 	"math/rand/v2"
 	"time"
 
-	"github.com/florinutz/pgpipe/internal/event"
-	"github.com/florinutz/pgpipe/internal/pgpipeerr"
+	"github.com/florinutz/pgpipe/event"
+	"github.com/florinutz/pgpipe/pgpipeerr"
 	"github.com/jackc/pgx/v5"
 )
 

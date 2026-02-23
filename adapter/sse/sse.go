@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/florinutz/pgpipe/internal/event"
-	"github.com/florinutz/pgpipe/internal/metrics"
+	"github.com/florinutz/pgpipe/event"
+	"github.com/florinutz/pgpipe/metrics"
 )
 
 const (

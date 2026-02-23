@@ -2,10 +2,10 @@ Add a new output adapter to pgpipe.
 
 ## Steps
 
-1. Read the adapter interface: `internal/adapter/adapter.go`
-2. Read the stdout adapter as a reference implementation: `internal/adapter/stdout/` (simplest adapter)
-3. Read the webhook adapter for a more complex example: `internal/adapter/webhook/`
-4. Create a new package: `internal/adapter/$ARGUMENTS/`
+1. Read the adapter interface: `adapter/adapter.go`
+2. Read the stdout adapter as a reference implementation: `adapter/stdout/` (simplest adapter)
+3. Read the webhook adapter for a more complex example: `adapter/webhook/`
+4. Create a new package: `adapter/$ARGUMENTS/`
 5. Implement the `adapter.Adapter` interface:
    - `Start(ctx context.Context, events <-chan event.Event) error` — consume events until ctx cancelled
    - `Name() string` — return adapter name

@@ -5,7 +5,7 @@ LDFLAGS := -s -w -X github.com/florinutz/pgpipe/cmd.Version=$(VERSION)
 
 ## build: Compile the binary
 build:
-	go build -ldflags "$(LDFLAGS)" -o pgpipe .
+	go build -ldflags "$(LDFLAGS)" -o pgpipe ./cmd/pgpipe
 
 ## test: Run unit tests only (fast, no Docker)
 test:

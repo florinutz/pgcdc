@@ -21,9 +21,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/florinutz/pgpipe/internal/adapter"
-	"github.com/florinutz/pgpipe/internal/bus"
-	"github.com/florinutz/pgpipe/internal/detector/listennotify"
+	"github.com/florinutz/pgpipe/adapter"
+	"github.com/florinutz/pgpipe/bus"
+	"github.com/florinutz/pgpipe/detector/listennotify"
 	"github.com/jackc/pgx/v5"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -92,7 +92,7 @@ func TestMain(m *testing.M) {
 	}
 
 	pgpipeBinary = filepath.Join(tmpDir, "pgpipe")
-	buildCmd := exec.Command("go", "build", "-o", pgpipeBinary, "github.com/florinutz/pgpipe")
+	buildCmd := exec.Command("go", "build", "-o", pgpipeBinary, "github.com/florinutz/pgpipe/cmd/pgpipe")
 	buildCmd.Stderr = os.Stderr
 	if err := buildCmd.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "build pgpipe: %v\n", err)

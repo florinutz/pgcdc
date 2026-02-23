@@ -5,9 +5,9 @@ import (
 	"log/slog"
 	"sync"
 
-	"github.com/florinutz/pgpipe/internal/event"
-	"github.com/florinutz/pgpipe/internal/metrics"
-	"github.com/florinutz/pgpipe/internal/pgpipeerr"
+	"github.com/florinutz/pgpipe/event"
+	"github.com/florinutz/pgpipe/metrics"
+	"github.com/florinutz/pgpipe/pgpipeerr"
 )
 
 const defaultBufferSize = 1024

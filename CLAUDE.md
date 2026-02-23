@@ -19,7 +19,7 @@ docker compose up -d
 Signal (SIGINT/SIGTERM)
   |
   v
-Context ──> errgroup (cmd/listen.go wires everything)
+Context ──> Pipeline (pgpipe.go orchestrates everything)
               |
   Detector ──> Bus (fan-out) ──> Adapter (stdout)
   (listennotify)    |          ──> Adapter (webhook)
@@ -34,19 +34,19 @@ Context ──> errgroup (cmd/listen.go wires everything)
 - **Concurrency**: `errgroup` manages all goroutines. One context cancellation tears everything down.
 - **Backpressure**: Bus uses non-blocking sends. If a subscriber channel is full, the event is dropped and a warning is logged. No adapter can block the pipeline.
 - **Shutdown**: Signal cancels root context. Bus closes subscriber channels. HTTP server gets `shutdown_timeout` (default 5s) `context.WithTimeout` for graceful drain.
-- **Wiring**: `cmd/listen.go` is the single place where detector, bus, adapters, health checker, and HTTP server are assembled.
+- **Wiring**: `pgpipe.go` provides the reusable `Pipeline` type (detector + bus + adapters). `cmd/listen.go` adds CLI-specific HTTP servers on top.
 - **Observability**: Prometheus metrics exposed at `/metrics`. Rich health check at `/healthz` returns per-component status (200 when all up, 503 when any down). Standalone metrics server via `--metrics-addr`.
-- **Error types**: `internal/pgpipeerr/` provides typed errors (`ErrBusClosed`, `WebhookDeliveryError`, `DetectorDisconnectedError`) for `errors.Is`/`errors.As` matching.
+- **Error types**: `pgpipeerr/` provides typed errors (`ErrBusClosed`, `WebhookDeliveryError`, `DetectorDisconnectedError`) for `errors.Is`/`errors.As` matching.
 
 ## Code Conventions
 
-- **Error wrapping**: `fmt.Errorf("verb: %w", err)` — verb describes the failed action (`connect:`, `listen:`, `subscribe:`). Use typed errors from `internal/pgpipeerr/` for errors that callers need to branch on.
+- **Error wrapping**: `fmt.Errorf("verb: %w", err)` — verb describes the failed action (`connect:`, `listen:`, `subscribe:`). Use typed errors from `pgpipeerr/` for errors that callers need to branch on.
 - **Logging**: `log/slog` only. Child loggers via `logger.With("component", name)`. Never `log` or `fmt.Printf`.
 - **Constructors**: `New()` on every type. Always handle nil logger: `if logger == nil { logger = slog.Default() }`. Duration params default to sensible values when zero.
 - **Channel direction**: Always `chan<-` or `<-chan` in function signatures. The bus owns channel lifecycle.
 - **Context**: First param on all blocking functions. Use `context.WithTimeout` for cleanup operations.
 - **Naming**: Short package names (`bus`, `sse`, `event`). Types named for what they are (`Detector`, `Adapter`, `Bus`).
-- **No global state** except logger setup in `cmd/root.go` and Prometheus metrics registration in `internal/metrics/`.
+- **No global state** except logger setup in `cmd/root.go` and Prometheus metrics registration in `metrics/`.
 - **Config**: All config flows through `config.Config` struct. Viper handles CLI flags, env vars, and YAML file. All timeouts and backoff values are configurable — no hardcoded magic numbers.
 - **Identifiers in SQL**: Use `pgx.Identifier{name}.Sanitize()` for table/channel names. Parameterized queries for values.
 
@@ -55,8 +55,8 @@ Context ──> errgroup (cmd/listen.go wires everything)
 ### New adapter
 
 1. Implement `adapter.Adapter` interface (`Start(ctx, <-chan event.Event) error`, `Name() string`)
-2. Create `internal/adapter/<name>/` package
-3. Add switch case in `cmd/listen.go` adapter loop (~line 120)
+2. Create `adapter/<name>/` package
+3. Add switch case in `cmd/listen.go` adapter loop
 4. Add config struct in `internal/config/config.go`
 5. Add CLI flags in `cmd/listen.go` `init()`
 6. Add metrics instrumentation (`metrics.EventsDelivered.WithLabelValues("<name>").Inc()`)
@@ -65,7 +65,7 @@ Context ──> errgroup (cmd/listen.go wires everything)
 ### New detector
 
 1. Implement `detector.Detector` interface (`Start(ctx, chan<- event.Event) error`, `Name() string`)
-2. Create `internal/detector/<name>/` package
+2. Create `detector/<name>/` package
 3. **MUST NOT** close the events channel — the bus owns its lifecycle
 4. **Use `pgx.Connect`** not pool — LISTEN requires a dedicated connection
 5. Add selection logic in `cmd/listen.go`
@@ -101,7 +101,7 @@ Tests are the steering wheel for AI-assisted development. The agent writes code 
 
 ### Two surfaces
 
-- **Unit tests** (`internal/*_test.go`): Pure algorithmic logic only. No I/O, no network, no goroutines. Fast.
+- **Unit tests** (`*_test.go` in package dirs): Pure algorithmic logic only. No I/O, no network, no goroutines. Fast.
 - **Scenario tests** (`scenarios/*_test.go`): Full pipeline tests with real Postgres (testcontainers). One file per user journey. The primary regression barrier.
 
 ### Makefile targets
@@ -129,7 +129,7 @@ Only for pure functions with no side effects: backoff calculations, payload pars
 
 When you add a new user journey or a new way the system can fail at a boundary. Check SCENARIOS.md first. If an existing scenario covers the behavior, add a subtest to it. If it's a genuinely new journey, create a new file and register it.
 
-Before adding any test, run `go test -cover ./scenarios/` and `go test -cover ./internal/...` to establish a baseline. After adding the test, verify coverage meaningfully increased. If it didn't, the test is redundant — don't add it.
+Before adding any test, run `go test -cover ./scenarios/` and `go test -cover ./...` to establish a baseline. After adding the test, verify coverage meaningfully increased. If it didn't, the test is redundant — don't add it.
 
 ### When to delete a test
 
@@ -162,16 +162,22 @@ Target: ~8-20 scenarios for a project this size. If approaching 20, consolidate 
 ## Code Organization
 
 ```
+pgpipe.go       Pipeline type (library entry point)
 cmd/            CLI commands (cobra)
-internal/       Core packages
-  adapter/      Output adapters (stdout, webhook, sse)
-  bus/          Event fan-out
-  config/       Configuration structs
-  detector/     Change detection (listennotify)
-  event/        Event model
-  health/       Component health checker
-  metrics/      Prometheus metrics definitions
-  pgpipeerr/    Typed error types
+  pgpipe/       Binary entry point (main.go)
+adapter/        Output adapter interface + implementations
+  stdout/       JSON-lines to io.Writer
+  webhook/      HTTP POST with retries
+  sse/          Server-Sent Events broker
+bus/            Event fan-out
+detector/       Change detection interface + implementations
+  listennotify/ PostgreSQL LISTEN/NOTIFY
+event/          Event model
+health/         Component health checker
+metrics/        Prometheus metrics definitions
+pgpipeerr/      Typed error types
+internal/       CLI-specific internals (not importable)
+  config/       Viper-based configuration structs
   server/       HTTP server for SSE + metrics + health
 scenarios/      Integration/scenario tests (testcontainers)
 testutil/       Test utilities
@@ -179,14 +185,15 @@ testutil/       Test utilities
 
 ## Key Files
 
-- `cmd/listen.go` — Pipeline wiring (detector + bus + adapters + health + HTTP server)
-- `internal/adapter/adapter.go` — Adapter interface
-- `internal/detector/detector.go` — Detector interface
-- `internal/bus/bus.go` — Fan-out with non-blocking sends
-- `internal/config/config.go` — All config structs + defaults
-- `internal/event/event.go` — Event model (UUIDv7, JSON payload)
-- `internal/health/health.go` — Component health checker
-- `internal/metrics/metrics.go` — Prometheus metric definitions
-- `internal/pgpipeerr/errors.go` — Typed errors (ErrBusClosed, WebhookDeliveryError, DetectorDisconnectedError)
-- `internal/server/server.go` — HTTP server with SSE, metrics, and health endpoints
+- `pgpipe.go` — Pipeline type, options, Run method (library entry point)
+- `cmd/listen.go` — CLI wiring (uses Pipeline + CLI-specific HTTP servers)
+- `adapter/adapter.go` — Adapter interface
+- `detector/detector.go` — Detector interface
+- `bus/bus.go` — Fan-out with non-blocking sends
+- `internal/config/config.go` — All config structs + defaults (CLI-only)
+- `event/event.go` — Event model (UUIDv7, JSON payload)
+- `health/health.go` — Component health checker
+- `metrics/metrics.go` — Prometheus metric definitions
+- `pgpipeerr/errors.go` — Typed errors (ErrBusClosed, WebhookDeliveryError, DetectorDisconnectedError)
+- `internal/server/server.go` — HTTP server with SSE, metrics, and health endpoints (CLI-only)
 - `scenarios/helpers_test.go` — Shared test infrastructure (PG container, pipeline wiring)

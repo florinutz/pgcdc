@@ -4,8 +4,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/florinutz/pgpipe/internal/adapter/sse"
-	"github.com/florinutz/pgpipe/internal/health"
+	"github.com/florinutz/pgpipe/adapter/sse"
+	"github.com/florinutz/pgpipe/health"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/prometheus/client_golang/prometheus/promhttp"

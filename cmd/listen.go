@@ -9,14 +9,12 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/florinutz/pgpipe/internal/adapter"
-	"github.com/florinutz/pgpipe/internal/adapter/sse"
-	"github.com/florinutz/pgpipe/internal/adapter/stdout"
-	"github.com/florinutz/pgpipe/internal/adapter/webhook"
-	"github.com/florinutz/pgpipe/internal/bus"
+	"github.com/florinutz/pgpipe"
+	"github.com/florinutz/pgpipe/adapter/sse"
+	"github.com/florinutz/pgpipe/adapter/stdout"
+	"github.com/florinutz/pgpipe/adapter/webhook"
+	"github.com/florinutz/pgpipe/detector/listennotify"
 	"github.com/florinutz/pgpipe/internal/config"
-	"github.com/florinutz/pgpipe/internal/detector/listennotify"
-	"github.com/florinutz/pgpipe/internal/health"
 	"github.com/florinutz/pgpipe/internal/server"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -90,11 +88,6 @@ func runListen(cmd *cobra.Command, args []string) error {
 
 	logger := slog.Default()
 
-	// Health checker — components register and report status.
-	checker := health.NewChecker()
-	checker.Register("detector")
-	checker.Register("bus")
-
 	// Root context: cancelled on SIGINT or SIGTERM.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -102,19 +95,20 @@ func runListen(cmd *cobra.Command, args []string) error {
 	// Create detector.
 	det := listennotify.New(cfg.DatabaseURL, cfg.Channels, cfg.Detector.BackoffBase, cfg.Detector.BackoffCap, logger)
 
-	// Create bus.
-	b := bus.New(cfg.Bus.BufferSize, logger)
+	// Build pipeline options.
+	opts := []pgpipe.Option{
+		pgpipe.WithBusBuffer(cfg.Bus.BufferSize),
+		pgpipe.WithLogger(logger),
+	}
 
-	// Create adapters and subscribe each to the bus.
+	// Create adapters.
 	var sseBroker *sse.Broker
-	adapters := make([]adapter.Adapter, 0, len(cfg.Adapters))
-
 	for _, name := range cfg.Adapters {
 		switch name {
 		case "stdout":
-			adapters = append(adapters, stdout.New(nil, logger))
+			opts = append(opts, pgpipe.WithAdapter(stdout.New(nil, logger)))
 		case "webhook":
-			adapters = append(adapters, webhook.New(
+			opts = append(opts, pgpipe.WithAdapter(webhook.New(
 				cfg.Webhook.URL,
 				cfg.Webhook.Headers,
 				cfg.Webhook.SigningKey,
@@ -123,51 +117,27 @@ func runListen(cmd *cobra.Command, args []string) error {
 				cfg.Webhook.BackoffBase,
 				cfg.Webhook.BackoffCap,
 				logger,
-			))
+			)))
 		case "sse":
 			sseBroker = sse.New(cfg.Bus.BufferSize, cfg.SSE.HeartbeatInterval, logger)
-			adapters = append(adapters, sseBroker)
+			opts = append(opts, pgpipe.WithAdapter(sseBroker))
 		}
 	}
 
-	// Start everything in an errgroup.
+	// Build pipeline.
+	p := pgpipe.NewPipeline(det, opts...)
+
+	// Use an errgroup to run the pipeline alongside CLI-specific HTTP servers.
 	g, gCtx := errgroup.WithContext(ctx)
 
-	// Start the bus.
+	// Run the core pipeline (detector + bus + adapters).
 	g.Go(func() error {
-		logger.Info("bus started", "buffer_size", cfg.Bus.BufferSize)
-		checker.SetStatus("bus", health.StatusUp)
-		defer checker.SetStatus("bus", health.StatusDown)
-		return b.Start(gCtx)
+		return p.Run(gCtx)
 	})
-
-	// Start the detector, pushing events into the bus ingest channel.
-	g.Go(func() error {
-		logger.Info("detector started",
-			"detector", det.Name(),
-			"channels", cfg.Channels,
-		)
-		checker.SetStatus("detector", health.StatusUp)
-		defer checker.SetStatus("detector", health.StatusDown)
-		return det.Start(gCtx, b.Ingest())
-	})
-
-	// Start each adapter, consuming from its own bus subscription.
-	for _, a := range adapters {
-		sub, err := b.Subscribe()
-		if err != nil {
-			return fmt.Errorf("subscribe adapter %s: %w", a.Name(), err)
-		}
-		a := a
-		g.Go(func() error {
-			logger.Info("adapter started", "adapter", a.Name())
-			return a.Start(gCtx, sub)
-		})
-	}
 
 	// If SSE is active, start the HTTP server with SSE + metrics + health.
 	if hasSSE && sseBroker != nil {
-		httpServer := server.New(sseBroker, cfg.SSE.CORSOrigins, cfg.SSE.ReadTimeout, cfg.SSE.IdleTimeout, checker)
+		httpServer := server.New(sseBroker, cfg.SSE.CORSOrigins, cfg.SSE.ReadTimeout, cfg.SSE.IdleTimeout, p.Health())
 		httpServer.Addr = cfg.SSE.Addr
 
 		g.Go(func() error {
@@ -182,7 +152,6 @@ func runListen(cmd *cobra.Command, args []string) error {
 			return nil
 		})
 
-		// Shutdown the HTTP server when the group context is cancelled.
 		g.Go(func() error {
 			<-gCtx.Done()
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
@@ -194,7 +163,7 @@ func runListen(cmd *cobra.Command, args []string) error {
 
 	// If --metrics-addr is set, start a dedicated metrics/health server.
 	if cfg.MetricsAddr != "" {
-		metricsServer := server.NewMetricsServer(checker)
+		metricsServer := server.NewMetricsServer(p.Health())
 		metricsServer.Addr = cfg.MetricsAddr
 
 		g.Go(func() error {

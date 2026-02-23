@@ -2,9 +2,9 @@ Add a new event source (detector) to pgpipe.
 
 ## Steps
 
-1. Read the detector interface: `internal/detector/detector.go`
-2. Read the listennotify detector as reference: `internal/detector/listennotify/listennotify.go`
-3. Create a new package: `internal/detector/$ARGUMENTS/`
+1. Read the detector interface: `detector/detector.go`
+2. Read the listennotify detector as reference: `detector/listennotify/listennotify.go`
+3. Create a new package: `detector/$ARGUMENTS/`
 4. Implement the `detector.Detector` interface:
    - `Start(ctx context.Context, events chan<- event.Event) error` — push events until ctx cancelled
    - `Name() string` — return detector name

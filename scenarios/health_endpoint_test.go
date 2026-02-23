@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/florinutz/pgpipe/internal/adapter/sse"
-	"github.com/florinutz/pgpipe/internal/event"
-	"github.com/florinutz/pgpipe/internal/health"
+	"github.com/florinutz/pgpipe/adapter/sse"
+	"github.com/florinutz/pgpipe/event"
+	"github.com/florinutz/pgpipe/health"
 	"github.com/florinutz/pgpipe/internal/server"
 )
 
