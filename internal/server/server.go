@@ -5,19 +5,20 @@ import (
 	"time"
 
 	"github.com/florinutz/pgpipe/adapter/sse"
+	"github.com/florinutz/pgpipe/adapter/ws"
 	"github.com/florinutz/pgpipe/health"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-// New creates an HTTP server wired to the SSE broker.
+// New creates an HTTP server wired to the SSE and/or WebSocket brokers.
 // corsOrigins controls which origins are allowed via Access-Control-Allow-Origin;
 // an empty slice disables the CORS header entirely.
 // readTimeout and idleTimeout configure the corresponding http.Server fields;
 // zero values leave them unset.
 // If checker is nil, /healthz is not registered. Metrics are mounted at /metrics.
-func New(sseBroker *sse.Broker, corsOrigins []string, readTimeout, idleTimeout time.Duration, checker *health.Checker) *http.Server {
+func New(sseBroker *sse.Broker, wsBroker *ws.Broker, corsOrigins []string, readTimeout, idleTimeout time.Duration, checker *health.Checker) *http.Server {
 	r := chi.NewRouter()
 
 	r.Use(middleware.Recoverer)
@@ -42,10 +43,20 @@ func New(sseBroker *sse.Broker, corsOrigins []string, readTimeout, idleTimeout t
 		})
 	}
 
+	if wsBroker != nil {
+		r.Get("/ws", wsBroker.ServeHTTP)
+
+		r.Get("/ws/{channel}", func(w http.ResponseWriter, r *http.Request) {
+			channel := chi.URLParam(r, "channel")
+			ctx := ws.WithChannel(r.Context(), channel)
+			wsBroker.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+
 	return &http.Server{
 		Handler:      r,
 		ReadTimeout:  readTimeout,
-		WriteTimeout: 0, // required for SSE streaming
+		WriteTimeout: 0, // required for SSE/WS streaming
 		IdleTimeout:  idleTimeout,
 	}
 }

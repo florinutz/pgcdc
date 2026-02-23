@@ -41,4 +41,19 @@ var (
 		Name: "pgpipe_bus_subscribers",
 		Help: "Number of active bus subscribers.",
 	})
+
+	FileRotations = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "pgpipe_file_rotations_total",
+		Help: "Total number of file rotations.",
+	})
+
+	ExecRestarts = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "pgpipe_exec_restarts_total",
+		Help: "Total number of exec subprocess restarts.",
+	})
+
+	WSClientsActive = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "pgpipe_ws_clients_active",
+		Help: "Number of active WebSocket client connections.",
+	}, []string{"channel"})
 )

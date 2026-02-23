@@ -1,6 +1,6 @@
 # pgpipe
 
-PostgreSQL change data capture (LISTEN/NOTIFY or WAL logical replication) streaming to webhooks, SSE, and stdout.
+PostgreSQL change data capture (LISTEN/NOTIFY or WAL logical replication) streaming to webhooks, SSE, stdout, files, exec processes, PG tables, and WebSockets.
 
 ## Quick Start
 
@@ -23,10 +23,12 @@ Context ──> Pipeline (pgpipe.go orchestrates everything)
               |
   Detector ──> Bus (fan-out) ──> Adapter (stdout)
   (listennotify     |          ──> Adapter (webhook)
-   or walreplication)
+   or walreplication)          ──> Adapter (file, with rotation)
+                    |          ──> Adapter (exec, stdin JSON lines)
+                    |          ──> Adapter (pg_table, INSERT)
                     |          ──> Adapter (SSE broker) ──> HTTP server
-                    |
-              ingest chan        subscriber chans (one per adapter)
+              ingest chan      ──> Adapter (WS broker)  ──> HTTP server
+                                subscriber chans (one per adapter)
                                       |
                               Health Checker (per-component status)
                               Prometheus Metrics (/metrics)
@@ -37,7 +39,7 @@ Context ──> Pipeline (pgpipe.go orchestrates everything)
 - **Shutdown**: Signal cancels root context. Bus closes subscriber channels. HTTP server gets `shutdown_timeout` (default 5s) `context.WithTimeout` for graceful drain.
 - **Wiring**: `pgpipe.go` provides the reusable `Pipeline` type (detector + bus + adapters). `cmd/listen.go` adds CLI-specific HTTP servers on top.
 - **Observability**: Prometheus metrics exposed at `/metrics`. Rich health check at `/healthz` returns per-component status (200 when all up, 503 when any down). Standalone metrics server via `--metrics-addr`.
-- **Error types**: `pgpipeerr/` provides typed errors (`ErrBusClosed`, `WebhookDeliveryError`, `DetectorDisconnectedError`) for `errors.Is`/`errors.As` matching.
+- **Error types**: `pgpipeerr/` provides typed errors (`ErrBusClosed`, `WebhookDeliveryError`, `DetectorDisconnectedError`, `ExecProcessError`) for `errors.Is`/`errors.As` matching.
 
 ## Code Conventions
 
@@ -83,7 +85,7 @@ Context ──> Pipeline (pgpipe.go orchestrates everything)
 
 - Use a connection pool for detectors — breaks LISTEN state
 - Close the events channel from a detector — bus owns lifecycle
-- Block in bus or SSE broadcast — non-blocking sends only
+- Block in bus, SSE, or WS broadcast — non-blocking sends only
 - Add external brokers (Redis, Kafka) — zero infra beyond PG is a design choice
 - Use `log` or `fmt.Printf` — slog only
 - Put raw SQL identifiers in Go strings — use `pgx.Identifier{}.Sanitize()`
@@ -92,7 +94,7 @@ Context ──> Pipeline (pgpipe.go orchestrates everything)
 
 ## Dependencies
 
-Direct deps (keep minimal): `pgx/v5` (PG driver), `pglogrepl` (WAL logical replication protocol), `cobra` + `viper` (CLI/config), `chi/v5` (HTTP router), `google/uuid` (UUIDv7), `errgroup` (concurrency), `prometheus/client_golang` (metrics), `testcontainers-go` (test only).
+Direct deps (keep minimal): `pgx/v5` (PG driver), `pglogrepl` (WAL logical replication protocol), `cobra` + `viper` (CLI/config), `chi/v5` (HTTP router), `google/uuid` (UUIDv7), `errgroup` (concurrency), `prometheus/client_golang` (metrics), `coder/websocket` (WebSocket adapter), `testcontainers-go` (test only).
 
 ## Testing
 
@@ -170,6 +172,10 @@ adapter/        Output adapter interface + implementations
   stdout/       JSON-lines to io.Writer
   webhook/      HTTP POST with retries
   sse/          Server-Sent Events broker
+  file/         JSON-lines to file with rotation
+  exec/         JSON-lines to subprocess stdin
+  pgtable/      INSERT into PostgreSQL table
+  ws/           WebSocket broker
 bus/            Event fan-out
 detector/       Change detection interface + implementations
   listennotify/ PostgreSQL LISTEN/NOTIFY
@@ -180,7 +186,7 @@ metrics/        Prometheus metrics definitions
 pgpipeerr/      Typed error types
 internal/       CLI-specific internals (not importable)
   config/       Viper-based configuration structs
-  server/       HTTP server for SSE + metrics + health
+  server/       HTTP server for SSE + WS + metrics + health
 scenarios/      Integration/scenario tests (testcontainers)
 testutil/       Test utilities
 ```
@@ -196,6 +202,6 @@ testutil/       Test utilities
 - `event/event.go` — Event model (UUIDv7, JSON payload)
 - `health/health.go` — Component health checker
 - `metrics/metrics.go` — Prometheus metric definitions
-- `pgpipeerr/errors.go` — Typed errors (ErrBusClosed, WebhookDeliveryError, DetectorDisconnectedError)
-- `internal/server/server.go` — HTTP server with SSE, metrics, and health endpoints (CLI-only)
+- `pgpipeerr/errors.go` — Typed errors (ErrBusClosed, WebhookDeliveryError, DetectorDisconnectedError, ExecProcessError)
+- `internal/server/server.go` — HTTP server with SSE, WS, metrics, and health endpoints (CLI-only)
 - `scenarios/helpers_test.go` — Shared test infrastructure (PG container, pipeline wiring)

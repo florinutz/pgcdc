@@ -39,3 +39,22 @@ sse:
   heartbeat_interval: 15s
   read_timeout: 5s
   idle_timeout: 120s
+
+file:
+  path: /var/log/pgpipe/events.jsonl
+  max_size: 104857600  # 100 MB
+  max_files: 5
+
+exec:
+  command: "jq .payload >> /tmp/payloads.jsonl"
+  backoff_base: 1s
+  backoff_cap: 30s
+
+pg_table:
+  # url: postgres://user:pass@localhost:5432/mydb  # defaults to database_url
+  table: pgpipe_events
+  backoff_base: 1s
+  backoff_cap: 30s
+
+websocket:
+  ping_interval: 15s

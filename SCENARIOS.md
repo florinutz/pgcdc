@@ -13,6 +13,10 @@ Each scenario = one file, one user journey, happy path + one critical failure.
 | 7 | Trigger SQL generation | `trigger_sql_test.go` | `pgpipe init --table orders` outputs valid SQL that can be executed against PG | Invalid table name rejected, invalid channel name rejected |
 | 8 | Health endpoint | `health_endpoint_test.go` | GET /healthz returns 200 + `{"status":"ok"}` when SSE server is running | CORS preflight returns correct headers |
 | 9 | WAL replication | `wal_replication_test.go` | WAL logical replication captures INSERT/UPDATE/DELETE without triggers, events match LISTEN/NOTIFY format | UPDATE includes old row, DELETE includes deleted row |
+| 10 | File delivery | `file_delivery_test.go` | pg_notify -> detector -> bus -> file adapter writes correct JSON lines to disk | File rotation: tiny MaxSize triggers .1 rotated file |
+| 11 | Exec delivery | `exec_delivery_test.go` | pg_notify -> detector -> bus -> exec adapter pipes JSON lines to subprocess stdin | Subprocess exit: process restarts and second event arrives |
+| 12 | PG table delivery | `pgtable_delivery_test.go` | pg_notify -> detector -> bus -> pg_table adapter INSERTs row into events table | Reconnect: adapter recovers after pg_terminate_backend |
+| 13 | WS streaming | `ws_streaming_test.go` | pg_notify -> detector -> bus -> WS broker -> WebSocket client receives JSON message | Channel filter: /ws/orders only receives matching events |
 
 ## Adding a new scenario
 

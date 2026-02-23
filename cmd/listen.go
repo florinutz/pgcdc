@@ -10,9 +10,13 @@ import (
 	"syscall"
 
 	"github.com/florinutz/pgpipe"
+	execadapter "github.com/florinutz/pgpipe/adapter/exec"
+	fileadapter "github.com/florinutz/pgpipe/adapter/file"
+	"github.com/florinutz/pgpipe/adapter/pgtable"
 	"github.com/florinutz/pgpipe/adapter/sse"
 	"github.com/florinutz/pgpipe/adapter/stdout"
 	"github.com/florinutz/pgpipe/adapter/webhook"
+	"github.com/florinutz/pgpipe/adapter/ws"
 	"github.com/florinutz/pgpipe/detector"
 	"github.com/florinutz/pgpipe/detector/listennotify"
 	"github.com/florinutz/pgpipe/detector/walreplication"
@@ -46,6 +50,21 @@ func init() {
 	f.String("detector", "listen_notify", "detector type: listen_notify or wal")
 	f.String("publication", "", "PostgreSQL publication name (required for --detector wal)")
 
+	// File adapter flags.
+	f.String("file-path", "", "file adapter output path")
+	f.Int64("file-max-size", 0, "file rotation size in bytes (default 100MB)")
+	f.Int("file-max-files", 0, "number of rotated files to keep (default 5)")
+
+	// Exec adapter flags.
+	f.String("exec-command", "", "shell command to pipe events to (via stdin)")
+
+	// PG table adapter flags.
+	f.String("pg-table-url", "", "PostgreSQL URL for pg_table adapter (default: same as --db)")
+	f.String("pg-table-name", "", "destination table name (default: pgpipe_events)")
+
+	// WebSocket adapter flags.
+	f.Duration("ws-ping-interval", 0, "WebSocket ping interval (default 15s)")
+
 	mustBindPFlag("channels", f.Lookup("channel"))
 	mustBindPFlag("adapters", f.Lookup("adapter"))
 	mustBindPFlag("webhook.url", f.Lookup("url"))
@@ -56,6 +75,13 @@ func init() {
 	mustBindPFlag("metrics_addr", f.Lookup("metrics-addr"))
 	mustBindPFlag("detector.type", f.Lookup("detector"))
 	mustBindPFlag("detector.publication", f.Lookup("publication"))
+	mustBindPFlag("file.path", f.Lookup("file-path"))
+	mustBindPFlag("file.max_size", f.Lookup("file-max-size"))
+	mustBindPFlag("file.max_files", f.Lookup("file-max-files"))
+	mustBindPFlag("exec.command", f.Lookup("exec-command"))
+	mustBindPFlag("pg_table.url", f.Lookup("pg-table-url"))
+	mustBindPFlag("pg_table.table", f.Lookup("pg-table-name"))
+	mustBindPFlag("websocket.ping_interval", f.Lookup("ws-ping-interval"))
 }
 
 func runListen(cmd *cobra.Command, args []string) error {
@@ -76,9 +102,13 @@ func runListen(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("WAL detector requires a publication; use --publication or set detector.publication in config")
 	}
 
-	// Validate adapters and check webhook requirement early.
+	// Validate adapters and check requirements early.
 	hasWebhook := false
 	hasSSE := false
+	hasFile := false
+	hasExec := false
+	hasPGTable := false
+	hasWS := false
 	for _, name := range cfg.Adapters {
 		switch name {
 		case "stdout":
@@ -87,13 +117,28 @@ func runListen(cmd *cobra.Command, args []string) error {
 			hasWebhook = true
 		case "sse":
 			hasSSE = true
+		case "file":
+			hasFile = true
+		case "exec":
+			hasExec = true
+		case "pg_table":
+			hasPGTable = true
+		case "ws":
+			hasWS = true
 		default:
-			return fmt.Errorf("unknown adapter: %q (expected stdout, webhook, or sse)", name)
+			return fmt.Errorf("unknown adapter: %q (expected stdout, webhook, sse, file, exec, pg_table, or ws)", name)
 		}
 	}
 	if hasWebhook && cfg.Webhook.URL == "" {
 		return fmt.Errorf("webhook adapter requires a URL; use --url or set webhook.url in config")
 	}
+	if hasFile && cfg.File.Path == "" {
+		return fmt.Errorf("file adapter requires a path; use --file-path or set file.path in config")
+	}
+	if hasExec && cfg.Exec.Command == "" {
+		return fmt.Errorf("exec adapter requires a command; use --exec-command or set exec.command in config")
+	}
+	_ = hasPGTable // validated via config defaults
 
 	logger := slog.Default()
 
@@ -120,6 +165,7 @@ func runListen(cmd *cobra.Command, args []string) error {
 
 	// Create adapters.
 	var sseBroker *sse.Broker
+	var wsBroker *ws.Broker
 	for _, name := range cfg.Adapters {
 		switch name {
 		case "stdout":
@@ -138,6 +184,19 @@ func runListen(cmd *cobra.Command, args []string) error {
 		case "sse":
 			sseBroker = sse.New(cfg.Bus.BufferSize, cfg.SSE.HeartbeatInterval, logger)
 			opts = append(opts, pgpipe.WithAdapter(sseBroker))
+		case "file":
+			opts = append(opts, pgpipe.WithAdapter(fileadapter.New(cfg.File.Path, cfg.File.MaxSize, cfg.File.MaxFiles, logger)))
+		case "exec":
+			opts = append(opts, pgpipe.WithAdapter(execadapter.New(cfg.Exec.Command, cfg.Exec.BackoffBase, cfg.Exec.BackoffCap, logger)))
+		case "pg_table":
+			pgTableURL := cfg.PGTable.URL
+			if pgTableURL == "" {
+				pgTableURL = cfg.DatabaseURL
+			}
+			opts = append(opts, pgpipe.WithAdapter(pgtable.New(pgTableURL, cfg.PGTable.Table, cfg.PGTable.BackoffBase, cfg.PGTable.BackoffCap, logger)))
+		case "ws":
+			wsBroker = ws.New(cfg.Bus.BufferSize, cfg.WebSocket.PingInterval, logger)
+			opts = append(opts, pgpipe.WithAdapter(wsBroker))
 		}
 	}
 
@@ -152,9 +211,9 @@ func runListen(cmd *cobra.Command, args []string) error {
 		return p.Run(gCtx)
 	})
 
-	// If SSE is active, start the HTTP server with SSE + metrics + health.
-	if hasSSE && sseBroker != nil {
-		httpServer := server.New(sseBroker, cfg.SSE.CORSOrigins, cfg.SSE.ReadTimeout, cfg.SSE.IdleTimeout, p.Health())
+	// If SSE or WS is active, start the HTTP server with SSE/WS + metrics + health.
+	if (hasSSE && sseBroker != nil) || (hasWS && wsBroker != nil) {
+		httpServer := server.New(sseBroker, wsBroker, cfg.SSE.CORSOrigins, cfg.SSE.ReadTimeout, cfg.SSE.IdleTimeout, p.Health())
 		httpServer.Addr = cfg.SSE.Addr
 
 		g.Go(func() error {

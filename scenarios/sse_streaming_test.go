@@ -21,7 +21,7 @@ func TestScenario_SSEStreaming(t *testing.T) {
 	broker := sse.New(256, 100*time.Millisecond, logger)
 	startPipeline(t, connStr, []string{"sse_orders", "sse_users"}, broker)
 
-	srv := server.New(broker, []string{"*"}, 0, 0, nil)
+	srv := server.New(broker, nil, []string{"*"}, 0, 0, nil)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)

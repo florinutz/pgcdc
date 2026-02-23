@@ -16,6 +16,9 @@ var triggerSQL embed.FS
 //go:embed sql/publication_template.sql
 var publicationSQL embed.FS
 
+//go:embed sql/events_table_template.sql
+var eventsTableSQL embed.FS
+
 var (
 	validTableName       = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 	validChannelName     = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_:.\-]*$`)
@@ -32,13 +35,18 @@ type publicationData struct {
 	Publication string
 }
 
+type eventsTableData struct {
+	Table string
+}
+
 var initCmd = &cobra.Command{
 	Use:   "init",
-	Short: "Generate SQL setup for a table (trigger or publication)",
+	Short: "Generate SQL setup for a table (trigger, publication, or events table)",
 	Long: `Outputs SQL statements to configure a PostgreSQL table for change detection.
 
 By default, generates CREATE FUNCTION and CREATE TRIGGER for LISTEN/NOTIFY.
-With --detector wal, generates CREATE PUBLICATION for WAL logical replication.`,
+With --detector wal, generates CREATE PUBLICATION for WAL logical replication.
+With --adapter pg_table, generates CREATE TABLE for the pg_table adapter.`,
 	RunE: runInit,
 }
 
@@ -47,15 +55,27 @@ func init() {
 	initCmd.Flags().String("channel", "", "channel name (default: pgpipe:<table>)")
 	initCmd.Flags().String("detector", "listen_notify", "detector type: listen_notify or wal")
 	initCmd.Flags().String("publication", "", "publication name for WAL detector (default: pgpipe_<table>)")
+	initCmd.Flags().String("adapter", "", "adapter type: pg_table (generates events table SQL)")
 	_ = initCmd.MarkFlagRequired("table")
 }
 
 func runInit(cmd *cobra.Command, args []string) error {
 	table, _ := cmd.Flags().GetString("table")
 	detectorType, _ := cmd.Flags().GetString("detector")
+	adapterType, _ := cmd.Flags().GetString("adapter")
 
 	if !validTableName.MatchString(table) {
 		return fmt.Errorf("invalid table name %q: only alphanumeric characters and underscores are allowed", table)
+	}
+
+	// If --adapter is specified, generate adapter-specific SQL.
+	if adapterType != "" {
+		switch adapterType {
+		case "pg_table":
+			return runInitPGTable(table)
+		default:
+			return fmt.Errorf("unknown adapter type %q for init: only pg_table is supported", adapterType)
+		}
 	}
 
 	switch detectorType {
@@ -124,6 +144,28 @@ func runInitWAL(cmd *cobra.Command, table string) error {
 	data := publicationData{
 		Table:       table,
 		Publication: publication,
+	}
+
+	if err := tmpl.Execute(os.Stdout, data); err != nil {
+		return fmt.Errorf("execute template: %w", err)
+	}
+
+	return nil
+}
+
+func runInitPGTable(table string) error {
+	tmplBytes, err := eventsTableSQL.ReadFile("sql/events_table_template.sql")
+	if err != nil {
+		return fmt.Errorf("read embedded template: %w", err)
+	}
+
+	tmpl, err := template.New("events_table").Parse(string(tmplBytes))
+	if err != nil {
+		return fmt.Errorf("parse template: %w", err)
+	}
+
+	data := eventsTableData{
+		Table: table,
 	}
 
 	if err := tmpl.Execute(os.Stdout, data); err != nil {

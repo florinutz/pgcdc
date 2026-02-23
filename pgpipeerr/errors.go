@@ -41,3 +41,17 @@ func (e *DetectorDisconnectedError) Error() string {
 func (e *DetectorDisconnectedError) Unwrap() error {
 	return e.Err
 }
+
+// ExecProcessError indicates that an exec adapter subprocess failed.
+type ExecProcessError struct {
+	Command string
+	Err     error
+}
+
+func (e *ExecProcessError) Error() string {
+	return fmt.Sprintf("exec process %q failed: %v", e.Command, e.Err)
+}
+
+func (e *ExecProcessError) Unwrap() error {
+	return e.Err
+}

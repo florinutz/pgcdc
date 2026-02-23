@@ -33,7 +33,7 @@ func TestScenario_HealthEndpoint(t *testing.T) {
 	checker.SetStatus("detector", health.StatusUp)
 	checker.SetStatus("bus", health.StatusUp)
 
-	srv := server.New(broker, []string{"*"}, 0, 0, checker)
+	srv := server.New(broker, nil, []string{"*"}, 0, 0, checker)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)

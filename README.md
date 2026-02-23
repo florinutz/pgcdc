@@ -4,7 +4,7 @@
 
 Lightweight PostgreSQL Change Data Capture. No Kafka. No NATS. Just your PG and a single binary.
 
-pgpipe captures changes from PostgreSQL via LISTEN/NOTIFY or WAL logical replication and delivers them to webhooks, SSE streams, or stdout -- with zero external dependencies beyond PostgreSQL itself.
+pgpipe captures changes from PostgreSQL via LISTEN/NOTIFY or WAL logical replication and delivers them to webhooks, SSE streams, stdout, files, exec processes, PG tables, and WebSockets -- with zero external dependencies beyond PostgreSQL itself.
 
 ```
 PostgreSQL                    pgpipe (single binary)
@@ -13,12 +13,17 @@ PostgreSQL                    pgpipe (single binary)
 │  Trigger │  NOTIFY     │ (reconnect) │     │ (fan-out) │
 └──────────┘             └─────────────┘     └─────┬─────┘
                                                    │
-                                    ┌──────────────┼──────────────┐
-                                    ▼              ▼              ▼
-                              ┌──────────┐  ┌──────────┐  ┌──────────┐
-                              │ Webhook  │  │   SSE    │  │  Stdout  │
-                              │ (retries)│  │ (stream) │  │  (json)  │
-                              └──────────┘  └──────────┘  └──────────┘
+                              ┌──────────────┼──────────────┐──────────────┐
+                              ▼              ▼              ▼              ▼
+                        ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐
+                        │ Webhook  │  │   SSE    │  │  Stdout  │  │   File   │
+                        │ (retries)│  │ (stream) │  │  (json)  │  │ (rotate) │
+                        └──────────┘  └──────────┘  └──────────┘  └──────────┘
+                              ▼              ▼              ▼
+                        ┌──────────┐  ┌──────────┐  ┌──────────┐
+                        │   Exec   │  │ PG Table │  │WebSocket │
+                        │ (stdin)  │  │ (INSERT) │  │ (stream) │
+                        └──────────┘  └──────────┘  └──────────┘
 ```
 
 ## Quick Start
@@ -81,6 +86,18 @@ pgpipe listen -c pgpipe:orders -a webhook -u https://example.com/hook --db postg
 # SSE server
 pgpipe listen -c pgpipe:orders -a sse --sse-addr :8080 --db postgres://...
 
+# file (JSON lines with rotation)
+pgpipe listen -c pgpipe:orders -a file --file-path /tmp/events.jsonl --db postgres://...
+
+# exec (pipe to any command)
+pgpipe listen -c pgpipe:orders -a exec --exec-command 'jq .payload' --db postgres://...
+
+# pg_table (INSERT into a PostgreSQL table)
+pgpipe listen -c pgpipe:orders -a pg_table --pg-table-name audit_events --db postgres://...
+
+# websocket
+pgpipe listen -c pgpipe:orders -a ws --sse-addr :8080 --db postgres://...
+
 # multiple adapters at once
 pgpipe listen -c pgpipe:orders -a stdout -a webhook -u https://example.com/hook --db postgres://...
 ```
@@ -141,6 +158,21 @@ sse:
   cors_origins:
     - "*"
   heartbeat_interval: 15s
+
+file:
+  path: /var/log/pgpipe/events.jsonl
+  max_size: 104857600  # 100 MB
+  max_files: 5
+
+exec:
+  command: "jq .payload >> /tmp/payloads.jsonl"
+
+pg_table:
+  # url: postgres://...  # defaults to database_url
+  table: pgpipe_events
+
+websocket:
+  ping_interval: 15s
 ```
 
 ### Environment variables
@@ -193,6 +225,67 @@ Features:
 - `X-Accel-Buffering: no` for nginx compatibility
 - Configurable CORS origins
 
+### file
+
+Writes events as JSON lines to a file with automatic rotation:
+
+```bash
+pgpipe listen -c pgpipe:orders -a file --file-path /var/log/pgpipe/events.jsonl --db postgres://...
+```
+
+Features:
+- Append-only JSON lines, fsynced after each event
+- Automatic rotation when file exceeds `--file-max-size` (default 100MB)
+- Keeps up to `--file-max-files` rotated files (default 5): `events.jsonl.1`, `.2`, etc.
+
+### exec
+
+Pipes events as JSON lines to a long-running subprocess's stdin:
+
+```bash
+pgpipe listen -c pgpipe:orders -a exec --exec-command 'jq .payload >> /tmp/payloads.jsonl' --db postgres://...
+```
+
+Features:
+- Command runs via `sh -c`, so shell features (pipes, redirects) work
+- If the process exits, pgpipe restarts it with exponential backoff
+- Failed events are re-delivered to the new process
+
+### pg_table
+
+Inserts events into a PostgreSQL table:
+
+```bash
+# 1. Generate the CREATE TABLE SQL
+pgpipe init --table audit_events --adapter pg_table | psql mydb
+
+# 2. Start piping events to the table
+pgpipe listen -c pgpipe:orders -a pg_table --pg-table-name audit_events --db postgres://...
+```
+
+Features:
+- Table must pre-exist (use `pgpipe init --adapter pg_table` to generate SQL)
+- Uses `--pg-table-url` for a separate database, or falls back to `--db`
+- Automatic reconnection with backoff on connection loss
+- Non-connection errors (constraint violations) skip the event with a warning
+
+### ws (WebSocket)
+
+Starts an HTTP server with WebSocket endpoints:
+
+- `GET /ws` -- stream all channels
+- `GET /ws/{channel}` -- stream filtered by channel
+
+```bash
+pgpipe listen -c pgpipe:orders -a ws --sse-addr :8080 --db postgres://...
+# Then: websocat ws://localhost:8080/ws
+```
+
+Features:
+- Ping/pong keepalive (default 15s interval)
+- Channel filtering via URL path
+- Shares the same HTTP server as SSE (use both simultaneously)
+
 ## Event Format
 
 ```json
@@ -215,21 +308,30 @@ Features:
 
 ```
 pgpipe listen [flags]
-  -c, --channel strings      PG channels to listen on (repeatable)
-  -a, --adapter strings      Adapters: webhook, sse, stdout (default [stdout])
-  -u, --url string           Webhook destination URL
-      --sse-addr string      SSE server address (default ":8080")
-      --db string            PostgreSQL connection string (env: PGPIPE_DATABASE_URL)
-      --retries int          Webhook max retries (default 5)
-      --signing-key string   HMAC signing key for webhook
-      --detector string      Detector type: listen_notify or wal (default "listen_notify")
-      --publication string   PostgreSQL publication name (required for --detector wal)
+  -c, --channel strings        PG channels to listen on (repeatable)
+  -a, --adapter strings        Adapters: stdout, webhook, sse, file, exec, pg_table, ws (default [stdout])
+  -u, --url string             Webhook destination URL
+      --sse-addr string        SSE/WS server address (default ":8080")
+      --db string              PostgreSQL connection string (env: PGPIPE_DATABASE_URL)
+      --retries int            Webhook max retries (default 5)
+      --signing-key string     HMAC signing key for webhook
+      --detector string        Detector type: listen_notify or wal (default "listen_notify")
+      --publication string     PostgreSQL publication name (required for --detector wal)
+      --metrics-addr string    Standalone metrics/health server address (e.g. :9090)
+      --file-path string       File adapter output path
+      --file-max-size int      File rotation size in bytes (default 104857600)
+      --file-max-files int     Number of rotated files to keep (default 5)
+      --exec-command string    Shell command to pipe events to (via stdin)
+      --pg-table-url string    PostgreSQL URL for pg_table adapter (default: same as --db)
+      --pg-table-name string   Destination table name (default: pgpipe_events)
+      --ws-ping-interval dur   WebSocket ping interval (default 15s)
 
 pgpipe init [flags]
-      --table string         Table name (required)
-      --channel string       Channel name (default: pgpipe:<table>)
-      --detector string      Detector type: listen_notify or wal (default "listen_notify")
-      --publication string   Publication name for WAL (default: pgpipe_<table>)
+      --table string           Table name (required)
+      --channel string         Channel name (default: pgpipe:<table>)
+      --detector string        Detector type: listen_notify or wal (default "listen_notify")
+      --publication string     Publication name for WAL (default: pgpipe_<table>)
+      --adapter string         Adapter type: pg_table (generates events table SQL)
 
 pgpipe version
 ```
@@ -275,7 +377,7 @@ pgpipe is built around three core abstractions:
 
 - **Detector** -- sources of change events (LISTEN/NOTIFY or WAL logical replication)
 - **Bus** -- fans out events from detectors to adapters via buffered Go channels
-- **Adapter** -- delivers events to destinations (stdout, webhook, SSE)
+- **Adapter** -- delivers events to destinations (stdout, webhook, SSE, file, exec, pg_table, WebSocket)
 
 All components communicate through Go channels. Backpressure propagates naturally: a slow adapter's channel fills up, the bus drops events for that adapter (with a warning log), and other adapters continue unaffected.
 
