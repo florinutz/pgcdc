@@ -372,6 +372,67 @@ Features:
 - Channel filtering via URL path
 - Shares the same HTTP server as SSE (use both simultaneously)
 
+### embedding
+
+Automatically keeps a pgvector table in sync with your source data:
+
+```bash
+# 1. Create the embeddings table
+pgcdc init --table article_embeddings --adapter embedding | psql mydb
+
+# 2. Keep vectors in sync with live changes
+pgcdc listen -c pgcdc:articles -a embedding \
+  --embedding-api-url https://api.openai.com/v1/embeddings \
+  --embedding-api-key $OPENAI_API_KEY \
+  --embedding-columns title,body \
+  --db postgres://...
+
+# 3. Or embed all existing rows first (with snapshot), then go live
+pgcdc snapshot --table articles -a embedding \
+  --embedding-api-url https://api.openai.com/v1/embeddings \
+  --embedding-api-key $OPENAI_API_KEY \
+  --embedding-columns title,body \
+  --db postgres://...
+```
+
+Features:
+- INSERT/UPDATE → calls embedding API, UPSERTs vector into pgvector table
+- DELETE → removes corresponding vector row
+- Retries on 5xx and 429 (rate limiting) with exponential backoff
+- Reconnects to pgvector database on connection loss
+- Works with any OpenAI-compatible API: OpenAI, Azure OpenAI, Ollama, vLLM, LiteLLM
+- Table must pre-exist (use `pgcdc init --adapter embedding` to generate SQL)
+- Zero new binary dependencies — uses stdlib HTTP + pgx string encoding for vectors
+
+Config file example:
+```yaml
+embedding:
+  api_url: https://api.openai.com/v1/embeddings
+  api_key: sk-...
+  model: text-embedding-3-small
+  columns: [title, body]
+  id_column: id            # source row primary key column
+  table: article_embeddings
+  # db_url: postgres://... # defaults to database_url
+  dimension: 1536
+  max_retries: 3
+  timeout: 30s
+```
+
+The embeddings table schema (`pgcdc init --table article_embeddings --adapter embedding`):
+```sql
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE TABLE IF NOT EXISTS article_embeddings (
+    source_id    TEXT PRIMARY KEY,
+    source_table TEXT NOT NULL,
+    content      TEXT NOT NULL,
+    embedding    vector(1536),
+    event_id     TEXT NOT NULL,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+```
+
 ## Event Format
 
 ```json
@@ -395,7 +456,7 @@ Features:
 ```
 pgcdc listen [flags]
   -c, --channel strings        PG channels to listen on (repeatable)
-  -a, --adapter strings        Adapters: stdout, webhook, sse, file, exec, pg_table, ws (default [stdout])
+  -a, --adapter strings        Adapters: stdout, webhook, sse, file, exec, pg_table, ws, embedding (default [stdout])
   -u, --url string             Webhook destination URL
       --sse-addr string        SSE/WS server address (default ":8080")
       --db string              PostgreSQL connection string (env: PGCDC_DATABASE_URL)
@@ -415,21 +476,30 @@ pgcdc listen [flags]
       --exec-command string    Shell command to pipe events to (via stdin)
       --pg-table-url string    PostgreSQL URL for pg_table adapter (default: same as --db)
       --pg-table-name string   Destination table name (default: pgcdc_events)
-      --ws-ping-interval dur   WebSocket ping interval (default 15s)
+      --ws-ping-interval dur         WebSocket ping interval (default 15s)
+      --embedding-api-url string     OpenAI-compatible embedding API URL
+      --embedding-api-key string     API key for embedding service
+      --embedding-model string       Embedding model name (default: text-embedding-3-small)
+      --embedding-columns strings    Columns to embed from event payload row (required for embedding adapter)
+      --embedding-id-column string   Source row ID column for UPSERT/DELETE (default: id)
+      --embedding-table string       Destination pgvector table (default: pgcdc_embeddings)
+      --embedding-db-url string      PostgreSQL URL for pgvector (default: same as --db)
+      --embedding-dimension int      Vector dimension (default: 1536)
 
 pgcdc snapshot [flags]
       --db string              PostgreSQL connection string
       --table string           Table to snapshot (required)
       --where string           Optional WHERE clause to filter rows
       --batch-size int         Progress logging interval in rows (default 1000)
-  -a, --adapter strings        Adapters: stdout, webhook, file, exec, pg_table (default [stdout])
+  -a, --adapter strings        Adapters: stdout, webhook, file, exec, pg_table, embedding (default [stdout])
 
 pgcdc init [flags]
       --table string           Table name (required)
       --channel string         Channel name (default: pgcdc:<table>)
       --detector string        Detector type: listen_notify or wal (default "listen_notify")
       --publication string     Publication name for WAL (default: pgcdc_<table>)
-      --adapter string         Adapter type: pg_table (generates events table SQL)
+      --adapter string         Adapter type: pg_table or embedding (generates table SQL)
+      --dimension int          Vector dimension for embedding adapter (default: 1536)
 
 pgcdc version
 ```

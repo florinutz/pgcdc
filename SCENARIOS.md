@@ -19,7 +19,8 @@ Each scenario = one file, one user journey, happy path + one critical failure.
 | 13 | WS streaming | `ws_streaming_test.go` | pg_notify -> detector -> bus -> WS broker -> WebSocket client receives JSON message | Channel filter: /ws/orders only receives matching events |
 | 14 | WAL reconnection | `reconnection_test.go` | WAL detector recovers after PG connection is terminated mid-replication | Events resume flowing after WAL reconnect |
 | 15 | Snapshot | `snapshot_test.go` | Snapshot exports 100 existing rows as SNAPSHOT events through stdout adapter | Non-existent table returns clear error |
-| 16 | Snapshot-first | `snapshot_first_test.go` | WAL detector exports existing rows as SNAPSHOT events then transitions to live WAL streaming with zero gap | `--snapshot-first` without WAL detector or table errors cleanly |
+| 16 | Snapshot-first | `snapshot_first_test.go` | WAL detector exports existing rows as SNAPSHOT events then transitions to live WAL streaming with zero gap | `--snapshot-first` without WAL detector or table errors cleanly (covered in CLI validation) |
+| 17 | Embedding delivery | `embedding_test.go` | NOTIFY → detector → bus → embedding adapter calls OpenAI-compatible API and UPSERTs vector into pgvector table; UPDATE re-embeds; DELETE removes vector | API returns 500 twice then succeeds; adapter retries and event eventually delivered |
 
 ## Adding a new scenario
 

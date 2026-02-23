@@ -105,14 +105,4 @@ func TestScenario_SnapshotFirst(t *testing.T) {
 		cancel()
 		_ = g.Wait()
 	})
-
-	t.Run("snapshot-first without WAL errors", func(t *testing.T) {
-		output, err := runPGCDC("listen", "--db", "postgres://localhost/test", "--channel", "orders", "--snapshot-first", "--snapshot-table", "orders")
-		if err == nil {
-			t.Fatal("expected error for --snapshot-first without WAL")
-		}
-		if output == "" {
-			t.Log("got error with no output (expected)")
-		}
-	})
 }

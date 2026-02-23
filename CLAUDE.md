@@ -1,6 +1,6 @@
 # pgcdc
 
-PostgreSQL change data capture (LISTEN/NOTIFY or WAL logical replication) streaming to webhooks, SSE, stdout, files, exec processes, PG tables, and WebSockets.
+PostgreSQL change data capture (LISTEN/NOTIFY or WAL logical replication) streaming to webhooks, SSE, stdout, files, exec processes, PG tables, WebSockets, and pgvector embeddings.
 
 ## Quick Start
 
@@ -41,7 +41,8 @@ Context ──> Pipeline (pgcdc.go orchestrates everything)
 - **Shutdown**: Signal cancels root context. Bus closes subscriber channels. HTTP server gets `shutdown_timeout` (default 5s) `context.WithTimeout` for graceful drain.
 - **Wiring**: `pgcdc.go` provides the reusable `Pipeline` type (detector + bus + adapters). `cmd/listen.go` adds CLI-specific HTTP servers on top.
 - **Observability**: Prometheus metrics exposed at `/metrics`. Rich health check at `/healthz` returns per-component status (200 when all up, 503 when any down). Standalone metrics server via `--metrics-addr`.
-- **Error types**: `pgcdcerr/` provides typed errors (`ErrBusClosed`, `WebhookDeliveryError`, `DetectorDisconnectedError`, `ExecProcessError`) for `errors.Is`/`errors.As` matching.
+- **Embedding adapter**: `--adapter embedding` with `--embedding-api-url`, `--embedding-columns`, `--embedding-api-key`. Calls any OpenAI-compatible endpoint, UPSERTs vector into pgvector table. INSERT/UPDATE → embed+upsert, DELETE → delete vector. Zero new deps — vectors stored as strings with `::vector` cast.
+- **Error types**: `pgcdcerr/` provides typed errors (`ErrBusClosed`, `WebhookDeliveryError`, `DetectorDisconnectedError`, `ExecProcessError`, `EmbeddingDeliveryError`) for `errors.Is`/`errors.As` matching.
 
 ## Code Conventions
 
@@ -178,6 +179,7 @@ adapter/        Output adapter interface + implementations
   exec/         JSON-lines to subprocess stdin
   pgtable/      INSERT into PostgreSQL table
   ws/           WebSocket broker
+  embedding/    Embed text columns → UPSERT into pgvector table
 bus/            Event fan-out
 snapshot/       Table snapshot (COPY-based row export)
 detector/       Change detection interface + implementations
@@ -207,6 +209,7 @@ testutil/       Test utilities
 - `event/event.go` — Event model (UUIDv7, JSON payload)
 - `health/health.go` — Component health checker
 - `metrics/metrics.go` — Prometheus metric definitions
-- `pgcdcerr/errors.go` — Typed errors (ErrBusClosed, WebhookDeliveryError, DetectorDisconnectedError, ExecProcessError)
+- `pgcdcerr/errors.go` — Typed errors (ErrBusClosed, WebhookDeliveryError, DetectorDisconnectedError, ExecProcessError, EmbeddingDeliveryError)
+- `adapter/embedding/embedding.go` — Embedding adapter: OpenAI-compatible API + pgvector UPSERT/DELETE
 - `internal/server/server.go` — HTTP server with SSE, WS, metrics, and health endpoints (CLI-only)
 - `scenarios/helpers_test.go` — Shared test infrastructure (PG container, pipeline wiring)

@@ -19,6 +19,7 @@ type Config struct {
 	WebSocket       WebSocketConfig `mapstructure:"websocket"`
 	Detector        DetectorConfig  `mapstructure:"detector"`
 	Snapshot        SnapshotConfig  `mapstructure:"snapshot"`
+	Embedding       EmbeddingConfig `mapstructure:"embedding"`
 }
 
 type BusConfig struct {
@@ -70,6 +71,21 @@ type SnapshotConfig struct {
 	Table     string `mapstructure:"table"`
 	Where     string `mapstructure:"where"`
 	BatchSize int    `mapstructure:"batch_size"`
+}
+
+type EmbeddingConfig struct {
+	APIURL      string        `mapstructure:"api_url"`
+	APIKey      string        `mapstructure:"api_key"`
+	Model       string        `mapstructure:"model"`
+	Columns     []string      `mapstructure:"columns"`
+	IDColumn    string        `mapstructure:"id_column"`
+	Table       string        `mapstructure:"table"`
+	DBURL       string        `mapstructure:"db_url"`
+	Dimension   int           `mapstructure:"dimension"`
+	MaxRetries  int           `mapstructure:"max_retries"`
+	Timeout     time.Duration `mapstructure:"timeout"`
+	BackoffBase time.Duration `mapstructure:"backoff_base"`
+	BackoffCap  time.Duration `mapstructure:"backoff_cap"`
 }
 
 type DetectorConfig struct {
@@ -127,6 +143,16 @@ func Default() Config {
 		Detector: DetectorConfig{
 			Type:        "listen_notify",
 			BackoffBase: 5 * time.Second,
+			BackoffCap:  60 * time.Second,
+		},
+		Embedding: EmbeddingConfig{
+			Model:       "text-embedding-3-small",
+			IDColumn:    "id",
+			Table:       "pgcdc_embeddings",
+			Dimension:   1536,
+			MaxRetries:  3,
+			Timeout:     30 * time.Second,
+			BackoffBase: 2 * time.Second,
 			BackoffCap:  60 * time.Second,
 		},
 	}

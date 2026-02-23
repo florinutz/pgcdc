@@ -19,6 +19,9 @@ var publicationSQL embed.FS
 //go:embed sql/events_table_template.sql
 var eventsTableSQL embed.FS
 
+//go:embed sql/embedding_table_template.sql
+var embeddingTableSQL embed.FS
+
 var (
 	validTableName       = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 	validChannelName     = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_:.\-]*$`)
@@ -39,6 +42,11 @@ type eventsTableData struct {
 	Table string
 }
 
+type embeddingTableData struct {
+	Table     string
+	Dimension int
+}
+
 var initCmd = &cobra.Command{
 	Use:   "init",
 	Short: "Generate SQL setup for a table (trigger, publication, or events table)",
@@ -55,7 +63,8 @@ func init() {
 	initCmd.Flags().String("channel", "", "channel name (default: pgcdc:<table>)")
 	initCmd.Flags().String("detector", "listen_notify", "detector type: listen_notify or wal")
 	initCmd.Flags().String("publication", "", "publication name for WAL detector (default: pgcdc_<table>)")
-	initCmd.Flags().String("adapter", "", "adapter type: pg_table (generates events table SQL)")
+	initCmd.Flags().String("adapter", "", "adapter type: pg_table or embedding (generates table SQL)")
+	initCmd.Flags().Int("dimension", 1536, "vector dimension for embedding adapter (default: 1536)")
 	_ = initCmd.MarkFlagRequired("table")
 }
 
@@ -73,8 +82,11 @@ func runInit(cmd *cobra.Command, args []string) error {
 		switch adapterType {
 		case "pg_table":
 			return runInitPGTable(table)
+		case "embedding":
+			dimension, _ := cmd.Flags().GetInt("dimension")
+			return runInitEmbedding(table, dimension)
 		default:
-			return fmt.Errorf("unknown adapter type %q for init: only pg_table is supported", adapterType)
+			return fmt.Errorf("unknown adapter type %q for init: expected pg_table or embedding", adapterType)
 		}
 	}
 
@@ -166,6 +178,33 @@ func runInitPGTable(table string) error {
 
 	data := eventsTableData{
 		Table: table,
+	}
+
+	if err := tmpl.Execute(os.Stdout, data); err != nil {
+		return fmt.Errorf("execute template: %w", err)
+	}
+
+	return nil
+}
+
+func runInitEmbedding(table string, dimension int) error {
+	if dimension <= 0 {
+		dimension = 1536
+	}
+
+	tmplBytes, err := embeddingTableSQL.ReadFile("sql/embedding_table_template.sql")
+	if err != nil {
+		return fmt.Errorf("read embedded template: %w", err)
+	}
+
+	tmpl, err := template.New("embedding_table").Parse(string(tmplBytes))
+	if err != nil {
+		return fmt.Errorf("parse template: %w", err)
+	}
+
+	data := embeddingTableData{
+		Table:     table,
+		Dimension: dimension,
 	}
 
 	if err := tmpl.Execute(os.Stdout, data); err != nil {

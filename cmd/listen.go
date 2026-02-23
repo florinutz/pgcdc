@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	"github.com/florinutz/pgcdc"
+	embeddingadapter "github.com/florinutz/pgcdc/adapter/embedding"
 	execadapter "github.com/florinutz/pgcdc/adapter/exec"
 	fileadapter "github.com/florinutz/pgcdc/adapter/file"
 	"github.com/florinutz/pgcdc/adapter/pgtable"
@@ -71,6 +72,25 @@ func init() {
 	f.Bool("snapshot-first", false, "run a table snapshot before live WAL streaming (requires --detector wal)")
 	f.String("snapshot-table", "", "table to snapshot (required with --snapshot-first)")
 	f.String("snapshot-where", "", "optional WHERE clause for snapshot")
+
+	// Embedding adapter flags.
+	f.String("embedding-api-url", "", "OpenAI-compatible embedding API URL")
+	f.String("embedding-api-key", "", "API key for embedding service")
+	f.String("embedding-model", "", "embedding model name (default: text-embedding-3-small)")
+	f.StringSlice("embedding-columns", nil, "columns to embed from event payload row (required for embedding adapter)")
+	f.String("embedding-id-column", "", "source row ID column for UPSERT/DELETE (default: id)")
+	f.String("embedding-table", "", "destination pgvector table (default: pgcdc_embeddings)")
+	f.String("embedding-db-url", "", "PostgreSQL URL for pgvector table (default: same as --db)")
+	f.Int("embedding-dimension", 0, "vector dimension (default: 1536)")
+
+	mustBindPFlag("embedding.api_url", f.Lookup("embedding-api-url"))
+	mustBindPFlag("embedding.api_key", f.Lookup("embedding-api-key"))
+	mustBindPFlag("embedding.model", f.Lookup("embedding-model"))
+	mustBindPFlag("embedding.columns", f.Lookup("embedding-columns"))
+	mustBindPFlag("embedding.id_column", f.Lookup("embedding-id-column"))
+	mustBindPFlag("embedding.table", f.Lookup("embedding-table"))
+	mustBindPFlag("embedding.db_url", f.Lookup("embedding-db-url"))
+	mustBindPFlag("embedding.dimension", f.Lookup("embedding-dimension"))
 
 	mustBindPFlag("channels", f.Lookup("channel"))
 	mustBindPFlag("adapters", f.Lookup("adapter"))
@@ -137,6 +157,7 @@ func runListen(cmd *cobra.Command, args []string) error {
 	hasExec := false
 	hasPGTable := false
 	hasWS := false
+	hasEmbedding := false
 	for _, name := range cfg.Adapters {
 		switch name {
 		case "stdout":
@@ -153,8 +174,10 @@ func runListen(cmd *cobra.Command, args []string) error {
 			hasPGTable = true
 		case "ws":
 			hasWS = true
+		case "embedding":
+			hasEmbedding = true
 		default:
-			return fmt.Errorf("unknown adapter: %q (expected stdout, webhook, sse, file, exec, pg_table, or ws)", name)
+			return fmt.Errorf("unknown adapter: %q (expected stdout, webhook, sse, file, exec, pg_table, ws, or embedding)", name)
 		}
 	}
 	if hasWebhook && cfg.Webhook.URL == "" {
@@ -168,6 +191,12 @@ func runListen(cmd *cobra.Command, args []string) error {
 	}
 	if hasPGTable && cfg.PGTable.URL == "" && cfg.DatabaseURL == "" {
 		return fmt.Errorf("pg_table adapter requires a database URL; use --db or --pg-table-url")
+	}
+	if hasEmbedding && cfg.Embedding.APIURL == "" {
+		return fmt.Errorf("embedding adapter requires an API URL; use --embedding-api-url or set embedding.api_url in config")
+	}
+	if hasEmbedding && len(cfg.Embedding.Columns) == 0 {
+		return fmt.Errorf("embedding adapter requires at least one column; use --embedding-columns or set embedding.columns in config")
 	}
 
 	logger := slog.Default()
@@ -231,6 +260,26 @@ func runListen(cmd *cobra.Command, args []string) error {
 		case "ws":
 			wsBroker = ws.New(cfg.Bus.BufferSize, cfg.WebSocket.PingInterval, logger)
 			opts = append(opts, pgcdc.WithAdapter(wsBroker))
+		case "embedding":
+			embDBURL := cfg.Embedding.DBURL
+			if embDBURL == "" {
+				embDBURL = cfg.DatabaseURL
+			}
+			opts = append(opts, pgcdc.WithAdapter(embeddingadapter.New(
+				cfg.Embedding.APIURL,
+				cfg.Embedding.APIKey,
+				cfg.Embedding.Model,
+				cfg.Embedding.Columns,
+				cfg.Embedding.IDColumn,
+				embDBURL,
+				cfg.Embedding.Table,
+				cfg.Embedding.Dimension,
+				cfg.Embedding.MaxRetries,
+				cfg.Embedding.Timeout,
+				cfg.Embedding.BackoffBase,
+				cfg.Embedding.BackoffCap,
+				logger,
+			)))
 		}
 	}
 

@@ -67,4 +67,25 @@ var (
 		Help:    "Duration of snapshot operations.",
 		Buckets: []float64{1, 5, 10, 30, 60, 120, 300, 600},
 	})
+
+	EmbeddingAPIRequests = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "pgcdc_embedding_api_requests_total",
+		Help: "Total number of embedding API requests.",
+	})
+
+	EmbeddingAPIDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "pgcdc_embedding_api_duration_seconds",
+		Help:    "Duration of embedding API requests.",
+		Buckets: prometheus.DefBuckets,
+	})
+
+	EmbeddingAPIErrors = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "pgcdc_embedding_api_errors_total",
+		Help: "Total number of embedding API errors after retries exhausted.",
+	})
+
+	EmbeddingTokensUsed = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "pgcdc_embedding_tokens_total",
+		Help: "Total number of tokens consumed by the embedding API.",
+	})
 )

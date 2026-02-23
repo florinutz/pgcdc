@@ -55,3 +55,23 @@ func (e *ExecProcessError) Error() string {
 func (e *ExecProcessError) Unwrap() error {
 	return e.Err
 }
+
+// EmbeddingDeliveryError indicates that an embedding API call failed after exhausting retries.
+type EmbeddingDeliveryError struct {
+	EventID    string
+	Model      string
+	StatusCode int
+	Retries    int
+	Err        error
+}
+
+func (e *EmbeddingDeliveryError) Error() string {
+	if e.Err != nil {
+		return fmt.Sprintf("embedding delivery failed for event %s (model %s) after %d retries: %v", e.EventID, e.Model, e.Retries, e.Err)
+	}
+	return fmt.Sprintf("embedding delivery failed for event %s (model %s) after %d retries (last status %d)", e.EventID, e.Model, e.Retries, e.StatusCode)
+}
+
+func (e *EmbeddingDeliveryError) Unwrap() error {
+	return e.Err
+}

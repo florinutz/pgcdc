@@ -43,7 +43,7 @@ func TestMain(m *testing.M) {
 
 	// Start a shared PostgreSQL container for all scenarios.
 	req := testcontainers.ContainerRequest{
-		Image:        "postgres:16-alpine",
+		Image:        "pgvector/pgvector:pg16",
 		ExposedPorts: []string{"5432/tcp"},
 		Env: map[string]string{
 			"POSTGRES_USER":     "pgcdc",
