@@ -5,11 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"math"
-	"math/rand/v2"
 	"time"
 
 	"github.com/florinutz/pgpipe/event"
+	"github.com/florinutz/pgpipe/internal/backoff"
 	"github.com/florinutz/pgpipe/pgpipeerr"
 	"github.com/jackc/pgx/v5"
 )
@@ -78,7 +77,7 @@ func (d *Detector) Start(ctx context.Context, events chan<- event.Event) error {
 			Err:    runErr,
 		}
 
-		delay := backoff(attempt, d.backoffBase, d.backoffCap)
+		delay := backoff.Jitter(attempt, d.backoffBase, d.backoffCap)
 		d.logger.Error("connection lost, reconnecting",
 			"error", disconnErr,
 			"attempt", attempt+1,
@@ -159,20 +158,4 @@ func parsePayload(raw string) (operation string, payload json.RawMessage) {
 	// Not JSON; wrap the raw text as a JSON string.
 	quoted, _ := json.Marshal(raw)
 	return "NOTIFY", quoted
-}
-
-// backoff returns an exponential delay with full jitter.
-//
-//	delay = max(minDelay, rand(0, min(cap, base * 2^attempt)))
-func backoff(attempt int, base, maxDelay time.Duration) time.Duration {
-	const minDelay = 100 * time.Millisecond
-	exp := float64(base) * math.Pow(2, float64(attempt))
-	if exp > float64(maxDelay) || exp <= 0 { // overflow guard
-		exp = float64(maxDelay)
-	}
-	jitter := time.Duration(rand.Int64N(int64(exp)))
-	if jitter < minDelay {
-		jitter = minDelay
-	}
-	return jitter
 }

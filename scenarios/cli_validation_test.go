@@ -38,6 +38,26 @@ func TestScenario_CLIValidation(t *testing.T) {
 		}
 	})
 
+	t.Run("tx-metadata requires WAL detector", func(t *testing.T) {
+		output, err := runPGPipe("listen", "--db", "postgres://localhost/test", "--channel", "orders", "--tx-metadata")
+		if err == nil {
+			t.Fatal("expected error for --tx-metadata without WAL")
+		}
+		if !strings.Contains(output, "--tx-metadata and --tx-markers require --detector wal") {
+			t.Errorf("unexpected output: %s", output)
+		}
+	})
+
+	t.Run("tx-markers requires WAL detector", func(t *testing.T) {
+		output, err := runPGPipe("listen", "--db", "postgres://localhost/test", "--channel", "orders", "--tx-markers")
+		if err == nil {
+			t.Fatal("expected error for --tx-markers without WAL")
+		}
+		if !strings.Contains(output, "--tx-metadata and --tx-markers require --detector wal") {
+			t.Errorf("unexpected output: %s", output)
+		}
+	})
+
 	t.Run("webhook without --url", func(t *testing.T) {
 		output, err := runPGPipe("listen", "--db", "postgres://localhost/test", "--channel", "orders", "--adapter", "webhook")
 		if err == nil {

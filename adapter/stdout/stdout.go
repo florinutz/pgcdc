@@ -26,6 +26,9 @@ func New(w io.Writer, logger *slog.Logger) *Adapter {
 	if w == nil {
 		w = os.Stdout
 	}
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &Adapter{
 		w:      w,
 		logger: logger,

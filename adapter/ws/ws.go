@@ -3,7 +3,6 @@ package ws
 import (
 	"context"
 	"encoding/json"
-	"io"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -40,7 +39,7 @@ func New(bufferSize int, pingInterval time.Duration, logger *slog.Logger) *Broke
 		pingInterval = defaultPingInterval
 	}
 	if logger == nil {
-		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+		logger = slog.Default()
 	}
 	return &Broker{
 		clients:      make(map[chan event.Event]string),

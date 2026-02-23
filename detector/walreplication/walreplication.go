@@ -7,8 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"math"
-	mrand "math/rand/v2"
 	"net/url"
 	"time"
 
@@ -17,10 +15,14 @@ import (
 	"github.com/jackc/pgx/v5/pgproto3"
 
 	"github.com/florinutz/pgpipe/event"
+	"github.com/florinutz/pgpipe/internal/backoff"
 	"github.com/florinutz/pgpipe/pgpipeerr"
 )
 
-const source = "wal_replication"
+const (
+	source     = "wal_replication"
+	txnChannel = "pgpipe:_txn"
+)
 
 const (
 	defaultBackoffBase    = 5 * time.Second
@@ -38,6 +40,7 @@ type Detector struct {
 	backoffBase time.Duration
 	backoffCap  time.Duration
 	txMetadata  bool
+	txMarkers   bool
 	logger      *slog.Logger
 }
 
@@ -51,7 +54,11 @@ type txState struct {
 // New creates a WAL logical replication detector for the given publication.
 // Duration parameters default to sensible values when zero.
 // When txMetadata is true, events include transaction info (xid, commit_time, seq).
-func New(dbURL string, publication string, backoffBase, backoffCap time.Duration, txMetadata bool, logger *slog.Logger) *Detector {
+// When txMarkers is true, synthetic BEGIN/COMMIT events are emitted (implies txMetadata).
+func New(dbURL string, publication string, backoffBase, backoffCap time.Duration, txMetadata, txMarkers bool, logger *slog.Logger) *Detector {
+	if txMarkers {
+		txMetadata = true
+	}
 	if backoffBase <= 0 {
 		backoffBase = defaultBackoffBase
 	}
@@ -67,6 +74,7 @@ func New(dbURL string, publication string, backoffBase, backoffCap time.Duration
 		backoffBase: backoffBase,
 		backoffCap:  backoffCap,
 		txMetadata:  txMetadata,
+		txMarkers:   txMarkers,
 		logger:      logger.With("detector", source),
 	}
 }
@@ -92,7 +100,7 @@ func (d *Detector) Start(ctx context.Context, events chan<- event.Event) error {
 			Err:    runErr,
 		}
 
-		delay := backoff(attempt, d.backoffBase, d.backoffCap)
+		delay := backoff.Jitter(attempt, d.backoffBase, d.backoffCap)
 		d.logger.Error("connection lost, reconnecting",
 			"error", disconnErr,
 			"attempt", attempt+1,
@@ -235,8 +243,18 @@ func (d *Detector) run(ctx context.Context, events chan<- event.Event) error {
 				if d.txMetadata {
 					currentTx = &txState{xid: m.Xid, commitTime: m.CommitTime}
 				}
+				if d.txMarkers {
+					if err := d.emitMarker(ctx, events, "BEGIN", m.Xid, m.CommitTime, 0); err != nil {
+						return err
+					}
+				}
 
 			case *pglogrepl.CommitMessage:
+				if d.txMarkers && currentTx != nil {
+					if err := d.emitMarker(ctx, events, "COMMIT", currentTx.xid, currentTx.commitTime, currentTx.seq); err != nil {
+						return err
+					}
+				}
 				currentTx = nil
 
 			case *pglogrepl.InsertMessage:
@@ -339,6 +357,36 @@ func (d *Detector) emitEvent(
 	return nil
 }
 
+// emitMarker sends a synthetic BEGIN or COMMIT marker event.
+func (d *Detector) emitMarker(ctx context.Context, events chan<- event.Event, op string, xid uint32, commitTime time.Time, eventCount int) error {
+	payload := map[string]any{
+		"xid":         xid,
+		"commit_time": commitTime,
+	}
+	if op == "COMMIT" {
+		payload["event_count"] = eventCount
+	}
+
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		d.logger.Error("marshal marker payload failed", "error", err)
+		return nil
+	}
+
+	ev, err := event.New(txnChannel, op, payloadJSON, source)
+	if err != nil {
+		d.logger.Error("create marker event failed", "error", err)
+		return nil
+	}
+
+	select {
+	case events <- ev:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return nil
+}
+
 // channelName returns the pgpipe channel name for a relation.
 // For non-public schemas: "pgpipe:<schema>.<table>", otherwise "pgpipe:<table>".
 func channelName(rel *pglogrepl.RelationMessage) string {
@@ -394,18 +442,4 @@ func randomSlotName() (string, error) {
 		return "", err
 	}
 	return "pgpipe_" + hex.EncodeToString(b), nil
-}
-
-// backoff returns an exponential delay with full jitter.
-func backoff(attempt int, base, maxDelay time.Duration) time.Duration {
-	const minDelay = 100 * time.Millisecond
-	exp := float64(base) * math.Pow(2, float64(attempt))
-	if exp > float64(maxDelay) || exp <= 0 {
-		exp = float64(maxDelay)
-	}
-	jitter := time.Duration(mrand.Int64N(int64(exp)))
-	if jitter < minDelay {
-		jitter = minDelay
-	}
-	return jitter
 }

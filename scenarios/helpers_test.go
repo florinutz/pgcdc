@@ -398,7 +398,7 @@ func startPipeline(t *testing.T, connStr string, channels []string, adapters ...
 	g.Go(func() error { return det.Start(gCtx, b.Ingest()) })
 
 	for _, a := range adapters {
-		sub, err := b.Subscribe()
+		sub, err := b.Subscribe(a.Name())
 		if err != nil {
 			cancel()
 			t.Fatalf("subscribe %s: %v", a.Name(), err)
@@ -525,22 +525,28 @@ func deleteRow(t *testing.T, connStr, table string, id int) {
 // startWALPipeline wires WAL detector -> bus -> adapters and starts them in an errgroup.
 func startWALPipeline(t *testing.T, connStr string, publication string, adapters ...adapter.Adapter) {
 	t.Helper()
-	startWALPipelineWithOpts(t, connStr, publication, false, adapters...)
+	startWALPipelineWithOpts(t, connStr, publication, false, false, adapters...)
 }
 
 // startWALPipelineWithTxMetadata is like startWALPipeline but enables transaction metadata.
 func startWALPipelineWithTxMetadata(t *testing.T, connStr string, publication string, adapters ...adapter.Adapter) {
 	t.Helper()
-	startWALPipelineWithOpts(t, connStr, publication, true, adapters...)
+	startWALPipelineWithOpts(t, connStr, publication, true, false, adapters...)
 }
 
-func startWALPipelineWithOpts(t *testing.T, connStr string, publication string, txMetadata bool, adapters ...adapter.Adapter) {
+// startWALPipelineWithTxMarkers is like startWALPipeline but enables transaction markers (implies metadata).
+func startWALPipelineWithTxMarkers(t *testing.T, connStr string, publication string, adapters ...adapter.Adapter) {
+	t.Helper()
+	startWALPipelineWithOpts(t, connStr, publication, true, true, adapters...)
+}
+
+func startWALPipelineWithOpts(t *testing.T, connStr string, publication string, txMetadata, txMarkers bool, adapters ...adapter.Adapter) {
 	t.Helper()
 
 	logger := testLogger()
 	ctx, cancel := context.WithCancel(context.Background())
 
-	det := walreplication.New(connStr, publication, 0, 0, txMetadata, logger)
+	det := walreplication.New(connStr, publication, 0, 0, txMetadata, txMarkers, logger)
 	b := bus.New(64, logger)
 
 	g, gCtx := errgroup.WithContext(ctx)
@@ -548,7 +554,7 @@ func startWALPipelineWithOpts(t *testing.T, connStr string, publication string, 
 	g.Go(func() error { return det.Start(gCtx, b.Ingest()) })
 
 	for _, a := range adapters {
-		sub, err := b.Subscribe()
+		sub, err := b.Subscribe(a.Name())
 		if err != nil {
 			cancel()
 			t.Fatalf("subscribe %s: %v", a.Name(), err)

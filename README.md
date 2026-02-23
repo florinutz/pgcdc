@@ -121,6 +121,53 @@ pgpipe listen --detector wal --publication pgpipe_orders --db postgres://localho
 
 WAL replication events use the same format as LISTEN/NOTIFY (`channel: pgpipe:<table>`, same payload structure), so all adapters and SSE filtering work identically regardless of detector type.
 
+### Transaction Metadata
+
+Enrich WAL events with transaction context:
+
+```bash
+pgpipe listen --detector wal --publication pgpipe_orders --tx-metadata --db postgres://...
+```
+
+Each event includes a `transaction` field:
+
+```json
+{
+  "id": "...",
+  "channel": "pgpipe:orders",
+  "operation": "INSERT",
+  "payload": {"op": "INSERT", "table": "orders", "row": {"id": 1}, "old": null},
+  "source": "wal_replication",
+  "created_at": "2025-01-15T10:30:00Z",
+  "transaction": {
+    "xid": 1234,
+    "commit_time": "2025-01-15T10:30:00Z",
+    "seq": 1
+  }
+}
+```
+
+Fields: `xid` (PostgreSQL transaction ID), `commit_time` (when the transaction committed), `seq` (1-based position within the transaction). LISTEN/NOTIFY events omit this field (the protocol has no transaction info).
+
+### Transaction Markers
+
+Wrap each transaction in synthetic BEGIN/COMMIT events:
+
+```bash
+pgpipe listen --detector wal --publication pgpipe_orders --tx-markers --db postgres://...
+```
+
+`--tx-markers` implies `--tx-metadata`. Output stream:
+
+```json
+{"channel":"pgpipe:_txn","operation":"BEGIN","payload":{"xid":1234,"commit_time":"..."},...}
+{"channel":"pgpipe:orders","operation":"INSERT","transaction":{"xid":1234,"seq":1},...}
+{"channel":"pgpipe:orders","operation":"INSERT","transaction":{"xid":1234,"seq":2},...}
+{"channel":"pgpipe:_txn","operation":"COMMIT","payload":{"xid":1234,"event_count":2,"commit_time":"..."},...}
+```
+
+Marker events use channel `pgpipe:_txn` (underscore prefix signals synthetic/system events) and have no `transaction` field themselves. The COMMIT payload includes `event_count` for the number of DML events in the transaction.
+
 ## Configuration
 
 pgpipe supports three layers of configuration (highest priority wins):
@@ -317,6 +364,8 @@ pgpipe listen [flags]
       --signing-key string     HMAC signing key for webhook
       --detector string        Detector type: listen_notify or wal (default "listen_notify")
       --publication string     PostgreSQL publication name (required for --detector wal)
+      --tx-metadata            Include transaction metadata in WAL events (xid, commit_time, seq)
+      --tx-markers             Emit BEGIN/COMMIT marker events (implies --tx-metadata)
       --metrics-addr string    Standalone metrics/health server address (e.g. :9090)
       --file-path string       File adapter output path
       --file-max-size int      File rotation size in bytes (default 104857600)

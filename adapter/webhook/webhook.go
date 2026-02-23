@@ -10,12 +10,11 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"math"
-	"math/rand/v2"
 	"net/http"
 	"time"
 
 	"github.com/florinutz/pgpipe/event"
+	"github.com/florinutz/pgpipe/internal/backoff"
 	"github.com/florinutz/pgpipe/metrics"
 	"github.com/florinutz/pgpipe/pgpipeerr"
 )
@@ -57,7 +56,7 @@ func New(url string, headers map[string]string, signingKey string, maxRetries in
 		backoffCap = defaultBackoffCap
 	}
 	if logger == nil {
-		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+		logger = slog.Default()
 	}
 	return &Adapter{
 		url:         url,
@@ -115,10 +114,13 @@ func (a *Adapter) deliver(ctx context.Context, ev event.Event) error {
 		return fmt.Errorf("marshal event %s: %w", ev.ID, err)
 	}
 
+	var lastStatus int
+	var lastErr error
+
 	for attempt := range a.maxRetries {
 		if attempt > 0 {
 			metrics.WebhookRetries.Inc()
-			wait := Backoff(attempt, a.backoffBase, a.backoffCap)
+			wait := backoff.Jitter(attempt, a.backoffBase, a.backoffCap)
 			a.logger.Info("retrying delivery",
 				"event_id", ev.ID,
 				"attempt", attempt+1,
@@ -160,6 +162,7 @@ func (a *Adapter) deliver(ctx context.Context, ev event.Event) error {
 		metrics.WebhookDuration.Observe(time.Since(start).Seconds())
 		if err != nil {
 			// Network errors are retryable.
+			lastErr = err
 			a.logger.Warn("http request failed",
 				"event_id", ev.ID,
 				"attempt", attempt+1,
@@ -180,6 +183,7 @@ func (a *Adapter) deliver(ctx context.Context, ev event.Event) error {
 		}
 
 		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
+			lastStatus = resp.StatusCode
 			a.logger.Warn("retryable response",
 				"event_id", ev.ID,
 				"status", resp.StatusCode,
@@ -197,28 +201,10 @@ func (a *Adapter) deliver(ctx context.Context, ev event.Event) error {
 	}
 
 	return &pgpipeerr.WebhookDeliveryError{
-		EventID: ev.ID,
-		URL:     a.url,
-		Retries: a.maxRetries,
+		EventID:    ev.ID,
+		URL:        a.url,
+		StatusCode: lastStatus,
+		Retries:    a.maxRetries,
+		Err:        lastErr,
 	}
-}
-
-// Backoff calculates the wait duration for a given retry attempt using
-// exponential backoff with full jitter: random value in [0, min(cap, base*2^attempt)].
-// attempt is zero-indexed (0 = first retry wait).
-func Backoff(attempt int, base, cap time.Duration) time.Duration {
-	if base <= 0 {
-		base = defaultBackoffBase
-	}
-	if cap <= 0 {
-		cap = defaultBackoffCap
-	}
-	exp := math.Pow(2, float64(attempt))
-	delayMs := float64(base.Milliseconds()) * exp
-	capMs := float64(cap.Milliseconds())
-	if delayMs > capMs {
-		delayMs = capMs
-	}
-	jittered := rand.Float64() * delayMs
-	return time.Duration(jittered) * time.Millisecond
 }

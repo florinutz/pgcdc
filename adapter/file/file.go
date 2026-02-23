@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 
@@ -38,7 +37,7 @@ func New(path string, maxSize int64, maxFiles int, logger *slog.Logger) *Adapter
 		maxFiles = defaultMaxFiles
 	}
 	if logger == nil {
-		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+		logger = slog.Default()
 	}
 	return &Adapter{
 		path:     path,

@@ -14,18 +14,14 @@ import (
 func TestScenario_WALReplication(t *testing.T) {
 	connStr := startPostgres(t)
 
-	// Create table and publication for WAL replication.
-	createTable(t, connStr, "wal_orders")
-	createPublication(t, connStr, "pgpipe_wal_orders", "wal_orders")
-
-	capture := newLineCapture()
-	startWALPipeline(t, connStr, "pgpipe_wal_orders", stdout.New(capture, testLogger()))
-
-	// Wait for replication slot setup and initial sync.
-	time.Sleep(3 * time.Second)
-
 	t.Run("happy path", func(t *testing.T) {
-		// INSERT a row directly — no trigger needed.
+		createTable(t, connStr, "wal_orders")
+		createPublication(t, connStr, "pgpipe_wal_orders", "wal_orders")
+
+		capture := newLineCapture()
+		startWALPipeline(t, connStr, "pgpipe_wal_orders", stdout.New(capture, testLogger()))
+		time.Sleep(3 * time.Second)
+
 		insertRow(t, connStr, "wal_orders", map[string]any{"key": "value"})
 
 		line := capture.waitLine(t, 10*time.Second)
@@ -47,7 +43,6 @@ func TestScenario_WALReplication(t *testing.T) {
 			t.Error("event ID is empty")
 		}
 
-		// Verify payload structure matches LISTEN/NOTIFY format.
 		var payload map[string]any
 		if err := json.Unmarshal(ev.Payload, &payload); err != nil {
 			t.Fatalf("invalid payload JSON: %v", err)
@@ -64,9 +59,14 @@ func TestScenario_WALReplication(t *testing.T) {
 	})
 
 	t.Run("no transaction metadata by default", func(t *testing.T) {
-		// The existing pipeline has txMetadata=false. Verify events omit the field.
-		capture.drain()
-		insertRow(t, connStr, "wal_orders", map[string]any{"check": "no_tx"})
+		createTable(t, connStr, "wal_notx_orders")
+		createPublication(t, connStr, "pgpipe_wal_notx_orders", "wal_notx_orders")
+
+		capture := newLineCapture()
+		startWALPipeline(t, connStr, "pgpipe_wal_notx_orders", stdout.New(capture, testLogger()))
+		time.Sleep(3 * time.Second)
+
+		insertRow(t, connStr, "wal_notx_orders", map[string]any{"check": "no_tx"})
 		line := capture.waitLine(t, 10*time.Second)
 
 		var ev event.Event
@@ -77,7 +77,6 @@ func TestScenario_WALReplication(t *testing.T) {
 			t.Errorf("expected nil transaction metadata, got %+v", ev.Transaction)
 		}
 
-		// Also verify the field is absent from the raw JSON.
 		var raw map[string]json.RawMessage
 		json.Unmarshal([]byte(line), &raw)
 		if _, ok := raw["transaction"]; ok {
@@ -86,10 +85,14 @@ func TestScenario_WALReplication(t *testing.T) {
 	})
 
 	t.Run("update and delete captured", func(t *testing.T) {
-		capture.drain()
+		createTable(t, connStr, "wal_ud_orders")
+		createPublication(t, connStr, "pgpipe_wal_ud_orders", "wal_ud_orders")
 
-		// INSERT a row we can update/delete.
-		insertRow(t, connStr, "wal_orders", map[string]any{"status": "pending"})
+		capture := newLineCapture()
+		startWALPipeline(t, connStr, "pgpipe_wal_ud_orders", stdout.New(capture, testLogger()))
+		time.Sleep(3 * time.Second)
+
+		insertRow(t, connStr, "wal_ud_orders", map[string]any{"status": "pending"})
 		insertLine := capture.waitLine(t, 10*time.Second)
 
 		var insertEv event.Event
@@ -97,11 +100,9 @@ func TestScenario_WALReplication(t *testing.T) {
 			t.Fatalf("invalid JSON for insert: %v", err)
 		}
 
-		// Get the row ID from the INSERT event payload.
 		var insertPayload map[string]any
 		json.Unmarshal(insertEv.Payload, &insertPayload)
 		row := insertPayload["row"].(map[string]any)
-		// The id comes as a string from WAL text format; parse it.
 		idStr, ok := row["id"].(string)
 		if !ok {
 			t.Fatalf("row id is not a string: %T", row["id"])
@@ -111,8 +112,7 @@ func TestScenario_WALReplication(t *testing.T) {
 			rowID = rowID*10 + int(c-'0')
 		}
 
-		// UPDATE the row.
-		updateRow(t, connStr, "wal_orders", rowID, map[string]any{"status": "shipped"})
+		updateRow(t, connStr, "wal_ud_orders", rowID, map[string]any{"status": "shipped"})
 		updateLine := capture.waitLine(t, 10*time.Second)
 
 		var updateEv event.Event
@@ -129,8 +129,7 @@ func TestScenario_WALReplication(t *testing.T) {
 			t.Error("update payload.old is nil, expected old row data")
 		}
 
-		// DELETE the row.
-		deleteRow(t, connStr, "wal_orders", rowID)
+		deleteRow(t, connStr, "wal_ud_orders", rowID)
 		deleteLine := capture.waitLine(t, 10*time.Second)
 
 		var deleteEv event.Event
@@ -147,22 +146,15 @@ func TestScenario_WALReplication(t *testing.T) {
 			t.Error("delete payload.row is nil, expected old row data")
 		}
 	})
-}
-
-func TestScenario_WALTransactionMetadata(t *testing.T) {
-	connStr := startPostgres(t)
-
-	// Use a separate table and publication for this scenario.
-	createTable(t, connStr, "wal_tx_orders")
-	createPublication(t, connStr, "pgpipe_wal_tx_orders", "wal_tx_orders")
-
-	capture := newLineCapture()
-	startWALPipelineWithTxMetadata(t, connStr, "pgpipe_wal_tx_orders", stdout.New(capture, testLogger()))
-
-	time.Sleep(3 * time.Second)
 
 	t.Run("transaction metadata present", func(t *testing.T) {
-		// Insert two rows in a single transaction.
+		createTable(t, connStr, "wal_tx_orders")
+		createPublication(t, connStr, "pgpipe_wal_tx_orders", "wal_tx_orders")
+
+		capture := newLineCapture()
+		startWALPipelineWithTxMetadata(t, connStr, "pgpipe_wal_tx_orders", stdout.New(capture, testLogger()))
+		time.Sleep(3 * time.Second)
+
 		insertRowsInTx(t, connStr, "wal_tx_orders", []map[string]any{
 			{"item": "alpha"},
 			{"item": "beta"},
@@ -179,7 +171,6 @@ func TestScenario_WALTransactionMetadata(t *testing.T) {
 			t.Fatalf("invalid JSON for event 2: %v", err)
 		}
 
-		// Both events must have transaction metadata.
 		if ev1.Transaction == nil {
 			t.Fatal("event 1 missing transaction metadata")
 		}
@@ -187,7 +178,6 @@ func TestScenario_WALTransactionMetadata(t *testing.T) {
 			t.Fatal("event 2 missing transaction metadata")
 		}
 
-		// Same transaction: xid and commit_time must match.
 		if ev1.Transaction.Xid != ev2.Transaction.Xid {
 			t.Errorf("xid mismatch: event1=%d, event2=%d", ev1.Transaction.Xid, ev2.Transaction.Xid)
 		}
@@ -196,7 +186,6 @@ func TestScenario_WALTransactionMetadata(t *testing.T) {
 				ev1.Transaction.CommitTime, ev2.Transaction.CommitTime)
 		}
 
-		// Sequence within the transaction.
 		if ev1.Transaction.Seq != 1 {
 			t.Errorf("event 1 seq = %d, want 1", ev1.Transaction.Seq)
 		}
@@ -204,14 +193,116 @@ func TestScenario_WALTransactionMetadata(t *testing.T) {
 			t.Errorf("event 2 seq = %d, want 2", ev2.Transaction.Seq)
 		}
 
-		// Xid must be non-zero.
 		if ev1.Transaction.Xid == 0 {
 			t.Error("transaction xid is 0")
 		}
 
-		// CommitTime must be recent (within last minute).
 		if time.Since(ev1.Transaction.CommitTime) > time.Minute {
 			t.Errorf("commit_time too old: %v", ev1.Transaction.CommitTime)
+		}
+	})
+
+	t.Run("begin and commit markers wrap DML events", func(t *testing.T) {
+		createTable(t, connStr, "wal_marker_orders")
+		createPublication(t, connStr, "pgpipe_wal_marker_orders", "wal_marker_orders")
+
+		capture := newLineCapture()
+		startWALPipelineWithTxMarkers(t, connStr, "pgpipe_wal_marker_orders", stdout.New(capture, testLogger()))
+		time.Sleep(3 * time.Second)
+
+		insertRowsInTx(t, connStr, "wal_marker_orders", []map[string]any{
+			{"item": "alpha"},
+			{"item": "beta"},
+		})
+
+		line1 := capture.waitLine(t, 10*time.Second)
+		line2 := capture.waitLine(t, 10*time.Second)
+		line3 := capture.waitLine(t, 10*time.Second)
+		line4 := capture.waitLine(t, 10*time.Second)
+
+		var ev1, ev2, ev3, ev4 event.Event
+		if err := json.Unmarshal([]byte(line1), &ev1); err != nil {
+			t.Fatalf("invalid JSON for event 1: %v", err)
+		}
+		if err := json.Unmarshal([]byte(line2), &ev2); err != nil {
+			t.Fatalf("invalid JSON for event 2: %v", err)
+		}
+		if err := json.Unmarshal([]byte(line3), &ev3); err != nil {
+			t.Fatalf("invalid JSON for event 3: %v", err)
+		}
+		if err := json.Unmarshal([]byte(line4), &ev4); err != nil {
+			t.Fatalf("invalid JSON for event 4: %v", err)
+		}
+
+		// BEGIN marker.
+		if ev1.Operation != "BEGIN" {
+			t.Errorf("event 1 operation = %q, want BEGIN", ev1.Operation)
+		}
+		if ev1.Channel != "pgpipe:_txn" {
+			t.Errorf("event 1 channel = %q, want pgpipe:_txn", ev1.Channel)
+		}
+		if ev1.Transaction != nil {
+			t.Errorf("BEGIN marker should have nil Transaction, got %+v", ev1.Transaction)
+		}
+
+		// DML events with transaction metadata.
+		if ev2.Operation != "INSERT" {
+			t.Errorf("event 2 operation = %q, want INSERT", ev2.Operation)
+		}
+		if ev2.Transaction == nil {
+			t.Fatal("event 2 missing transaction metadata")
+		}
+		if ev2.Transaction.Seq != 1 {
+			t.Errorf("event 2 seq = %d, want 1", ev2.Transaction.Seq)
+		}
+
+		if ev3.Operation != "INSERT" {
+			t.Errorf("event 3 operation = %q, want INSERT", ev3.Operation)
+		}
+		if ev3.Transaction == nil {
+			t.Fatal("event 3 missing transaction metadata")
+		}
+		if ev3.Transaction.Seq != 2 {
+			t.Errorf("event 3 seq = %d, want 2", ev3.Transaction.Seq)
+		}
+
+		// COMMIT marker.
+		if ev4.Operation != "COMMIT" {
+			t.Errorf("event 4 operation = %q, want COMMIT", ev4.Operation)
+		}
+		if ev4.Channel != "pgpipe:_txn" {
+			t.Errorf("event 4 channel = %q, want pgpipe:_txn", ev4.Channel)
+		}
+		if ev4.Transaction != nil {
+			t.Errorf("COMMIT marker should have nil Transaction, got %+v", ev4.Transaction)
+		}
+
+		// BEGIN payload contains xid matching DML xid.
+		var beginPayload map[string]any
+		if err := json.Unmarshal(ev1.Payload, &beginPayload); err != nil {
+			t.Fatalf("invalid BEGIN payload: %v", err)
+		}
+		beginXid := uint32(beginPayload["xid"].(float64))
+		if beginXid != ev2.Transaction.Xid {
+			t.Errorf("BEGIN xid = %d, DML xid = %d", beginXid, ev2.Transaction.Xid)
+		}
+
+		if beginPayload["commit_time"] == nil {
+			t.Error("BEGIN payload missing commit_time")
+		}
+
+		// COMMIT payload contains xid and event_count.
+		var commitPayload map[string]any
+		if err := json.Unmarshal(ev4.Payload, &commitPayload); err != nil {
+			t.Fatalf("invalid COMMIT payload: %v", err)
+		}
+		commitXid := uint32(commitPayload["xid"].(float64))
+		if commitXid != ev2.Transaction.Xid {
+			t.Errorf("COMMIT xid = %d, DML xid = %d", commitXid, ev2.Transaction.Xid)
+		}
+		eventCount := int(commitPayload["event_count"].(float64))
+		if eventCount != 2 {
+			t.Errorf("COMMIT event_count = %d, want 2", eventCount)
 		}
 	})
 }

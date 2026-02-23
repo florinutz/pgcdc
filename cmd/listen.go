@@ -50,6 +50,7 @@ func init() {
 	f.String("detector", "listen_notify", "detector type: listen_notify or wal")
 	f.String("publication", "", "PostgreSQL publication name (required for --detector wal)")
 	f.Bool("tx-metadata", false, "include transaction metadata in WAL events (xid, commit_time, seq)")
+	f.Bool("tx-markers", false, "emit BEGIN/COMMIT marker events (implies --tx-metadata)")
 
 	// File adapter flags.
 	f.String("file-path", "", "file adapter output path")
@@ -77,6 +78,7 @@ func init() {
 	mustBindPFlag("detector.type", f.Lookup("detector"))
 	mustBindPFlag("detector.publication", f.Lookup("publication"))
 	mustBindPFlag("detector.tx_metadata", f.Lookup("tx-metadata"))
+	mustBindPFlag("detector.tx_markers", f.Lookup("tx-markers"))
 	mustBindPFlag("file.path", f.Lookup("file-path"))
 	mustBindPFlag("file.max_size", f.Lookup("file-max-size"))
 	mustBindPFlag("file.max_files", f.Lookup("file-max-files"))
@@ -93,7 +95,15 @@ func runListen(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("unmarshal config: %w", err)
 	}
 
+	// tx-markers implies tx-metadata.
+	if cfg.Detector.TxMarkers {
+		cfg.Detector.TxMetadata = true
+	}
+
 	// Validation.
+	if cfg.Detector.Type != "wal" && (cfg.Detector.TxMetadata || cfg.Detector.TxMarkers) {
+		return fmt.Errorf("--tx-metadata and --tx-markers require --detector wal")
+	}
 	if cfg.DatabaseURL == "" {
 		return fmt.Errorf("no database URL specified; use --db, set database_url in config, or export PGPIPE_DATABASE_URL")
 	}
@@ -154,7 +164,7 @@ func runListen(cmd *cobra.Command, args []string) error {
 	case "listen_notify", "":
 		det = listennotify.New(cfg.DatabaseURL, cfg.Channels, cfg.Detector.BackoffBase, cfg.Detector.BackoffCap, logger)
 	case "wal":
-		det = walreplication.New(cfg.DatabaseURL, cfg.Detector.Publication, cfg.Detector.BackoffBase, cfg.Detector.BackoffCap, cfg.Detector.TxMetadata, logger)
+		det = walreplication.New(cfg.DatabaseURL, cfg.Detector.Publication, cfg.Detector.BackoffBase, cfg.Detector.BackoffCap, cfg.Detector.TxMetadata, cfg.Detector.TxMarkers, logger)
 	default:
 		return fmt.Errorf("unknown detector type: %q (expected listen_notify or wal)", cfg.Detector.Type)
 	}

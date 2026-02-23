@@ -102,7 +102,7 @@ func (p *Pipeline) Run(ctx context.Context) error {
 
 	// Subscribe and start each adapter.
 	for _, a := range p.adapters {
-		sub, err := p.bus.Subscribe()
+		sub, err := p.bus.Subscribe(a.Name())
 		if err != nil {
 			return fmt.Errorf("subscribe adapter %s: %w", a.Name(), err)
 		}

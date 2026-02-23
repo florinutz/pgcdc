@@ -4,13 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
-	"math"
-	"math/rand/v2"
 	"time"
 
 	"github.com/florinutz/pgpipe/event"
+	"github.com/florinutz/pgpipe/internal/backoff"
 	"github.com/florinutz/pgpipe/metrics"
 	"github.com/jackc/pgx/v5"
 )
@@ -43,7 +41,7 @@ func New(dbURL, table string, backoffBase, backoffCap time.Duration, logger *slo
 		backoffCap = defaultBackoffCap
 	}
 	if logger == nil {
-		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+		logger = slog.Default()
 	}
 	return &Adapter{
 		dbURL:       dbURL,
@@ -75,7 +73,7 @@ func (a *Adapter) Start(ctx context.Context, events <-chan event.Event) error {
 			return nil
 		}
 
-		delay := backoff(attempt, a.backoffBase, a.backoffCap)
+		delay := backoff.Jitter(attempt, a.backoffBase, a.backoffCap)
 		a.logger.Error("connection lost, reconnecting",
 			"error", runErr,
 			"attempt", attempt+1,
@@ -148,17 +146,4 @@ func (a *Adapter) run(ctx context.Context, events <-chan event.Event) error {
 			metrics.EventsDelivered.WithLabelValues("pg_table").Inc()
 		}
 	}
-}
-
-func backoff(attempt int, base, maxDelay time.Duration) time.Duration {
-	const minDelay = 100 * time.Millisecond
-	exp := float64(base) * math.Pow(2, float64(attempt))
-	if exp > float64(maxDelay) || exp <= 0 {
-		exp = float64(maxDelay)
-	}
-	jitter := time.Duration(rand.Int64N(int64(exp)))
-	if jitter < minDelay {
-		jitter = minDelay
-	}
-	return jitter
 }

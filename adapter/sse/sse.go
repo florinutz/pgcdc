@@ -40,7 +40,7 @@ func New(bufferSize int, heartbeat time.Duration, logger *slog.Logger) *Broker {
 		heartbeat = defaultHeartbeat
 	}
 	if logger == nil {
-		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+		logger = slog.Default()
 	}
 	return &Broker{
 		clients:    make(map[chan event.Event]string),

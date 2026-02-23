@@ -126,7 +126,7 @@ func startPipelineWithWS(t *testing.T, connStr string, channels []string) (strin
 	g.Go(func() error { return b.Start(gCtx) })
 	g.Go(func() error { return det.Start(gCtx, b.Ingest()) })
 
-	sub, err := b.Subscribe()
+	sub, err := b.Subscribe("ws")
 	if err != nil {
 		cancel()
 		t.Fatalf("subscribe ws: %v", err)

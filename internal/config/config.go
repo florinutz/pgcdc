@@ -71,6 +71,7 @@ type DetectorConfig struct {
 	BackoffCap  time.Duration `mapstructure:"backoff_cap"`
 	Publication string        `mapstructure:"publication"`
 	TxMetadata  bool          `mapstructure:"tx_metadata"`
+	TxMarkers   bool          `mapstructure:"tx_markers"`
 }
 
 func Default() Config {

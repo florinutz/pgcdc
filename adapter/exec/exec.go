@@ -4,14 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
-	"math"
-	"math/rand/v2"
 	"os/exec"
 	"time"
 
 	"github.com/florinutz/pgpipe/event"
+	"github.com/florinutz/pgpipe/internal/backoff"
 	"github.com/florinutz/pgpipe/metrics"
 	"github.com/florinutz/pgpipe/pgpipeerr"
 )
@@ -40,7 +38,7 @@ func New(command string, backoffBase, backoffCap time.Duration, logger *slog.Log
 		backoffCap = defaultBackoffCap
 	}
 	if logger == nil {
-		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+		logger = slog.Default()
 	}
 	return &Adapter{
 		command:     command,
@@ -68,7 +66,7 @@ func (a *Adapter) Start(ctx context.Context, events <-chan event.Event) error {
 			return ctx.Err()
 		}
 
-		delay := backoff(attempt, a.backoffBase, a.backoffCap)
+		delay := backoff.Jitter(attempt, a.backoffBase, a.backoffCap)
 		a.logger.Error("process exited, restarting",
 			"error", runErr,
 			"attempt", attempt+1,
@@ -142,17 +140,4 @@ func (a *Adapter) run(ctx context.Context, events <-chan event.Event, pending **
 			metrics.EventsDelivered.WithLabelValues("exec").Inc()
 		}
 	}
-}
-
-func backoff(attempt int, base, maxDelay time.Duration) time.Duration {
-	const minDelay = 100 * time.Millisecond
-	exp := float64(base) * math.Pow(2, float64(attempt))
-	if exp > float64(maxDelay) || exp <= 0 {
-		exp = float64(maxDelay)
-	}
-	jitter := time.Duration(rand.Int64N(int64(exp)))
-	if jitter < minDelay {
-		jitter = minDelay
-	}
-	return jitter
 }

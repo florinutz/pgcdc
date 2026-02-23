@@ -64,3 +64,59 @@ func TestScenario_Reconnection(t *testing.T) {
 		}
 	})
 }
+
+func TestScenario_WALReconnection(t *testing.T) {
+	connStr := startPostgres(t)
+
+	createTable(t, connStr, "wal_reconnect_orders")
+	createPublication(t, connStr, "pgpipe_wal_reconnect", "wal_reconnect_orders")
+
+	capture := newLineCapture()
+	startWALPipeline(t, connStr, "pgpipe_wal_reconnect", stdout.New(capture, testLogger()))
+
+	// Wait for replication slot setup.
+	time.Sleep(3 * time.Second)
+
+	t.Run("happy path", func(t *testing.T) {
+		insertRow(t, connStr, "wal_reconnect_orders", map[string]any{"key": "value"})
+
+		line := capture.waitLine(t, 10*time.Second)
+
+		var ev event.Event
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			t.Fatalf("invalid JSON: %v\nraw: %s", err, line)
+		}
+		if ev.Operation != "INSERT" {
+			t.Errorf("operation = %q, want INSERT", ev.Operation)
+		}
+		if ev.Source != "wal_replication" {
+			t.Errorf("source = %q, want wal_replication", ev.Source)
+		}
+	})
+
+	t.Run("events resume after WAL reconnect", func(t *testing.T) {
+		terminateBackends(t, connStr)
+		capture.drain()
+
+		deadline := time.After(30 * time.Second)
+		for {
+			insertRow(t, connStr, "wal_reconnect_orders", map[string]any{"after": "reconnect"})
+
+			select {
+			case line := <-capture.lines:
+				var ev event.Event
+				if err := json.Unmarshal([]byte(line), &ev); err != nil {
+					t.Fatalf("invalid JSON after reconnect: %v", err)
+				}
+				if ev.Operation != "INSERT" {
+					t.Errorf("operation = %q, want INSERT", ev.Operation)
+				}
+				return
+			case <-time.After(2 * time.Second):
+				// Not reconnected yet, retry.
+			case <-deadline:
+				t.Fatal("WAL detector did not reconnect within 30s")
+			}
+		}
+	})
+}
