@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/florinutz/pgcdc/dlq"
 	"github.com/florinutz/pgcdc/event"
 	"github.com/florinutz/pgcdc/internal/backoff"
 	"github.com/florinutz/pgcdc/metrics"
@@ -37,7 +38,11 @@ type Adapter struct {
 	backoffCap  time.Duration
 	client      *http.Client
 	logger      *slog.Logger
+	dlq         dlq.DLQ
 }
+
+// SetDLQ sets the dead letter queue for failed deliveries.
+func (a *Adapter) SetDLQ(d dlq.DLQ) { a.dlq = d }
 
 // New creates a webhook adapter. If maxRetries is <= 0 it defaults to 5.
 // If logger is nil a no-op logger is used. Duration parameters default
@@ -95,6 +100,11 @@ func (a *Adapter) Start(ctx context.Context, events <-chan event.Event) error {
 					"channel", ev.Channel,
 					"error", err,
 				)
+				if a.dlq != nil {
+					if dlqErr := a.dlq.Record(ctx, ev, "webhook", err); dlqErr != nil {
+						a.logger.Error("dlq record failed", "error", dlqErr)
+					}
+				}
 			}
 		}
 	}

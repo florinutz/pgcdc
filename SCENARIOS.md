@@ -22,6 +22,13 @@ Each scenario = one file, one user journey, happy path + one critical failure.
 | 16 | Snapshot-first | `snapshot_first_test.go` | WAL detector exports existing rows as SNAPSHOT events then transitions to live WAL streaming with zero gap | `--snapshot-first` without WAL detector or table errors cleanly (covered in CLI validation) |
 | 17 | Embedding delivery | `embedding_test.go` | NOTIFY → detector → bus → embedding adapter calls OpenAI-compatible API and UPSERTs vector into pgvector table; UPDATE re-embeds; DELETE removes vector | API returns 500 twice then succeeds; adapter retries and event eventually delivered |
 | 18 | Iceberg append | `iceberg_test.go` | NOTIFY → detector → bus → iceberg adapter buffers events, flushes to Parquet data files with Avro manifests and Iceberg v2 metadata.json via hadoop catalog | Write failure (read-only dir): adapter retries on next flush and events eventually written |
+| 19 | Persistent slot | `persistent_slot_test.go` | WAL detector with persistent slot creates non-temporary replication slot; checkpoint table stores LSN; events survive reconnect | Slot survives disconnect: detector reconnects to existing slot, events resume flowing |
+| 20 | NATS JetStream | `nats_test.go` | NOTIFY → detector → bus → NATS adapter publishes to JetStream with correct subject mapping and dedup ID | N/A (single happy path with full round-trip verification) |
+| 21 | Outbox pattern | `outbox_test.go` | Outbox detector polls table, emits events, deletes processed rows; events arrive at stdout with correct channel/operation/payload | Keep-processed mode: rows have processed_at set instead of being deleted |
+
+| 22 | Search sync | `search_test.go` | NOTIFY → detector → bus → search adapter upserts document to Typesense; DELETE removes document | N/A (happy path with full round-trip) |
+| 23 | Redis cache | `redis_test.go` | NOTIFY → detector → bus → redis adapter DELs key in invalidate mode; SET key in sync mode | N/A (happy path with both modes) |
+| 24 | gRPC streaming | `grpc_test.go` | NOTIFY → detector → bus → gRPC adapter streams event to connected client; channel filtering works | N/A (happy path with channel filter) |
 
 ## Adding a new scenario
 

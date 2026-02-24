@@ -12,10 +12,14 @@ import (
 
 const defaultBufferSize = 1024
 
+// FilterFunc returns true if the event should be delivered to the subscriber.
+type FilterFunc func(event.Event) bool
+
 // subscriber pairs a channel with its adapter name for metrics labeling.
 type subscriber struct {
-	ch   chan event.Event
-	name string
+	ch     chan event.Event
+	name   string
+	filter FilterFunc
 }
 
 // Bus receives events on an ingest channel and fans them out to all subscriber
@@ -55,6 +59,12 @@ func (b *Bus) Ingest() chan<- event.Event {
 // receive-only. The name identifies the subscriber (typically the adapter name)
 // and is used for metrics labels. Returns an error if the bus has already been stopped.
 func (b *Bus) Subscribe(name string) (<-chan event.Event, error) {
+	return b.SubscribeWithFilter(name, nil)
+}
+
+// SubscribeWithFilter is like Subscribe but applies a filter to each event
+// before delivery. If filter is nil, all events are delivered.
+func (b *Bus) SubscribeWithFilter(name string, filter FilterFunc) (<-chan event.Event, error) {
 	ch := make(chan event.Event, b.bufferSize)
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -62,7 +72,7 @@ func (b *Bus) Subscribe(name string) (<-chan event.Event, error) {
 		close(ch)
 		return ch, pgcdcerr.ErrBusClosed
 	}
-	b.subscribers = append(b.subscribers, subscriber{ch: ch, name: name})
+	b.subscribers = append(b.subscribers, subscriber{ch: ch, name: name, filter: filter})
 	metrics.BusSubscribers.Set(float64(len(b.subscribers)))
 	return ch, nil
 }
@@ -88,6 +98,9 @@ func (b *Bus) Start(ctx context.Context) error {
 			metrics.EventsReceived.Inc()
 			b.mu.RLock()
 			for _, sub := range b.subscribers {
+				if sub.filter != nil && !sub.filter(ev) {
+					continue
+				}
 				select {
 				case sub.ch <- ev:
 				default:

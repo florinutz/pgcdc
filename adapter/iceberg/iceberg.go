@@ -2,6 +2,7 @@ package iceberg
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -194,6 +195,7 @@ func (a *Adapter) run(ctx context.Context, events <-chan event.Event) error {
 				// Channel closed. Flush remaining.
 				if err := a.flush(ctx); err != nil {
 					a.logger.Error("final flush failed", "error", err)
+					return fmt.Errorf("final flush: %w", err)
 				}
 				return nil
 			}

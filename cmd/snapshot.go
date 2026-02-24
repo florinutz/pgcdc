@@ -6,13 +6,17 @@ import (
 	"log/slog"
 	"os/signal"
 	"syscall"
+	"time"
 
 	pgcdc "github.com/florinutz/pgcdc"
 	embeddingadapter "github.com/florinutz/pgcdc/adapter/embedding"
 	execadapter "github.com/florinutz/pgcdc/adapter/exec"
 	fileadapter "github.com/florinutz/pgcdc/adapter/file"
 	icebergadapter "github.com/florinutz/pgcdc/adapter/iceberg"
+	natsadapter "github.com/florinutz/pgcdc/adapter/nats"
 	"github.com/florinutz/pgcdc/adapter/pgtable"
+	redisadapter "github.com/florinutz/pgcdc/adapter/redis"
+	searchadapter "github.com/florinutz/pgcdc/adapter/search"
 	"github.com/florinutz/pgcdc/adapter/stdout"
 	"github.com/florinutz/pgcdc/adapter/webhook"
 	"github.com/florinutz/pgcdc/internal/config"
@@ -75,6 +79,28 @@ func init() {
 	f.StringSlice("iceberg-pk", nil, "primary key columns for upsert mode (repeatable)")
 	f.Duration("iceberg-flush-interval", 0, "Iceberg flush interval (default 1m)")
 	f.Int("iceberg-flush-size", 0, "Iceberg flush size in events (default 10000)")
+
+	// NATS adapter flags.
+	f.String("nats-url", "nats://localhost:4222", "NATS server URL")
+	f.String("nats-subject", "pgcdc", "NATS subject prefix")
+	f.String("nats-stream", "pgcdc", "NATS JetStream stream name")
+	f.String("nats-cred-file", "", "NATS credentials file")
+	f.Duration("nats-max-age", 0, "NATS stream max message age (default 24h)")
+
+	// Search adapter flags.
+	f.String("search-engine", "typesense", "search engine: typesense or meilisearch")
+	f.String("search-url", "", "search engine URL")
+	f.String("search-api-key", "", "search engine API key")
+	f.String("search-index", "", "search index name")
+	f.String("search-id-column", "id", "row ID column for search documents")
+	f.Int("search-batch-size", 100, "search batch size")
+	f.Duration("search-batch-interval", time.Second, "search batch flush interval")
+
+	// Redis adapter flags.
+	f.String("redis-url", "", "Redis URL")
+	f.String("redis-mode", "invalidate", "Redis mode: invalidate or sync")
+	f.String("redis-key-prefix", "", "Redis key prefix")
+	f.String("redis-id-column", "id", "row ID column for Redis keys")
 
 	// Only bind snapshot-specific keys that don't collide with listen.
 	mustBindPFlag("snapshot.table", f.Lookup("table"))
@@ -193,6 +219,9 @@ func runSnapshot(cmd *cobra.Command, args []string) error {
 	hasPGTable := false
 	hasEmbedding := false
 	hasIceberg := false
+	hasNats := false
+	hasSearch := false
+	hasRedis := false
 	for _, name := range cfg.Adapters {
 		switch name {
 		case "stdout":
@@ -209,8 +238,14 @@ func runSnapshot(cmd *cobra.Command, args []string) error {
 			hasEmbedding = true
 		case "iceberg":
 			hasIceberg = true
-		case "sse", "ws":
-			return fmt.Errorf("adapter %q is not supported for snapshot (use stdout, webhook, file, exec, pg_table, embedding, or iceberg)", name)
+		case "nats":
+			hasNats = true
+		case "search":
+			hasSearch = true
+		case "redis":
+			hasRedis = true
+		case "sse", "ws", "grpc":
+			return fmt.Errorf("adapter %q is not supported for snapshot (use stdout, webhook, file, exec, pg_table, embedding, iceberg, nats, search, or redis)", name)
 		default:
 			return fmt.Errorf("unknown adapter: %q", name)
 		}
@@ -238,6 +273,72 @@ func runSnapshot(cmd *cobra.Command, args []string) error {
 	}
 	if hasIceberg && cfg.Iceberg.Table == "" {
 		return fmt.Errorf("iceberg adapter requires a table name; use --iceberg-table or set iceberg.table in config")
+	}
+
+	if hasSearch {
+		searchURL, _ := cmd.Flags().GetString("search-url")
+		searchIndex, _ := cmd.Flags().GetString("search-index")
+		if searchURL == "" {
+			return fmt.Errorf("search adapter requires a URL; use --search-url")
+		}
+		if searchIndex == "" {
+			return fmt.Errorf("search adapter requires an index; use --search-index")
+		}
+		cfg.Search.URL = searchURL
+		if v, _ := cmd.Flags().GetString("search-engine"); cmd.Flags().Changed("search-engine") {
+			cfg.Search.Engine = v
+		}
+		if v, _ := cmd.Flags().GetString("search-api-key"); v != "" {
+			cfg.Search.APIKey = v
+		}
+		cfg.Search.Index = searchIndex
+		if v, _ := cmd.Flags().GetString("search-id-column"); cmd.Flags().Changed("search-id-column") {
+			cfg.Search.IDColumn = v
+		}
+		if v, _ := cmd.Flags().GetInt("search-batch-size"); cmd.Flags().Changed("search-batch-size") {
+			cfg.Search.BatchSize = v
+		}
+		if v, _ := cmd.Flags().GetDuration("search-batch-interval"); v > 0 {
+			cfg.Search.BatchInterval = v
+		}
+	}
+	if hasRedis {
+		redisURL, _ := cmd.Flags().GetString("redis-url")
+		if redisURL == "" {
+			return fmt.Errorf("redis adapter requires a URL; use --redis-url")
+		}
+		cfg.Redis.URL = redisURL
+		if v, _ := cmd.Flags().GetString("redis-mode"); cmd.Flags().Changed("redis-mode") {
+			cfg.Redis.Mode = v
+		}
+		if v, _ := cmd.Flags().GetString("redis-key-prefix"); v != "" {
+			cfg.Redis.KeyPrefix = v
+		}
+		if v, _ := cmd.Flags().GetString("redis-id-column"); cmd.Flags().Changed("redis-id-column") {
+			cfg.Redis.IDColumn = v
+		}
+	}
+
+	// Read NATS flags directly.
+	if hasNats {
+		if v, _ := cmd.Flags().GetString("nats-url"); v != "" {
+			cfg.Nats.URL = v
+		}
+		if v, _ := cmd.Flags().GetString("nats-subject"); cmd.Flags().Changed("nats-subject") {
+			cfg.Nats.Subject = v
+		}
+		if v, _ := cmd.Flags().GetString("nats-stream"); cmd.Flags().Changed("nats-stream") {
+			cfg.Nats.Stream = v
+		}
+		if v, _ := cmd.Flags().GetString("nats-cred-file"); v != "" {
+			cfg.Nats.CredFile = v
+		}
+		if v, _ := cmd.Flags().GetDuration("nats-max-age"); v > 0 {
+			cfg.Nats.MaxAge = v
+		}
+		if cfg.Nats.URL == "" {
+			return fmt.Errorf("nats adapter requires a URL; use --nats-url or set nats.url in config")
+		}
 	}
 
 	logger := slog.Default()
@@ -309,6 +410,40 @@ func runSnapshot(cmd *cobra.Command, args []string) error {
 				cfg.Iceberg.FlushSize,
 				cfg.Iceberg.BackoffBase,
 				cfg.Iceberg.BackoffCap,
+				logger,
+			)))
+		case "nats":
+			opts = append(opts, pgcdc.WithAdapter(natsadapter.New(
+				cfg.Nats.URL,
+				cfg.Nats.Subject,
+				cfg.Nats.Stream,
+				cfg.Nats.CredFile,
+				cfg.Nats.MaxAge,
+				cfg.Nats.BackoffBase,
+				cfg.Nats.BackoffCap,
+				logger,
+			)))
+		case "search":
+			opts = append(opts, pgcdc.WithAdapter(searchadapter.New(
+				cfg.Search.Engine,
+				cfg.Search.URL,
+				cfg.Search.APIKey,
+				cfg.Search.Index,
+				cfg.Search.IDColumn,
+				cfg.Search.BatchSize,
+				cfg.Search.BatchInterval,
+				cfg.Search.BackoffBase,
+				cfg.Search.BackoffCap,
+				logger,
+			)))
+		case "redis":
+			opts = append(opts, pgcdc.WithAdapter(redisadapter.New(
+				cfg.Redis.URL,
+				cfg.Redis.Mode,
+				cfg.Redis.KeyPrefix,
+				cfg.Redis.IDColumn,
+				cfg.Redis.BackoffBase,
+				cfg.Redis.BackoffCap,
 				logger,
 			)))
 		}

@@ -1,0 +1,216 @@
+package redis
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"time"
+
+	"github.com/florinutz/pgcdc/dlq"
+	"github.com/florinutz/pgcdc/event"
+	"github.com/florinutz/pgcdc/internal/backoff"
+	"github.com/florinutz/pgcdc/metrics"
+	goredis "github.com/redis/go-redis/v9"
+)
+
+const (
+	defaultIDColumn    = "id"
+	defaultBackoffBase = 1 * time.Second
+	defaultBackoffCap  = 30 * time.Second
+)
+
+// Adapter invalidates or syncs Redis cache based on CDC events.
+// In "invalidate" mode, DEL is issued on any change.
+// In "sync" mode, SET for INSERT/UPDATE, DEL for DELETE.
+type Adapter struct {
+	url         string
+	mode        string // "invalidate" or "sync"
+	keyPrefix   string
+	idColumn    string
+	backoffBase time.Duration
+	backoffCap  time.Duration
+	logger      *slog.Logger
+	dlq         dlq.DLQ
+}
+
+// SetDLQ sets the dead letter queue for failed deliveries.
+func (a *Adapter) SetDLQ(d dlq.DLQ) { a.dlq = d }
+
+// New creates a Redis cache invalidation/sync adapter.
+func New(url, mode, keyPrefix, idColumn string, backoffBase, backoffCap time.Duration, logger *slog.Logger) *Adapter {
+	if mode == "" {
+		mode = "invalidate"
+	}
+	if idColumn == "" {
+		idColumn = defaultIDColumn
+	}
+	if backoffBase <= 0 {
+		backoffBase = defaultBackoffBase
+	}
+	if backoffCap <= 0 {
+		backoffCap = defaultBackoffCap
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &Adapter{
+		url:         url,
+		mode:        mode,
+		keyPrefix:   keyPrefix,
+		idColumn:    idColumn,
+		backoffBase: backoffBase,
+		backoffCap:  backoffCap,
+		logger:      logger.With("adapter", "redis"),
+	}
+}
+
+func (a *Adapter) Name() string { return "redis" }
+
+// Start connects to Redis and processes events. It reconnects with backoff on
+// connection loss.
+func (a *Adapter) Start(ctx context.Context, events <-chan event.Event) error {
+	a.logger.Info("redis adapter started", "mode", a.mode, "key_prefix", a.keyPrefix)
+
+	var attempt int
+	for {
+		err := a.run(ctx, events)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err == nil {
+			return nil
+		}
+
+		delay := backoff.Jitter(attempt, a.backoffBase, a.backoffCap)
+		a.logger.Error("redis connection lost, reconnecting",
+			"error", err,
+			"attempt", attempt+1,
+			"delay", delay,
+		)
+		metrics.RedisErrors.Inc()
+		attempt++
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(delay):
+		}
+	}
+}
+
+func (a *Adapter) run(ctx context.Context, events <-chan event.Event) error {
+	opts, err := goredis.ParseURL(a.url)
+	if err != nil {
+		return fmt.Errorf("parse redis url: %w", err)
+	}
+	rdb := goredis.NewClient(opts)
+	defer func() { _ = rdb.Close() }()
+
+	// Verify connectivity.
+	if err := rdb.Ping(ctx).Err(); err != nil {
+		return fmt.Errorf("redis ping: %w", err)
+	}
+	a.logger.Info("connected to redis", "url", a.url)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+
+		case ev, ok := <-events:
+			if !ok {
+				return nil
+			}
+
+			id, row, isDel := a.extractPayload(ev)
+			if id == "" {
+				a.logger.Warn("no ID in event payload, skipping", "event_id", ev.ID)
+				continue
+			}
+
+			key := a.keyPrefix + id
+
+			switch {
+			case a.mode == "invalidate":
+				// Any change = DEL
+				if err := rdb.Del(ctx, key).Err(); err != nil {
+					if isConnectionError(err) {
+						return fmt.Errorf("redis del (connection lost): %w", err)
+					}
+					a.logger.Warn("redis del failed, skipping", "key", key, "error", err)
+					a.recordDLQ(ctx, ev, err)
+					continue
+				}
+				metrics.RedisOperations.WithLabelValues("del").Inc()
+
+			case isDel:
+				// sync mode DELETE
+				if err := rdb.Del(ctx, key).Err(); err != nil {
+					if isConnectionError(err) {
+						return fmt.Errorf("redis del (connection lost): %w", err)
+					}
+					a.logger.Warn("redis del failed, skipping", "key", key, "error", err)
+					a.recordDLQ(ctx, ev, err)
+					continue
+				}
+				metrics.RedisOperations.WithLabelValues("del").Inc()
+
+			default:
+				// sync mode INSERT/UPDATE
+				data, err := json.Marshal(row)
+				if err != nil {
+					a.logger.Warn("marshal row failed, skipping", "event_id", ev.ID, "error", err)
+					continue
+				}
+				if err := rdb.Set(ctx, key, data, 0).Err(); err != nil {
+					if isConnectionError(err) {
+						return fmt.Errorf("redis set (connection lost): %w", err)
+					}
+					a.logger.Warn("redis set failed, skipping", "key", key, "error", err)
+					a.recordDLQ(ctx, ev, err)
+					continue
+				}
+				metrics.RedisOperations.WithLabelValues("set").Inc()
+			}
+
+			metrics.EventsDelivered.WithLabelValues("redis").Inc()
+		}
+	}
+}
+
+type payload struct {
+	Op    string                 `json:"op"`
+	Table string                 `json:"table"`
+	Row   map[string]interface{} `json:"row"`
+}
+
+func (a *Adapter) extractPayload(ev event.Event) (id string, row map[string]interface{}, isDel bool) {
+	var p payload
+	if err := json.Unmarshal(ev.Payload, &p); err != nil {
+		return "", nil, false
+	}
+	isDel = p.Op == "DELETE"
+	if p.Row == nil {
+		return "", nil, isDel
+	}
+	if v, ok := p.Row[a.idColumn]; ok && v != nil {
+		id = fmt.Sprintf("%v", v)
+	}
+	return id, p.Row, isDel
+}
+
+func (a *Adapter) recordDLQ(ctx context.Context, ev event.Event, err error) {
+	if a.dlq != nil {
+		if dlqErr := a.dlq.Record(ctx, ev, "redis", err); dlqErr != nil {
+			a.logger.Error("dlq record failed", "error", dlqErr)
+		}
+	}
+}
+
+func isConnectionError(err error) bool {
+	// go-redis returns specific errors for connection issues.
+	return goredis.HasErrorPrefix(err, "LOADING") ||
+		err.Error() == "redis: client is closed" ||
+		err.Error() == "EOF"
+}

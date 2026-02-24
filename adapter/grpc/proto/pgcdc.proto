@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package pgcdc;
+
+option go_package = "github.com/florinutz/pgcdc/adapter/grpc/proto";
+
+service EventStream {
+  rpc Subscribe(SubscribeRequest) returns (stream Event);
+}
+
+message SubscribeRequest {
+  repeated string channels = 1;
+}
+
+message Event {
+  string id = 1;
+  string channel = 2;
+  string operation = 3;
+  bytes payload = 4;
+  string source = 5;
+  string created_at = 6;
+}

@@ -2,26 +2,36 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
 	"os/signal"
+	"strings"
 	"syscall"
+	"time"
 
 	"github.com/florinutz/pgcdc"
 	embeddingadapter "github.com/florinutz/pgcdc/adapter/embedding"
 	execadapter "github.com/florinutz/pgcdc/adapter/exec"
 	fileadapter "github.com/florinutz/pgcdc/adapter/file"
+	grpcadapter "github.com/florinutz/pgcdc/adapter/grpc"
 	icebergadapter "github.com/florinutz/pgcdc/adapter/iceberg"
+	natsadapter "github.com/florinutz/pgcdc/adapter/nats"
 	"github.com/florinutz/pgcdc/adapter/pgtable"
+	redisadapter "github.com/florinutz/pgcdc/adapter/redis"
+	searchadapter "github.com/florinutz/pgcdc/adapter/search"
 	"github.com/florinutz/pgcdc/adapter/sse"
 	"github.com/florinutz/pgcdc/adapter/stdout"
 	"github.com/florinutz/pgcdc/adapter/webhook"
 	"github.com/florinutz/pgcdc/adapter/ws"
+	"github.com/florinutz/pgcdc/checkpoint"
 	"github.com/florinutz/pgcdc/detector"
 	"github.com/florinutz/pgcdc/detector/listennotify"
+	"github.com/florinutz/pgcdc/detector/outbox"
 	"github.com/florinutz/pgcdc/detector/walreplication"
+	"github.com/florinutz/pgcdc/dlq"
 	"github.com/florinutz/pgcdc/internal/config"
 	"github.com/florinutz/pgcdc/internal/server"
 	"github.com/spf13/cobra"
@@ -49,7 +59,7 @@ func init() {
 	f.Int("retries", 5, "webhook max retries")
 	f.String("signing-key", "", "HMAC signing key for webhook")
 	f.String("metrics-addr", "", "standalone metrics/health server address (e.g. :9090)")
-	f.String("detector", "listen_notify", "detector type: listen_notify or wal")
+	f.String("detector", "listen_notify", "detector type: listen_notify, wal, or outbox")
 	f.String("publication", "", "PostgreSQL publication name (required for --detector wal)")
 	f.Bool("tx-metadata", false, "include transaction metadata in WAL events (xid, commit_time, seq)")
 	f.Bool("tx-markers", false, "emit BEGIN/COMMIT marker events (implies --tx-metadata)")
@@ -68,6 +78,20 @@ func init() {
 
 	// WebSocket adapter flags.
 	f.Duration("ws-ping-interval", 0, "WebSocket ping interval (default 15s)")
+
+	// Persistent slot flags.
+	f.Bool("persistent-slot", false, "use a named persistent replication slot (survives disconnects)")
+	f.String("slot-name", "", "replication slot name (default: pgcdc_<publication>)")
+	f.String("checkpoint-db", "", "PostgreSQL URL for checkpoint storage (default: same as --db)")
+
+	// Schema flags.
+	f.Bool("include-schema", false, "include column type metadata in WAL events")
+	f.Bool("schema-events", false, "emit SCHEMA_CHANGE events when table columns change")
+
+	// Heartbeat flags.
+	f.Duration("heartbeat-interval", 30*time.Second, "heartbeat interval for WAL slot advancement (0 to disable)")
+	f.String("heartbeat-table", "pgcdc_heartbeat", "heartbeat table name")
+	f.Int64("slot-lag-warn", 100*1024*1024, "slot lag warning threshold in bytes (default 100MB)")
 
 	// Snapshot-first flags (no viper bindings — read directly to avoid collision).
 	f.Bool("snapshot-first", false, "run a table snapshot before live WAL streaming (requires --detector wal)")
@@ -106,6 +130,75 @@ func init() {
 	mustBindPFlag("iceberg.primary_keys", f.Lookup("iceberg-pk"))
 	mustBindPFlag("iceberg.flush_interval", f.Lookup("iceberg-flush-interval"))
 	mustBindPFlag("iceberg.flush_size", f.Lookup("iceberg-flush-size"))
+
+	// NATS adapter flags.
+	f.String("nats-url", "nats://localhost:4222", "NATS server URL")
+	f.String("nats-subject", "pgcdc", "NATS subject prefix")
+	f.String("nats-stream", "pgcdc", "NATS JetStream stream name")
+	f.String("nats-cred-file", "", "NATS credentials file")
+	f.Duration("nats-max-age", 0, "NATS stream max message age (default 24h)")
+
+	// DLQ flags.
+	f.String("dlq", "stderr", "dead letter queue backend: stderr, pg_table, or none")
+	f.String("dlq-table", "pgcdc_dead_letters", "DLQ table name (for pg_table backend)")
+	f.String("dlq-db", "", "PostgreSQL URL for DLQ table (default: same as --db)")
+
+	// Route flags.
+	f.StringSlice("route", nil, "route events to adapter: adapter=channel1,channel2 (repeatable)")
+
+	// Search adapter flags.
+	f.String("search-engine", "typesense", "search engine: typesense or meilisearch")
+	f.String("search-url", "", "search engine URL")
+	f.String("search-api-key", "", "search engine API key")
+	f.String("search-index", "", "search index name")
+	f.String("search-id-column", "id", "row ID column for search documents")
+	f.Int("search-batch-size", 100, "search batch size")
+	f.Duration("search-batch-interval", time.Second, "search batch flush interval")
+
+	// Redis adapter flags.
+	f.String("redis-url", "", "Redis URL (e.g. redis://localhost:6379)")
+	f.String("redis-mode", "invalidate", "Redis mode: invalidate or sync")
+	f.String("redis-key-prefix", "", "Redis key prefix (e.g. orders:)")
+	f.String("redis-id-column", "id", "row ID column for Redis keys")
+
+	// gRPC adapter flags.
+	f.String("grpc-addr", ":9090", "gRPC server listen address")
+
+	// Outbox detector flags.
+	f.String("outbox-table", "pgcdc_outbox", "outbox table name")
+	f.Duration("outbox-poll-interval", 500*time.Millisecond, "outbox polling interval")
+	f.Int("outbox-batch-size", 100, "outbox batch size per poll")
+	f.Bool("outbox-keep-processed", false, "keep processed outbox rows (set processed_at instead of DELETE)")
+
+	mustBindPFlag("dlq.type", f.Lookup("dlq"))
+	mustBindPFlag("dlq.table", f.Lookup("dlq-table"))
+	mustBindPFlag("dlq.db_url", f.Lookup("dlq-db"))
+
+	mustBindPFlag("search.engine", f.Lookup("search-engine"))
+	mustBindPFlag("search.url", f.Lookup("search-url"))
+	mustBindPFlag("search.api_key", f.Lookup("search-api-key"))
+	mustBindPFlag("search.index", f.Lookup("search-index"))
+	mustBindPFlag("search.id_column", f.Lookup("search-id-column"))
+	mustBindPFlag("search.batch_size", f.Lookup("search-batch-size"))
+	mustBindPFlag("search.batch_interval", f.Lookup("search-batch-interval"))
+
+	mustBindPFlag("redis.url", f.Lookup("redis-url"))
+	mustBindPFlag("redis.mode", f.Lookup("redis-mode"))
+	mustBindPFlag("redis.key_prefix", f.Lookup("redis-key-prefix"))
+	mustBindPFlag("redis.id_column", f.Lookup("redis-id-column"))
+
+	mustBindPFlag("grpc.addr", f.Lookup("grpc-addr"))
+
+	mustBindPFlag("outbox.table", f.Lookup("outbox-table"))
+	mustBindPFlag("outbox.poll_interval", f.Lookup("outbox-poll-interval"))
+	mustBindPFlag("outbox.batch_size", f.Lookup("outbox-batch-size"))
+	mustBindPFlag("outbox.keep_processed", f.Lookup("outbox-keep-processed"))
+
+	mustBindPFlag("nats.url", f.Lookup("nats-url"))
+	mustBindPFlag("nats.subject", f.Lookup("nats-subject"))
+	mustBindPFlag("nats.stream", f.Lookup("nats-stream"))
+	mustBindPFlag("nats.cred_file", f.Lookup("nats-cred-file"))
+	mustBindPFlag("nats.max_age", f.Lookup("nats-max-age"))
 
 	mustBindPFlag("embedding.api_url", f.Lookup("embedding-api-url"))
 	mustBindPFlag("embedding.api_key", f.Lookup("embedding-api-key"))
@@ -154,6 +247,20 @@ func runListen(cmd *cobra.Command, args []string) error {
 	snapshotTable, _ := cmd.Flags().GetString("snapshot-table")
 	snapshotWhere, _ := cmd.Flags().GetString("snapshot-where")
 
+	// Persistent slot flags.
+	persistentSlot, _ := cmd.Flags().GetBool("persistent-slot")
+	slotName, _ := cmd.Flags().GetString("slot-name")
+	checkpointDB, _ := cmd.Flags().GetString("checkpoint-db")
+
+	// Schema flags.
+	includeSchema, _ := cmd.Flags().GetBool("include-schema")
+	schemaEvents, _ := cmd.Flags().GetBool("schema-events")
+
+	// Heartbeat flags.
+	heartbeatInterval, _ := cmd.Flags().GetDuration("heartbeat-interval")
+	heartbeatTable, _ := cmd.Flags().GetString("heartbeat-table")
+	slotLagWarn, _ := cmd.Flags().GetInt64("slot-lag-warn")
+
 	// Validation.
 	if cfg.Detector.Type != "wal" && (cfg.Detector.TxMetadata || cfg.Detector.TxMarkers) {
 		return fmt.Errorf("--tx-metadata and --tx-markers require --detector wal")
@@ -161,7 +268,7 @@ func runListen(cmd *cobra.Command, args []string) error {
 	if cfg.DatabaseURL == "" {
 		return fmt.Errorf("no database URL specified; use --db, set database_url in config, or export PGCDC_DATABASE_URL")
 	}
-	if cfg.Detector.Type != "wal" && len(cfg.Channels) == 0 {
+	if cfg.Detector.Type == "listen_notify" && len(cfg.Channels) == 0 {
 		return fmt.Errorf("no channels specified; use --channel or set channels in config file")
 	}
 	if cfg.Detector.Type == "wal" && cfg.Detector.Publication == "" {
@@ -183,6 +290,9 @@ func runListen(cmd *cobra.Command, args []string) error {
 	hasWS := false
 	hasEmbedding := false
 	hasIceberg := false
+	hasNats := false
+	hasSearch := false
+	hasRedis := false
 	for _, name := range cfg.Adapters {
 		switch name {
 		case "stdout":
@@ -203,8 +313,16 @@ func runListen(cmd *cobra.Command, args []string) error {
 			hasEmbedding = true
 		case "iceberg":
 			hasIceberg = true
+		case "nats":
+			hasNats = true
+		case "search":
+			hasSearch = true
+		case "redis":
+			hasRedis = true
+		case "grpc":
+			// gRPC adapter has no required config (addr has default).
 		default:
-			return fmt.Errorf("unknown adapter: %q (expected stdout, webhook, sse, file, exec, pg_table, ws, embedding, or iceberg)", name)
+			return fmt.Errorf("unknown adapter: %q (expected stdout, webhook, sse, file, exec, pg_table, ws, embedding, iceberg, nats, search, redis, or grpc)", name)
 		}
 	}
 	if hasWebhook && cfg.Webhook.URL == "" {
@@ -234,12 +352,60 @@ func runListen(cmd *cobra.Command, args []string) error {
 	if hasIceberg && cfg.Iceberg.Mode == "upsert" && len(cfg.Iceberg.PrimaryKeys) == 0 {
 		return fmt.Errorf("iceberg upsert mode requires primary keys; use --iceberg-pk or set iceberg.primary_keys in config")
 	}
+	if hasNats && cfg.Nats.URL == "" {
+		return fmt.Errorf("nats adapter requires a URL; use --nats-url or set nats.url in config")
+	}
+	if hasSearch && cfg.Search.URL == "" {
+		return fmt.Errorf("search adapter requires a URL; use --search-url or set search.url in config")
+	}
+	if hasSearch && cfg.Search.Index == "" {
+		return fmt.Errorf("search adapter requires an index; use --search-index or set search.index in config")
+	}
+	if hasRedis && cfg.Redis.URL == "" {
+		return fmt.Errorf("redis adapter requires a URL; use --redis-url or set redis.url in config")
+	}
 
 	logger := slog.Default()
 
 	// Root context: cancelled on SIGINT or SIGTERM.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// Build pipeline options (declared early so detector can append).
+	opts := []pgcdc.Option{
+		pgcdc.WithBusBuffer(cfg.Bus.BufferSize),
+		pgcdc.WithLogger(logger),
+	}
+
+	// Set up DLQ.
+	var dlqInstance dlq.DLQ
+	switch cfg.DLQ.Type {
+	case "stderr", "":
+		dlqInstance = dlq.NewStderrDLQ(logger)
+	case "pg_table":
+		dlqDB := cfg.DLQ.DBURL
+		if dlqDB == "" {
+			dlqDB = cfg.DatabaseURL
+		}
+		dlqInstance = dlq.NewPGTableDLQ(dlqDB, cfg.DLQ.Table, logger)
+	case "none":
+		dlqInstance = dlq.NopDLQ{}
+	default:
+		return fmt.Errorf("unknown DLQ type: %q (expected stderr, pg_table, or none)", cfg.DLQ.Type)
+	}
+	opts = append(opts, pgcdc.WithDLQ(dlqInstance))
+
+	// Parse routes.
+	routeFlags, _ := cmd.Flags().GetStringSlice("route")
+	for _, r := range routeFlags {
+		parts := strings.SplitN(r, "=", 2)
+		if len(parts) != 2 || parts[1] == "" {
+			logger.Warn("ignoring malformed route (expected adapter=channel1,channel2)", "route", r)
+			continue
+		}
+		channels := strings.Split(parts[1], ",")
+		opts = append(opts, pgcdc.WithRoute(parts[0], channels...))
+	}
 
 	// Create detector.
 	var det detector.Detector
@@ -251,15 +417,51 @@ func runListen(cmd *cobra.Command, args []string) error {
 		if snapshotFirst {
 			walDet.SetSnapshotFirst(snapshotTable, snapshotWhere, cfg.Snapshot.BatchSize)
 		}
-		det = walDet
-	default:
-		return fmt.Errorf("unknown detector type: %q (expected listen_notify or wal)", cfg.Detector.Type)
-	}
+		if persistentSlot {
+			name := slotName
+			if name == "" {
+				name = "pgcdc_" + cfg.Detector.Publication
+			}
+			walDet.SetPersistentSlot(name)
 
-	// Build pipeline options.
-	opts := []pgcdc.Option{
-		pgcdc.WithBusBuffer(cfg.Bus.BufferSize),
-		pgcdc.WithLogger(logger),
+			// Set up checkpoint store.
+			cpDB := checkpointDB
+			if cpDB == "" {
+				cpDB = cfg.DatabaseURL
+			}
+			cpStore, cpErr := checkpoint.NewPGStore(ctx, cpDB, logger)
+			if cpErr != nil {
+				return fmt.Errorf("create checkpoint store: %w", cpErr)
+			}
+			walDet.SetCheckpointStore(cpStore)
+			opts = append(opts, pgcdc.WithCheckpointStore(cpStore))
+		}
+		if includeSchema {
+			walDet.SetIncludeSchema(true)
+		}
+		if schemaEvents {
+			walDet.SetSchemaEvents(true)
+		}
+		if heartbeatInterval > 0 {
+			walDet.SetHeartbeat(heartbeatInterval, heartbeatTable, cfg.DatabaseURL)
+		}
+		if slotLagWarn > 0 {
+			walDet.SetSlotLagWarn(slotLagWarn)
+		}
+		det = walDet
+	case "outbox":
+		det = outbox.New(
+			cfg.DatabaseURL,
+			cfg.Outbox.Table,
+			cfg.Outbox.PollInterval,
+			cfg.Outbox.BatchSize,
+			cfg.Outbox.KeepProcessed,
+			cfg.Outbox.BackoffBase,
+			cfg.Outbox.BackoffCap,
+			logger,
+		)
+	default:
+		return fmt.Errorf("unknown detector type: %q (expected listen_notify, wal, or outbox)", cfg.Detector.Type)
 	}
 
 	// Create adapters.
@@ -332,11 +534,51 @@ func runListen(cmd *cobra.Command, args []string) error {
 				cfg.Iceberg.BackoffCap,
 				logger,
 			)))
+		case "nats":
+			opts = append(opts, pgcdc.WithAdapter(natsadapter.New(
+				cfg.Nats.URL,
+				cfg.Nats.Subject,
+				cfg.Nats.Stream,
+				cfg.Nats.CredFile,
+				cfg.Nats.MaxAge,
+				cfg.Nats.BackoffBase,
+				cfg.Nats.BackoffCap,
+				logger,
+			)))
+		case "search":
+			opts = append(opts, pgcdc.WithAdapter(searchadapter.New(
+				cfg.Search.Engine,
+				cfg.Search.URL,
+				cfg.Search.APIKey,
+				cfg.Search.Index,
+				cfg.Search.IDColumn,
+				cfg.Search.BatchSize,
+				cfg.Search.BatchInterval,
+				cfg.Search.BackoffBase,
+				cfg.Search.BackoffCap,
+				logger,
+			)))
+		case "redis":
+			opts = append(opts, pgcdc.WithAdapter(redisadapter.New(
+				cfg.Redis.URL,
+				cfg.Redis.Mode,
+				cfg.Redis.KeyPrefix,
+				cfg.Redis.IDColumn,
+				cfg.Redis.BackoffBase,
+				cfg.Redis.BackoffCap,
+				logger,
+			)))
+		case "grpc":
+			opts = append(opts, pgcdc.WithAdapter(grpcadapter.New(
+				cfg.GRPC.Addr,
+				logger,
+			)))
 		}
 	}
 
 	// Build pipeline.
 	p := pgcdc.NewPipeline(det, opts...)
+	defer func() { _ = dlqInstance.Close() }()
 
 	// Use an errgroup to run the pipeline alongside CLI-specific HTTP servers.
 	g, gCtx := errgroup.WithContext(ctx)
@@ -402,7 +644,7 @@ func runListen(cmd *cobra.Command, args []string) error {
 	err := g.Wait()
 
 	// context.Canceled is expected on clean shutdown.
-	if err != nil && gCtx.Err() != nil {
+	if err != nil && errors.Is(err, context.Canceled) {
 		logger.Info("shutdown complete")
 		return nil
 	}

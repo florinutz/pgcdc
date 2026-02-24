@@ -5,17 +5,21 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
 	"time"
 
 	"github.com/jackc/pglogrepl"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgproto3"
 
+	"github.com/florinutz/pgcdc/checkpoint"
 	"github.com/florinutz/pgcdc/event"
 	"github.com/florinutz/pgcdc/internal/backoff"
+	"github.com/florinutz/pgcdc/metrics"
 	"github.com/florinutz/pgcdc/pgcdcerr"
 	"github.com/florinutz/pgcdc/snapshot"
 )
@@ -51,6 +55,28 @@ type Detector struct {
 	snapshotWhere     string
 	snapshotBatchSize int
 	snapshotDone      bool
+
+	// Persistent slot fields: when persistentSlot is true, the detector uses
+	// a named, non-temporary replication slot that survives disconnects.
+	persistentSlot  bool
+	slotName        string
+	checkpointStore checkpoint.Store
+
+	// Schema inclusion: when includeSchema is true, events include column
+	// type metadata from RelationMessages.
+	includeSchema bool
+
+	// Schema events: when schemaEvents is true, the detector emits
+	// SCHEMA_CHANGE events when relation metadata changes.
+	schemaEvents bool
+
+	// Heartbeat fields: periodic writes to keep the replication slot advancing.
+	heartbeatInterval time.Duration
+	heartbeatTable    string
+	heartbeatDBURL    string
+
+	// Slot lag warning threshold in bytes.
+	slotLagWarn int64
 }
 
 // txState tracks the current transaction when txMetadata is enabled.
@@ -102,6 +128,40 @@ func (d *Detector) SetSnapshotFirst(table, where string, batchSize int) {
 	d.snapshotBatchSize = batchSize
 }
 
+// SetPersistentSlot configures the detector to use a named, non-temporary
+// replication slot that survives disconnects.
+func (d *Detector) SetPersistentSlot(name string) {
+	d.persistentSlot = true
+	d.slotName = name
+}
+
+// SetCheckpointStore sets the checkpoint store for LSN persistence.
+func (d *Detector) SetCheckpointStore(store checkpoint.Store) {
+	d.checkpointStore = store
+}
+
+// SetIncludeSchema enables column type metadata in events.
+func (d *Detector) SetIncludeSchema(include bool) {
+	d.includeSchema = include
+}
+
+// SetSchemaEvents enables SCHEMA_CHANGE event emission.
+func (d *Detector) SetSchemaEvents(enabled bool) {
+	d.schemaEvents = enabled
+}
+
+// SetHeartbeat configures periodic writes to keep the replication slot advancing.
+func (d *Detector) SetHeartbeat(interval time.Duration, table, dbURL string) {
+	d.heartbeatInterval = interval
+	d.heartbeatTable = table
+	d.heartbeatDBURL = dbURL
+}
+
+// SetSlotLagWarn sets the slot lag warning threshold in bytes.
+func (d *Detector) SetSlotLagWarn(bytes int64) {
+	d.slotLagWarn = bytes
+}
+
 // Start connects to PostgreSQL, creates a temporary replication slot, and
 // streams WAL changes as events. It blocks until ctx is cancelled.
 // The caller owns the events channel; Start does NOT close it.
@@ -148,27 +208,76 @@ func (d *Detector) run(ctx context.Context, events chan<- event.Event) error {
 		_ = conn.Close(closeCtx)
 	}()
 
-	// Generate a unique slot name.
-	slotName, err := randomSlotName()
-	if err != nil {
-		return fmt.Errorf("generate slot name: %w", err)
-	}
+	var slotName string
+	var consistentPoint pglogrepl.LSN
+	var result pglogrepl.CreateReplicationSlotResult
 
-	// Create a temporary replication slot (auto-dropped on disconnect).
-	result, err := pglogrepl.CreateReplicationSlot(ctx, conn, slotName, "pgoutput",
-		pglogrepl.CreateReplicationSlotOptions{Temporary: true})
-	if err != nil {
-		return fmt.Errorf("create replication slot: %w", err)
-	}
+	if d.persistentSlot && d.slotName != "" {
+		slotName = d.slotName
 
-	d.logger.Info("replication slot created",
-		"slot", slotName,
-		"consistent_point", result.ConsistentPoint,
-	)
+		// Try to load checkpoint LSN for resume.
+		if d.checkpointStore != nil {
+			savedLSN, loadErr := d.checkpointStore.Load(ctx, slotName)
+			if loadErr != nil {
+				d.logger.Warn("failed to load checkpoint, will start fresh", "error", loadErr)
+			} else if savedLSN > 0 {
+				consistentPoint = pglogrepl.LSN(savedLSN)
+				d.logger.Info("resuming from checkpoint",
+					"slot", slotName,
+					"lsn", consistentPoint.String(),
+				)
+			}
+		}
 
-	consistentPoint, err := pglogrepl.ParseLSN(result.ConsistentPoint)
-	if err != nil {
-		return fmt.Errorf("parse consistent point: %w", err)
+		// Create slot if it doesn't exist (persistent, non-temporary).
+		result, err = pglogrepl.CreateReplicationSlot(ctx, conn, slotName, "pgoutput",
+			pglogrepl.CreateReplicationSlotOptions{Temporary: false})
+		if err != nil {
+			// Slot already exists — expected for persistent slots on reconnect.
+			if isSlotAlreadyExists(err) {
+				d.logger.Info("persistent slot already exists, reusing",
+					"slot", slotName,
+				)
+			} else {
+				return fmt.Errorf("create replication slot: %w", err)
+			}
+		} else {
+			d.logger.Info("persistent replication slot created",
+				"slot", slotName,
+				"consistent_point", result.ConsistentPoint,
+			)
+			// Only use consistent point from slot creation if we don't have a checkpoint.
+			if consistentPoint == 0 {
+				parsed, parseErr := pglogrepl.ParseLSN(result.ConsistentPoint)
+				if parseErr != nil {
+					return fmt.Errorf("parse consistent point: %w", parseErr)
+				}
+				consistentPoint = parsed
+			}
+		}
+	} else {
+		// Temporary slot (original behavior).
+		slotName, err = randomSlotName()
+		if err != nil {
+			return fmt.Errorf("generate slot name: %w", err)
+		}
+
+		result, err = pglogrepl.CreateReplicationSlot(ctx, conn, slotName, "pgoutput",
+			pglogrepl.CreateReplicationSlotOptions{Temporary: true})
+		if err != nil {
+			return fmt.Errorf("create replication slot: %w", err)
+		}
+
+		d.logger.Info("replication slot created",
+			"slot", slotName,
+			"consistent_point", result.ConsistentPoint,
+		)
+
+		parsed, parseErr := pglogrepl.ParseLSN(result.ConsistentPoint)
+		if parseErr != nil {
+			return fmt.Errorf("parse consistent point: %w", parseErr)
+		}
+		consistentPoint = parsed
 	}
 
 	// If snapshot-first is configured, export existing rows using the slot's
@@ -213,6 +322,18 @@ func (d *Detector) run(ctx context.Context, events chan<- event.Event) error {
 		"slot", slotName,
 	)
 
+	// Start heartbeat goroutine if configured.
+	if d.heartbeatInterval > 0 && d.heartbeatTable != "" {
+		heartbeatCtx, heartbeatCancel := context.WithCancel(ctx)
+		defer heartbeatCancel()
+		go d.runHeartbeat(heartbeatCtx)
+	}
+
+	// Start slot lag monitor goroutine if persistent slot.
+	if d.persistentSlot {
+		go d.runSlotLagMonitor(ctx, slotName)
+	}
+
 	// Message loop.
 	clientXLogPos := consistentPoint
 	nextStatusDeadline := time.Now().Add(standbyStatusInterval)
@@ -226,6 +347,17 @@ func (d *Detector) run(ctx context.Context, events chan<- event.Event) error {
 			if err != nil {
 				return fmt.Errorf("send standby status: %w", err)
 			}
+
+			// Checkpoint after successful standby status update.
+			if d.checkpointStore != nil && clientXLogPos > 0 {
+				if saveErr := d.checkpointStore.Save(ctx, slotName, uint64(clientXLogPos)); saveErr != nil {
+					d.logger.Warn("failed to save checkpoint", "error", saveErr)
+				} else {
+					metrics.CheckpointLSN.Set(float64(clientXLogPos))
+					metrics.CheckpointTotal.Inc()
+				}
+			}
+
 			nextStatusDeadline = time.Now().Add(standbyStatusInterval)
 		}
 
@@ -280,6 +412,15 @@ func (d *Detector) run(ctx context.Context, events chan<- event.Event) error {
 
 			switch m := logicalMsg.(type) {
 			case *pglogrepl.RelationMessage:
+				if d.schemaEvents {
+					if oldRel, exists := relations[m.RelationID]; exists {
+						if changes := diffRelation(oldRel, m); len(changes) > 0 {
+							if err := d.emitSchemaChange(ctx, events, m, changes); err != nil {
+								return fmt.Errorf("emit schema change: %w", err)
+							}
+						}
+					}
+				}
 				relations[m.RelationID] = m
 
 			case *pglogrepl.BeginMessage:
@@ -370,6 +511,19 @@ func (d *Detector) emitEvent(
 		"table": rel.RelationName,
 		"row":   row,
 		"old":   old,
+	}
+
+	if d.includeSchema {
+		payload["schema"] = rel.Namespace
+		columns := make([]ColumnSchema, 0, len(rel.Columns))
+		for _, col := range rel.Columns {
+			columns = append(columns, ColumnSchema{
+				Name:     col.Name,
+				TypeOID:  col.DataType,
+				TypeName: TypeNameForOID(col.DataType),
+			})
+		}
+		payload["columns"] = columns
 	}
 
 	payloadJSON, err := json.Marshal(payload)
@@ -485,4 +639,217 @@ func randomSlotName() (string, error) {
 		return "", err
 	}
 	return "pgcdc_" + hex.EncodeToString(b), nil
+}
+
+const schemaChannel = "pgcdc:_schema"
+
+// schemaChange describes a single column-level change detected from RelationMessage diffs.
+type schemaChange struct {
+	Type     string `json:"type"`
+	Column   string `json:"column"`
+	TypeName string `json:"type_name,omitempty"`
+	OldType  string `json:"old_type,omitempty"`
+	NewType  string `json:"new_type,omitempty"`
+}
+
+// diffRelation compares old and new RelationMessages and returns detected changes.
+func diffRelation(oldRel, newRel *pglogrepl.RelationMessage) []schemaChange {
+	var changes []schemaChange
+
+	oldCols := make(map[string]*pglogrepl.RelationMessageColumn, len(oldRel.Columns))
+	for _, col := range oldRel.Columns {
+		oldCols[col.Name] = col
+	}
+
+	newCols := make(map[string]*pglogrepl.RelationMessageColumn, len(newRel.Columns))
+	for _, col := range newRel.Columns {
+		newCols[col.Name] = col
+	}
+
+	// Check for added or changed columns.
+	for name, newCol := range newCols {
+		if oldCol, exists := oldCols[name]; !exists {
+			changes = append(changes, schemaChange{
+				Type:     "column_added",
+				Column:   name,
+				TypeName: TypeNameForOID(newCol.DataType),
+			})
+		} else if oldCol.DataType != newCol.DataType {
+			changes = append(changes, schemaChange{
+				Type:    "column_type_changed",
+				Column:  name,
+				OldType: TypeNameForOID(oldCol.DataType),
+				NewType: TypeNameForOID(newCol.DataType),
+			})
+		}
+	}
+
+	// Check for removed columns.
+	for name := range oldCols {
+		if _, exists := newCols[name]; !exists {
+			changes = append(changes, schemaChange{
+				Type:   "column_removed",
+				Column: name,
+			})
+		}
+	}
+
+	return changes
+}
+
+// runSlotLagMonitor runs monitorSlotLag on a ticker for the lifetime of ctx.
+func (d *Detector) runSlotLagMonitor(ctx context.Context, slotName string) {
+	ticker := time.NewTicker(standbyStatusInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			d.monitorSlotLag(ctx, slotName)
+		}
+	}
+}
+
+// emitSchemaChange sends a synthetic SCHEMA_CHANGE event.
+func (d *Detector) emitSchemaChange(ctx context.Context, events chan<- event.Event, rel *pglogrepl.RelationMessage, changes []schemaChange) error {
+	d.logger.Warn("schema change detected",
+		"table", rel.RelationName,
+		"schema", rel.Namespace,
+		"changes", changes,
+	)
+
+	payload := map[string]any{
+		"op":      "SCHEMA_CHANGE",
+		"table":   rel.RelationName,
+		"schema":  rel.Namespace,
+		"changes": changes,
+	}
+
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		d.logger.Error("marshal schema change payload failed", "error", err)
+		return nil
+	}
+
+	ev, err := event.New(schemaChannel, "SCHEMA_CHANGE", payloadJSON, source)
+	if err != nil {
+		d.logger.Error("create schema change event failed", "error", err)
+		return nil
+	}
+
+	select {
+	case events <- ev:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// isSlotAlreadyExists checks if the error indicates the replication slot already exists.
+func isSlotAlreadyExists(err error) bool {
+	if err == nil {
+		return false
+	}
+	// PostgreSQL error code 42710 = duplicate_object (slot already exists).
+	var pgErr *pgconn.PgError
+	if ok := errors.As(err, &pgErr); ok {
+		return pgErr.Code == "42710"
+	}
+	return false
+}
+
+// runHeartbeat periodically updates the heartbeat table to keep the replication
+// slot advancing on idle databases. Uses a separate connection.
+func (d *Detector) runHeartbeat(ctx context.Context) {
+	dbURL := d.heartbeatDBURL
+	if dbURL == "" {
+		dbURL = d.dbURL
+	}
+
+	ticker := time.NewTicker(d.heartbeatInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := d.heartbeatOnce(ctx, dbURL); err != nil {
+				d.logger.Warn("heartbeat failed", "error", err)
+			}
+		}
+	}
+}
+
+func (d *Detector) heartbeatOnce(ctx context.Context, dbURL string) error {
+	hbCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	conn, err := pgx.Connect(hbCtx, dbURL)
+	if err != nil {
+		return fmt.Errorf("heartbeat connect: %w", err)
+	}
+	defer func() { _ = conn.Close(hbCtx) }()
+
+	table := pgx.Identifier{d.heartbeatTable}.Sanitize()
+
+	// Auto-create heartbeat table.
+	_, err = conn.Exec(hbCtx, fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			id INTEGER PRIMARY KEY DEFAULT 1,
+			last_beat TIMESTAMPTZ NOT NULL DEFAULT now()
+		)
+	`, table))
+	if err != nil {
+		return fmt.Errorf("create heartbeat table: %w", err)
+	}
+
+	// Upsert heartbeat row.
+	_, err = conn.Exec(hbCtx, fmt.Sprintf(`
+		INSERT INTO %s (id, last_beat) VALUES (1, now())
+		ON CONFLICT (id) DO UPDATE SET last_beat = now()
+	`, table))
+	if err != nil {
+		return fmt.Errorf("heartbeat upsert: %w", err)
+	}
+
+	return nil
+}
+
+// monitorSlotLag queries the replication slot lag and updates metrics.
+func (d *Detector) monitorSlotLag(ctx context.Context, slotName string) {
+	dbURL := d.heartbeatDBURL
+	if dbURL == "" {
+		dbURL = d.dbURL
+	}
+
+	lagCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	conn, err := pgx.Connect(lagCtx, dbURL)
+	if err != nil {
+		d.logger.Debug("slot lag monitor connect failed", "error", err)
+		return
+	}
+	defer func() { _ = conn.Close(lagCtx) }()
+
+	var lagBytes *int64
+	err = conn.QueryRow(lagCtx,
+		"SELECT pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn) FROM pg_replication_slots WHERE slot_name = $1",
+		slotName,
+	).Scan(&lagBytes)
+	if err != nil || lagBytes == nil {
+		return
+	}
+
+	metrics.SlotLagBytes.Set(float64(*lagBytes))
+
+	if d.slotLagWarn > 0 && *lagBytes > d.slotLagWarn {
+		d.logger.Warn("replication slot lag exceeds threshold",
+			"slot", slotName,
+			"lag_bytes", *lagBytes,
+			"threshold", d.slotLagWarn,
+		)
+	}
 }

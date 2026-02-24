@@ -1,7 +1,7 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X github.com/florinutz/pgcdc/cmd.Version=$(VERSION)
 
-.PHONY: build test test-scenarios test-all lint vet fmt coverage docker-build docker-up docker-down clean help
+.PHONY: build test test-scenarios test-all lint vet fmt bench coverage docker-build docker-up docker-down clean help
 
 ## build: Compile the binary
 build:
@@ -41,6 +41,10 @@ docker-up:
 ## docker-down: Stop docker compose services
 docker-down:
 	docker compose down
+
+## bench: Run benchmarks (requires Docker)
+bench:
+	./bench/run.sh
 
 ## coverage: Generate test coverage report
 coverage:

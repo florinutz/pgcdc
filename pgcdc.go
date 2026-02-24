@@ -7,7 +7,10 @@ import (
 
 	"github.com/florinutz/pgcdc/adapter"
 	"github.com/florinutz/pgcdc/bus"
+	"github.com/florinutz/pgcdc/checkpoint"
 	"github.com/florinutz/pgcdc/detector"
+	"github.com/florinutz/pgcdc/dlq"
+	"github.com/florinutz/pgcdc/event"
 	"github.com/florinutz/pgcdc/health"
 	"github.com/florinutz/pgcdc/snapshot"
 	"golang.org/x/sync/errgroup"
@@ -16,13 +19,16 @@ import (
 // Pipeline orchestrates a detector, bus, and set of adapters into a running
 // event pipeline. It is the primary entry point for using pgcdc as a library.
 type Pipeline struct {
-	detector  detector.Detector
-	snapshot  *snapshot.Snapshot
-	bus       *bus.Bus
-	adapters  []adapter.Adapter
-	health    *health.Checker
-	logger    *slog.Logger
-	busBuffer int
+	detector        detector.Detector
+	snapshot        *snapshot.Snapshot
+	bus             *bus.Bus
+	adapters        []adapter.Adapter
+	health          *health.Checker
+	logger          *slog.Logger
+	busBuffer       int
+	checkpointStore checkpoint.Store
+	dlq             dlq.DLQ
+	routes          map[string][]string // adapter name -> allowed channels
 }
 
 // Option configures a Pipeline.
@@ -59,6 +65,38 @@ func WithHealthChecker(c *health.Checker) Option {
 	}
 }
 
+// WithCheckpointStore sets the checkpoint store for LSN persistence.
+// The pipeline will close the store on shutdown.
+func WithCheckpointStore(s checkpoint.Store) Option {
+	return func(p *Pipeline) {
+		p.checkpointStore = s
+	}
+}
+
+// WithDLQ sets the dead letter queue for failed event delivery.
+func WithDLQ(d dlq.DLQ) Option {
+	return func(p *Pipeline) {
+		p.dlq = d
+	}
+}
+
+// WithRoute restricts an adapter to specific channels. Events on channels not
+// in the list are skipped for that adapter. If no route is set, the adapter
+// receives all events.
+func WithRoute(adapterName string, channels ...string) Option {
+	return func(p *Pipeline) {
+		if p.routes == nil {
+			p.routes = make(map[string][]string)
+		}
+		p.routes[adapterName] = channels
+	}
+}
+
+// DLQAware is implemented by adapters that can record failed events to a DLQ.
+type DLQAware interface {
+	SetDLQ(d dlq.DLQ)
+}
+
 // NewPipeline creates a Pipeline that will use the given detector and options.
 // Call Run to start the pipeline.
 func NewPipeline(det detector.Detector, opts ...Option) *Pipeline {
@@ -78,6 +116,9 @@ func NewPipeline(det detector.Detector, opts ...Option) *Pipeline {
 	}
 	for _, a := range p.adapters {
 		p.health.Register(a.Name())
+		if da, ok := a.(DLQAware); ok && p.dlq != nil {
+			da.SetDLQ(p.dlq)
+		}
 	}
 	p.bus = bus.New(p.busBuffer, p.logger)
 	return p
@@ -87,6 +128,10 @@ func NewPipeline(det detector.Detector, opts ...Option) *Pipeline {
 // occurs. Context cancellation triggers graceful shutdown. The returned error
 // is nil on clean shutdown (context.Canceled).
 func (p *Pipeline) Run(ctx context.Context) error {
+	if p.checkpointStore != nil {
+		defer func() { _ = p.checkpointStore.Close() }()
+	}
+
 	g, gCtx := errgroup.WithContext(ctx)
 
 	// Start the bus.
@@ -107,7 +152,7 @@ func (p *Pipeline) Run(ctx context.Context) error {
 
 	// Subscribe and start each adapter.
 	for _, a := range p.adapters {
-		sub, err := p.bus.Subscribe(a.Name())
+		sub, err := p.subscribeAdapter(a.Name())
 		if err != nil {
 			return fmt.Errorf("subscribe adapter %s: %w", a.Name(), err)
 		}
@@ -139,6 +184,28 @@ func (p *Pipeline) Health() *health.Checker {
 	return p.health
 }
 
+// DLQ returns the pipeline's dead letter queue, or nil if not configured.
+func (p *Pipeline) DLQ() dlq.DLQ {
+	return p.dlq
+}
+
+// subscribeAdapter creates a bus subscription for an adapter, applying a route
+// filter if one has been configured for that adapter name.
+func (p *Pipeline) subscribeAdapter(name string) (<-chan event.Event, error) {
+	channels, hasRoute := p.routes[name]
+	if !hasRoute || len(channels) == 0 {
+		return p.bus.Subscribe(name)
+	}
+	allowed := make(map[string]struct{}, len(channels))
+	for _, ch := range channels {
+		allowed[ch] = struct{}{}
+	}
+	return p.bus.SubscribeWithFilter(name, func(ev event.Event) bool {
+		_, ok := allowed[ev.Channel]
+		return ok
+	})
+}
+
 // NewSnapshotPipeline creates a Pipeline that uses a snapshot as the event
 // source instead of a live detector. Call RunSnapshot to start.
 func NewSnapshotPipeline(snap *snapshot.Snapshot, opts ...Option) *Pipeline {
@@ -158,6 +225,9 @@ func NewSnapshotPipeline(snap *snapshot.Snapshot, opts ...Option) *Pipeline {
 	}
 	for _, a := range p.adapters {
 		p.health.Register(a.Name())
+		if da, ok := a.(DLQAware); ok && p.dlq != nil {
+			da.SetDLQ(p.dlq)
+		}
 	}
 	p.bus = bus.New(p.busBuffer, p.logger)
 	return p
@@ -186,7 +256,7 @@ func (p *Pipeline) RunSnapshot(ctx context.Context) error {
 
 	// Subscribe and start each adapter.
 	for _, a := range p.adapters {
-		sub, err := p.bus.Subscribe(a.Name())
+		sub, err := p.subscribeAdapter(a.Name())
 		if err != nil {
 			return fmt.Errorf("subscribe adapter %s: %w", a.Name(), err)
 		}

@@ -1,555 +1,232 @@
 # pgcdc
 
+**Stream PostgreSQL changes anywhere. Single binary. No Kafka.**
+
 [![CI](https://github.com/florinutz/pgcdc/actions/workflows/ci.yml/badge.svg)](https://github.com/florinutz/pgcdc/actions/workflows/ci.yml)
+[![Go Report Card](https://goreportcard.com/badge/github.com/florinutz/pgcdc)](https://goreportcard.com/report/github.com/florinutz/pgcdc)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Go Reference](https://pkg.go.dev/badge/github.com/florinutz/pgcdc.svg)](https://pkg.go.dev/github.com/florinutz/pgcdc)
 
-Lightweight PostgreSQL Change Data Capture. No Kafka. No NATS. Just your PG and a single binary.
+14 adapters | 3 detectors | WAL + LISTEN/NOTIFY + Outbox | Persistent slots | Dead letter queue | Event routing | Zero infrastructure
 
-pgcdc captures changes from PostgreSQL via LISTEN/NOTIFY or WAL logical replication and delivers them to webhooks, SSE streams, stdout, files, exec processes, PG tables, and WebSockets -- with zero external dependencies beyond PostgreSQL itself.
+```bash
+go install github.com/florinutz/pgcdc/cmd/pgcdc@latest
+```
 
 ```
-PostgreSQL                    pgcdc (single binary)
-┌──────────┐    LISTEN   ┌─────────────┐     ┌───────────┐
-│  Table   │────────────▶│  Detector   │────▶│   Bus     │
-│  Trigger │  NOTIFY     │ (reconnect) │     │ (fan-out) │
-└──────────┘             └─────────────┘     └─────┬─────┘
-                                                   │
-                              ┌──────────────┼──────────────┐──────────────┐
-                              ▼              ▼              ▼              ▼
-                        ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐
-                        │ Webhook  │  │   SSE    │  │  Stdout  │  │   File   │
-                        │ (retries)│  │ (stream) │  │  (json)  │  │ (rotate) │
-                        └──────────┘  └──────────┘  └──────────┘  └──────────┘
-                              ▼              ▼              ▼
-                        ┌──────────┐  ┌──────────┐  ┌──────────┐
-                        │   Exec   │  │ PG Table │  │WebSocket │
-                        │ (stdin)  │  │ (INSERT) │  │ (stream) │
-                        └──────────┘  └──────────┘  └──────────┘
+PostgreSQL ──▶ pgcdc (single Go binary) ──▶ Webhook, SSE, WebSocket, gRPC
+               3 detectors:                  stdout, file, exec, PG table
+               • LISTEN/NOTIFY               NATS JetStream
+               • WAL logical replication      Typesense / Meilisearch
+               • Outbox table polling         Redis cache invalidation
+                                              pgvector embeddings
 ```
+
+## Why pgcdc?
+
+| | pgcdc | Debezium | Sequin | Conduit |
+|--|-------|----------|--------|---------|
+| Single binary | Yes | No (JVM+Kafka) | No (managed) | Yes |
+| Memory (idle) | ~12 MB | ~500 MB+ | N/A | ~50 MB |
+| PG-optimized | Yes | Generic | Yes | Generic |
+| Built-in pgvector sync | Yes | No | No | No |
+| SSE/WS/gRPC streaming | Yes | No | HTTP only | No |
+| Search sync (Typesense/Meili) | Yes | No | No | Plugin |
+| Redis cache invalidation | Yes | No | No | No |
+| Dead letter queue | Yes | Yes | Yes | No |
+| Event routing | Yes | Yes (SMTs) | No | Yes |
+| External deps | 0 | Kafka+ZK | Managed | 0 |
 
 ## Quick Start
 
-### 1. Install
+### Path 1: LISTEN/NOTIFY (simplest, no PG config needed)
 
 ```bash
-go install github.com/florinutz/pgcdc@latest
-```
-
-Or build from source:
-
-```bash
-git clone https://github.com/florinutz/pgcdc.git
-cd pgcdc
-make build
-```
-
-### 2. Create a trigger on your table
-
-```bash
-pgcdc init --table orders
-```
-
-This prints SQL you can review and apply:
-
-```sql
-CREATE OR REPLACE FUNCTION pgcdc_notify_orders() RETURNS trigger AS $$
-BEGIN
-  PERFORM pg_notify('pgcdc:orders', json_build_object(
-    'op', TG_OP,
-    'table', TG_TABLE_NAME,
-    'row', CASE WHEN TG_OP = 'DELETE' THEN row_to_json(OLD) ELSE row_to_json(NEW) END,
-    'old', CASE WHEN TG_OP = 'UPDATE' THEN row_to_json(OLD) ELSE NULL END
-  )::text);
-  RETURN COALESCE(NEW, OLD);
-END;
-$$ LANGUAGE plpgsql;
-
-CREATE TRIGGER pgcdc_orders_trigger
-  AFTER INSERT OR UPDATE OR DELETE ON orders
-  FOR EACH ROW EXECUTE FUNCTION pgcdc_notify_orders();
-```
-
-Apply it:
-
-```bash
+# Generate trigger SQL
 pgcdc init --table orders | psql mydb
-```
 
-### 3. Start listening
-
-```bash
-# stdout (JSON lines)
+# Stream changes to stdout
 pgcdc listen -c pgcdc:orders --db postgres://localhost:5432/mydb
-
-# webhook
-pgcdc listen -c pgcdc:orders -a webhook -u https://example.com/hook --db postgres://...
-
-# SSE server
-pgcdc listen -c pgcdc:orders -a sse --sse-addr :8080 --db postgres://...
-
-# file (JSON lines with rotation)
-pgcdc listen -c pgcdc:orders -a file --file-path /tmp/events.jsonl --db postgres://...
-
-# exec (pipe to any command)
-pgcdc listen -c pgcdc:orders -a exec --exec-command 'jq .payload' --db postgres://...
-
-# pg_table (INSERT into a PostgreSQL table)
-pgcdc listen -c pgcdc:orders -a pg_table --pg-table-name audit_events --db postgres://...
-
-# websocket
-pgcdc listen -c pgcdc:orders -a ws --sse-addr :8080 --db postgres://...
-
-# multiple adapters at once
-pgcdc listen -c pgcdc:orders -a stdout -a webhook -u https://example.com/hook --db postgres://...
 ```
 
-### Snapshot: Export Existing Data
+### Path 2: WAL Replication (production, no triggers)
 
-Capture all existing rows from a table as SNAPSHOT events, then pipe them through any adapter:
+Requires `wal_level=logical` in `postgresql.conf`.
 
 ```bash
-# Export all rows to stdout
-pgcdc snapshot --table orders --db postgres://localhost:5432/mydb
-
-# Export to a file
-pgcdc snapshot --table orders -a file --file-path /tmp/orders.jsonl --db postgres://...
-
-# Export with a WHERE filter
-pgcdc snapshot --table orders --where "created_at > '2025-01-01'" --db postgres://...
-```
-
-Snapshot events use the same `event.Event` format as live changes, with `operation: "SNAPSHOT"` and `source: "snapshot"`. All existing adapters work unchanged.
-
-### Snapshot-First: Zero-Gap Initial Sync
-
-Combine snapshot + live WAL streaming in one command. Exports all existing rows, then seamlessly transitions to real-time change capture with no gap:
-
-```bash
-pgcdc listen --detector wal --publication pgcdc_orders \
-  --snapshot-first --snapshot-table orders --db postgres://localhost:5432/mydb
-```
-
-How it works: pgcdc creates a replication slot, snapshots the table using the slot's exported snapshot (so you see exactly the data at that WAL position), then starts streaming changes from that position. Zero duplicates, zero gaps.
-
-```
-Phase 1: SNAPSHOT events (existing rows)
-  {"operation":"SNAPSHOT","source":"snapshot","channel":"pgcdc:orders",...}
-  {"operation":"SNAPSHOT","source":"snapshot","channel":"pgcdc:orders",...}
-  ...
-
-Phase 2: Live WAL events (new changes)
-  {"operation":"INSERT","source":"wal_replication","channel":"pgcdc:orders",...}
-  {"operation":"UPDATE","source":"wal_replication","channel":"pgcdc:orders",...}
-```
-
-### Alternative: WAL Logical Replication
-
-No triggers needed. Captures changes directly from the PostgreSQL write-ahead log.
-
-**Prerequisites:** PostgreSQL must have `wal_level=logical` (check with `SHOW wal_level;`).
-
-```bash
-# 1. Generate publication SQL
-pgcdc init --table orders --detector wal
-
-# 2. Apply it
+# Create publication
 pgcdc init --table orders --detector wal | psql mydb
 
-# 3. Start listening via WAL
-pgcdc listen --detector wal --publication pgcdc_orders --db postgres://localhost:5432/mydb
+# Stream with persistent slot (survives restarts)
+pgcdc listen --detector wal --publication pgcdc_orders \
+  --persistent-slot --db postgres://localhost:5432/mydb
 ```
 
-WAL replication events use the same format as LISTEN/NOTIFY (`channel: pgcdc:<table>`, same payload structure), so all adapters and SSE filtering work identically regardless of detector type.
-
-### Transaction Metadata
-
-Enrich WAL events with transaction context:
+### Path 3: Outbox Pattern (transactional guarantees)
 
 ```bash
-pgcdc listen --detector wal --publication pgcdc_orders --tx-metadata --db postgres://...
-```
+# Generate outbox table
+pgcdc init --table my_outbox --adapter outbox | psql mydb
 
-Each event includes a `transaction` field:
-
-```json
-{
-  "id": "...",
-  "channel": "pgcdc:orders",
-  "operation": "INSERT",
-  "payload": {"op": "INSERT", "table": "orders", "row": {"id": 1}, "old": null},
-  "source": "wal_replication",
-  "created_at": "2025-01-15T10:30:00Z",
-  "transaction": {
-    "xid": 1234,
-    "commit_time": "2025-01-15T10:30:00Z",
-    "seq": 1
-  }
-}
-```
-
-Fields: `xid` (PostgreSQL transaction ID), `commit_time` (when the transaction committed), `seq` (1-based position within the transaction). LISTEN/NOTIFY events omit this field (the protocol has no transaction info).
-
-### Transaction Markers
-
-Wrap each transaction in synthetic BEGIN/COMMIT events:
-
-```bash
-pgcdc listen --detector wal --publication pgcdc_orders --tx-markers --db postgres://...
-```
-
-`--tx-markers` implies `--tx-metadata`. Output stream:
-
-```json
-{"channel":"pgcdc:_txn","operation":"BEGIN","payload":{"xid":1234,"commit_time":"..."},...}
-{"channel":"pgcdc:orders","operation":"INSERT","transaction":{"xid":1234,"seq":1},...}
-{"channel":"pgcdc:orders","operation":"INSERT","transaction":{"xid":1234,"seq":2},...}
-{"channel":"pgcdc:_txn","operation":"COMMIT","payload":{"xid":1234,"event_count":2,"commit_time":"..."},...}
-```
-
-Marker events use channel `pgcdc:_txn` (underscore prefix signals synthetic/system events) and have no `transaction` field themselves. The COMMIT payload includes `event_count` for the number of DML events in the transaction.
-
-## Configuration
-
-pgcdc supports three layers of configuration (highest priority wins):
-
-**CLI flags** > **environment variables** > **YAML config file** > **defaults**
-
-### Config file
-
-```yaml
-# pgcdc.yaml
-database_url: postgres://user:pass@localhost:5432/mydb
-channels:
-  - pgcdc:orders
-  - pgcdc:users
-
-adapters:
-  - stdout
-  - webhook
-
-log_level: info    # debug, info, warn, error
-log_format: text   # text, json
-
-bus:
-  buffer_size: 1024
-
-webhook:
-  url: https://example.com/webhook
-  headers:
-    Authorization: "Bearer token123"
-  signing_key: "my-secret-key"
-  max_retries: 5
-
-sse:
-  addr: ":8080"
-  cors_origins:
-    - "*"
-  heartbeat_interval: 15s
-
-file:
-  path: /var/log/pgcdc/events.jsonl
-  max_size: 104857600  # 100 MB
-  max_files: 5
-
-exec:
-  command: "jq .payload >> /tmp/payloads.jsonl"
-
-pg_table:
-  # url: postgres://...  # defaults to database_url
-  table: pgcdc_events
-
-websocket:
-  ping_interval: 15s
-```
-
-### Environment variables
-
-All config keys are available as environment variables with the `PGCDC_` prefix:
-
-```bash
-export PGCDC_DATABASE_URL=postgres://localhost:5432/mydb
-export PGCDC_LOG_LEVEL=debug
-export PGCDC_WEBHOOK_URL=https://example.com/hook
+# Poll and deliver
+pgcdc listen --detector outbox --outbox-table my_outbox --db postgres://...
 ```
 
 ## Adapters
 
-### stdout
+| Adapter | Flag | Description |
+|---------|------|-------------|
+| **stdout** | `-a stdout` | JSON lines to stdout. Pipe-friendly. |
+| **webhook** | `-a webhook -u <url>` | HTTP POST with retries, HMAC signing, exponential backoff. |
+| **SSE** | `-a sse` | Server-Sent Events with channel filtering. |
+| **WebSocket** | `-a ws` | WebSocket streaming with channel filtering. |
+| **gRPC** | `-a grpc` | gRPC streaming server with channel filtering. |
+| **file** | `-a file --file-path <path>` | JSON lines to file with automatic rotation. |
+| **exec** | `-a exec --exec-command <cmd>` | Pipe JSON to subprocess stdin. Auto-restarts. |
+| **pg_table** | `-a pg_table` | INSERT into a PostgreSQL table. |
+| **NATS** | `-a nats --nats-url <url>` | Publish to NATS JetStream with dedup. |
+| **search** | `-a search --search-url <url>` | Sync to Typesense or Meilisearch. Batched. |
+| **redis** | `-a redis --redis-url <url>` | Cache invalidation or sync. DEL/SET per event. |
+| **embedding** | `-a embedding --embedding-api-url <url>` | OpenAI-compatible API → pgvector UPSERT. |
+| **iceberg** | `-a iceberg --iceberg-warehouse <path>` | Apache Iceberg table writes. |
 
-Outputs JSON lines to stdout. Pipe-friendly:
+Use multiple adapters: `-a stdout -a webhook -a redis`
 
-```bash
-pgcdc listen -c pgcdc:orders --db postgres://... | jq .payload
-```
+## Event Routing
 
-### webhook
-
-HTTP POST with retries and optional HMAC signing.
-
-Headers on every request:
-- `Content-Type: application/json`
-- `User-Agent: pgcdc/1.0`
-- `X-PGCDC-Event-ID: <uuid>`
-- `X-PGCDC-Channel: <channel>`
-- `X-PGCDC-Signature: sha256=<hex>` (when signing key is set)
-
-Retry behavior:
-- Exponential backoff with full jitter (1s base, 32s cap)
-- Retries on 5xx and 429 (Too Many Requests)
-- No retry on other 4xx responses
-- Default 5 max retries
-
-### SSE (Server-Sent Events)
-
-Starts an HTTP server with SSE endpoints:
-
-- `GET /events` -- stream all channels
-- `GET /events/{channel}` -- stream filtered by channel
-- `GET /healthz` -- health check
-
-Features:
-- Heartbeat comments every 15s to keep connections alive
-- `X-Accel-Buffering: no` for nginx compatibility
-- Configurable CORS origins
-
-### file
-
-Writes events as JSON lines to a file with automatic rotation:
+Route specific channels to specific adapters:
 
 ```bash
-pgcdc listen -c pgcdc:orders -a file --file-path /var/log/pgcdc/events.jsonl --db postgres://...
-```
-
-Features:
-- Append-only JSON lines, fsynced after each event
-- Automatic rotation when file exceeds `--file-max-size` (default 100MB)
-- Keeps up to `--file-max-files` rotated files (default 5): `events.jsonl.1`, `.2`, etc.
-
-### exec
-
-Pipes events as JSON lines to a long-running subprocess's stdin:
-
-```bash
-pgcdc listen -c pgcdc:orders -a exec --exec-command 'jq .payload >> /tmp/payloads.jsonl' --db postgres://...
-```
-
-Features:
-- Command runs via `sh -c`, so shell features (pipes, redirects) work
-- If the process exits, pgcdc restarts it with exponential backoff
-- Failed events are re-delivered to the new process
-
-### pg_table
-
-Inserts events into a PostgreSQL table:
-
-```bash
-# 1. Generate the CREATE TABLE SQL
-pgcdc init --table audit_events --adapter pg_table | psql mydb
-
-# 2. Start piping events to the table
-pgcdc listen -c pgcdc:orders -a pg_table --pg-table-name audit_events --db postgres://...
-```
-
-Features:
-- Table must pre-exist (use `pgcdc init --adapter pg_table` to generate SQL)
-- Uses `--pg-table-url` for a separate database, or falls back to `--db`
-- Automatic reconnection with backoff on connection loss
-- Non-connection errors (constraint violations) skip the event with a warning
-
-### ws (WebSocket)
-
-Starts an HTTP server with WebSocket endpoints:
-
-- `GET /ws` -- stream all channels
-- `GET /ws/{channel}` -- stream filtered by channel
-
-```bash
-pgcdc listen -c pgcdc:orders -a ws --sse-addr :8080 --db postgres://...
-# Then: websocat ws://localhost:8080/ws
-```
-
-Features:
-- Ping/pong keepalive (default 15s interval)
-- Channel filtering via URL path
-- Shares the same HTTP server as SSE (use both simultaneously)
-
-### embedding
-
-Automatically keeps a pgvector table in sync with your source data:
-
-```bash
-# 1. Create the embeddings table
-pgcdc init --table article_embeddings --adapter embedding | psql mydb
-
-# 2. Keep vectors in sync with live changes
-pgcdc listen -c pgcdc:articles -a embedding \
-  --embedding-api-url https://api.openai.com/v1/embeddings \
-  --embedding-api-key $OPENAI_API_KEY \
-  --embedding-columns title,body \
-  --db postgres://...
-
-# 3. Or embed all existing rows first (with snapshot), then go live
-pgcdc snapshot --table articles -a embedding \
-  --embedding-api-url https://api.openai.com/v1/embeddings \
-  --embedding-api-key $OPENAI_API_KEY \
-  --embedding-columns title,body \
+pgcdc listen --detector wal --publication pgcdc_all \
+  -a webhook -a search -a redis \
+  --route webhook=pgcdc:orders,pgcdc:users \
+  --route search=pgcdc:articles \
+  --route redis=pgcdc:orders \
   --db postgres://...
 ```
 
-Features:
-- INSERT/UPDATE → calls embedding API, UPSERTs vector into pgvector table
-- DELETE → removes corresponding vector row
-- Retries on 5xx and 429 (rate limiting) with exponential backoff
-- Reconnects to pgvector database on connection loss
-- Works with any OpenAI-compatible API: OpenAI, Azure OpenAI, Ollama, vLLM, LiteLLM
-- Table must pre-exist (use `pgcdc init --adapter embedding` to generate SQL)
-- Zero new binary dependencies — uses stdlib HTTP + pgx string encoding for vectors
+Adapters without a `--route` filter receive all events.
 
-Config file example:
+## Dead Letter Queue
+
+Failed events are captured instead of silently dropped:
+
+```bash
+# Default: JSON lines to stderr
+pgcdc listen ... --dlq stderr
+
+# PostgreSQL table (auto-created)
+pgcdc listen ... --dlq pg_table --dlq-table pgcdc_dead_letters
+
+# Disable
+pgcdc listen ... --dlq none
+```
+
+## Snapshot: Initial Data Sync
+
+Export existing rows as events, then transition to live streaming:
+
+```bash
+# Snapshot only
+pgcdc snapshot --table orders --db postgres://...
+
+# Snapshot-first: zero-gap initial sync + live WAL
+pgcdc listen --detector wal --publication pgcdc_orders \
+  --snapshot-first --snapshot-table orders --db postgres://...
+```
+
+## Persistent Slots + Checkpointing
+
+Survive crashes and restarts with WAL position tracking:
+
+```bash
+pgcdc listen --detector wal --publication pgcdc_orders \
+  --persistent-slot --slot-name pgcdc_orders \
+  --db postgres://...
+```
+
+Checkpoints are stored in `pgcdc_checkpoints` table. The replication slot persists across disconnects.
+
+## Transaction Metadata
+
+```bash
+# Add xid, commit_time, seq to events
+pgcdc listen --detector wal --publication pgcdc_orders --tx-metadata --db postgres://...
+
+# Wrap transactions in BEGIN/COMMIT markers
+pgcdc listen --detector wal --publication pgcdc_orders --tx-markers --db postgres://...
+```
+
+## Observability
+
+- **Prometheus metrics** at `/metrics` (30+ metrics)
+- **Health check** at `/healthz` (per-component status)
+- **Standalone metrics server**: `--metrics-addr :9090`
+- **Slot lag monitoring**: `pgcdc_slot_lag_bytes` gauge + log warnings
+- **Heartbeat**: `--heartbeat-interval 30s` keeps replication slots advancing
+
+## Configuration
+
+Three layers (highest priority wins): **CLI flags** > **env vars** (`PGCDC_` prefix) > **YAML config file** > **defaults**
+
 ```yaml
-embedding:
-  api_url: https://api.openai.com/v1/embeddings
-  api_key: sk-...
-  model: text-embedding-3-small
-  columns: [title, body]
-  id_column: id            # source row primary key column
-  table: article_embeddings
-  # db_url: postgres://... # defaults to database_url
-  dimension: 1536
-  max_retries: 3
-  timeout: 30s
+# pgcdc.yaml
+database_url: postgres://user:pass@localhost:5432/mydb
+channels: [pgcdc:orders]
+adapters: [stdout, webhook]
+
+webhook:
+  url: https://example.com/webhook
+  signing_key: my-secret
+  max_retries: 5
+
+dlq:
+  type: pg_table
+
+search:
+  engine: typesense
+  url: http://localhost:8108
+  api_key: xyz
+  index: orders
+
+redis:
+  url: redis://localhost:6379
+  mode: invalidate
+  key_prefix: "orders:"
 ```
 
-The embeddings table schema (`pgcdc init --table article_embeddings --adapter embedding`):
-```sql
-CREATE EXTENSION IF NOT EXISTS vector;
-CREATE TABLE IF NOT EXISTS article_embeddings (
-    source_id    TEXT PRIMARY KEY,
-    source_table TEXT NOT NULL,
-    content      TEXT NOT NULL,
-    embedding    vector(1536),
-    event_id     TEXT NOT NULL,
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-```
-
-## Event Format
-
-```json
-{
-  "id": "019662a1-b2c3-7def-8901-234567890abc",
-  "channel": "pgcdc:orders",
-  "operation": "INSERT",
-  "payload": {
-    "op": "INSERT",
-    "table": "orders",
-    "row": {"id": 1, "amount": 99.99},
-    "old": null
-  },
-  "source": "listen_notify",
-  "created_at": "2025-01-15T10:30:00Z"
-}
-```
-
-## CLI Reference
+## Architecture
 
 ```
-pgcdc listen [flags]
-  -c, --channel strings        PG channels to listen on (repeatable)
-  -a, --adapter strings        Adapters: stdout, webhook, sse, file, exec, pg_table, ws, embedding (default [stdout])
-  -u, --url string             Webhook destination URL
-      --sse-addr string        SSE/WS server address (default ":8080")
-      --db string              PostgreSQL connection string (env: PGCDC_DATABASE_URL)
-      --retries int            Webhook max retries (default 5)
-      --signing-key string     HMAC signing key for webhook
-      --detector string        Detector type: listen_notify or wal (default "listen_notify")
-      --publication string     PostgreSQL publication name (required for --detector wal)
-      --tx-metadata            Include transaction metadata in WAL events (xid, commit_time, seq)
-      --tx-markers             Emit BEGIN/COMMIT marker events (implies --tx-metadata)
-      --metrics-addr string    Standalone metrics/health server address (e.g. :9090)
-      --snapshot-first         Run table snapshot before live WAL streaming
-      --snapshot-table string  Table to snapshot (required with --snapshot-first)
-      --snapshot-where string  Optional WHERE clause for snapshot
-      --file-path string       File adapter output path
-      --file-max-size int      File rotation size in bytes (default 104857600)
-      --file-max-files int     Number of rotated files to keep (default 5)
-      --exec-command string    Shell command to pipe events to (via stdin)
-      --pg-table-url string    PostgreSQL URL for pg_table adapter (default: same as --db)
-      --pg-table-name string   Destination table name (default: pgcdc_events)
-      --ws-ping-interval dur         WebSocket ping interval (default 15s)
-      --embedding-api-url string     OpenAI-compatible embedding API URL
-      --embedding-api-key string     API key for embedding service
-      --embedding-model string       Embedding model name (default: text-embedding-3-small)
-      --embedding-columns strings    Columns to embed from event payload row (required for embedding adapter)
-      --embedding-id-column string   Source row ID column for UPSERT/DELETE (default: id)
-      --embedding-table string       Destination pgvector table (default: pgcdc_embeddings)
-      --embedding-db-url string      PostgreSQL URL for pgvector (default: same as --db)
-      --embedding-dimension int      Vector dimension (default: 1536)
-
-pgcdc snapshot [flags]
-      --db string              PostgreSQL connection string
-      --table string           Table to snapshot (required)
-      --where string           Optional WHERE clause to filter rows
-      --batch-size int         Progress logging interval in rows (default 1000)
-  -a, --adapter strings        Adapters: stdout, webhook, file, exec, pg_table, embedding (default [stdout])
-
-pgcdc init [flags]
-      --table string           Table name (required)
-      --channel string         Channel name (default: pgcdc:<table>)
-      --detector string        Detector type: listen_notify or wal (default "listen_notify")
-      --publication string     Publication name for WAL (default: pgcdc_<table>)
-      --adapter string         Adapter type: pg_table or embedding (generates table SQL)
-      --dimension int          Vector dimension for embedding adapter (default: 1536)
-
-pgcdc version
+Signal (SIGINT/SIGTERM)
+  |
+  v
+Context ──▶ Pipeline (pgcdc.go)
+              |
+  Detector ──▶ Bus (fan-out + routing) ──▶ Adapter ──▶ DLQ (on failure)
+  (listen_notify    subscriber chans
+   wal              (one per adapter,
+   outbox)           filtered by route)
 ```
 
-Global flags:
-```
-      --config string       Config file path (default: ./pgcdc.yaml)
-      --log-level string    debug, info, warn, error (default "info")
-      --log-format string   text, json (default "text")
-```
-
-## Docker
-
-```bash
-# Build the image
-make docker-build
-
-# Start postgres + pgcdc
-make docker-up
-
-# Stop
-make docker-down
-```
+- **Concurrency**: `errgroup` manages all goroutines. One context cancellation tears everything down.
+- **Backpressure**: Non-blocking sends. Full subscriber channel = dropped event + warning log.
+- **Routing**: Bus-level filtering before fan-out. No event copies wasted.
+- **DLQ**: Failed events captured to stderr or PG table for inspection/replay.
 
 ## Development
 
 ```bash
 make build          # compile binary
-make test           # run unit tests
-make test-scenarios # run scenario tests (requires Docker)
-make test-all       # unit + scenario tests
-make lint           # run golangci-lint
-make vet            # run go vet
-make fmt            # check formatting
-make coverage       # generate coverage report
-make docker-build   # build Docker image
-make clean          # remove build artifacts
+make test           # unit tests (~2s)
+make test-scenarios # scenario tests with Docker (~30s)
+make test-all       # both
+make bench          # throughput/latency/memory benchmarks
+make lint           # golangci-lint
+make coverage       # coverage report
 ```
 
-## Design
-
-pgcdc is built around three core abstractions:
-
-- **Detector** -- sources of change events (LISTEN/NOTIFY or WAL logical replication)
-- **Bus** -- fans out events from detectors to adapters via buffered Go channels
-- **Adapter** -- delivers events to destinations (stdout, webhook, SSE, file, exec, pg_table, WebSocket)
-
-All components communicate through Go channels. Backpressure propagates naturally: a slow adapter's channel fills up, the bus drops events for that adapter (with a warning log), and other adapters continue unaffected.
-
-Graceful shutdown flows from signal → context cancellation → detector exits → bus closes subscriber channels → adapters drain and exit → HTTP server shuts down.
+See [docs/](docs/) for full documentation.
 
 ## License
 

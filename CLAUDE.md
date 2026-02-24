@@ -1,6 +1,6 @@
 # pgcdc
 
-PostgreSQL change data capture (LISTEN/NOTIFY or WAL logical replication) streaming to webhooks, SSE, stdout, files, exec processes, PG tables, WebSockets, and pgvector embeddings.
+PostgreSQL change data capture (LISTEN/NOTIFY, WAL logical replication, or outbox pattern) streaming to webhooks, SSE, stdout, files, exec processes, PG tables, WebSockets, pgvector embeddings, NATS JetStream, Typesense/Meilisearch, Redis, and gRPC.
 
 ## Quick Start
 
@@ -21,14 +21,19 @@ Signal (SIGINT/SIGTERM)
   v
 Context ──> Pipeline (pgcdc.go orchestrates everything)
               |
-  Detector ──> Bus (fan-out) ──> Adapter (stdout)
-  (listennotify     |          ──> Adapter (webhook)
-   or walreplication)          ──> Adapter (file, with rotation)
-                    |          ──> Adapter (exec, stdin JSON lines)
-                    |          ──> Adapter (pg_table, INSERT)
-                    |          ──> Adapter (SSE broker) ──> HTTP server
-              ingest chan      ──> Adapter (WS broker)  ──> HTTP server
-                                subscriber chans (one per adapter)
+  Detector ──> Bus (fan-out + routing) ──> Adapter (stdout)
+  (listennotify     |                   ──> Adapter (webhook)     ──> DLQ
+   walreplication   |                   ──> Adapter (file)
+   or outbox)       |                   ──> Adapter (exec)
+                    |                   ──> Adapter (pg_table)
+                    |                   ──> Adapter (SSE broker)  ──> HTTP server
+              ingest chan               ──> Adapter (WS broker)   ──> HTTP server
+                                        ──> Adapter (NATS JetStream)
+                                        ──> Adapter (search: Typesense/Meilisearch)
+                                        ──> Adapter (redis: invalidate/sync)
+                                        ──> Adapter (gRPC streaming)
+                                        ──> Adapter (embedding)  ──> DLQ
+                                subscriber chans (one per adapter, filtered by route)
                                       |
                               Health Checker (per-component status)
                               Prometheus Metrics (/metrics)
@@ -38,11 +43,23 @@ Context ──> Pipeline (pgcdc.go orchestrates everything)
 - **Backpressure**: Bus uses non-blocking sends. If a subscriber channel is full, the event is dropped and a warning is logged. No adapter can block the pipeline.
 - **Transaction metadata**: WAL detector optionally enriches events with `transaction.xid`, `transaction.commit_time`, `transaction.seq` when `--tx-metadata` is enabled. `--tx-markers` adds synthetic BEGIN/COMMIT events on channel `pgcdc:_txn` (implies `--tx-metadata`). LISTEN/NOTIFY events omit this field (protocol has no tx info).
 - **Snapshot-first**: `--snapshot-first --snapshot-table <table>` on listen (WAL only) runs a table snapshot using the replication slot's exported snapshot before transitioning to live streaming. Zero-gap delivery — snapshot sees exactly the data at the slot's consistent point, WAL streams everything after.
+- **Persistent slots + checkpointing**: `--persistent-slot` creates a named, non-temporary replication slot with LSN checkpointing to `pgcdc_checkpoints` table. Survives crash/restart. Configurable via `--slot-name`, `--checkpoint-db`.
+- **Type information**: `--include-schema` adds column type metadata (`columns` array with `name`, `type_oid`, `type_name`) to WAL events. OID-to-name mapping for 40+ common PG types.
+- **Schema evolution**: `--schema-events` emits `SCHEMA_CHANGE` events on `pgcdc:_schema` channel when RelationMessage columns change (added, removed, type changed).
+- **Heartbeat**: `--heartbeat-interval 30s` periodically writes to `pgcdc_heartbeat` table to keep replication slots advancing on idle databases. Prevents WAL bloat.
+- **Slot lag monitoring**: `pgcdc_slot_lag_bytes` gauge metric + log warnings when lag exceeds `--slot-lag-warn` threshold (default 100MB).
+- **NATS JetStream adapter**: `--adapter nats` publishes events to NATS JetStream with subject mapping (`pgcdc:orders` → `pgcdc.orders`), dedup via `Nats-Msg-Id` header, auto-stream creation.
+- **Search adapter**: `--adapter search` syncs to Typesense or Meilisearch. Batched upserts, individual deletes. `--search-engine`, `--search-url`, `--search-api-key`, `--search-index`.
+- **Redis adapter**: `--adapter redis` for cache invalidation (`DEL` on any change) or sync (`SET`/`DEL`). `--redis-url`, `--redis-mode invalidate|sync`, `--redis-key-prefix`.
+- **gRPC adapter**: `--adapter grpc` starts a gRPC streaming server. Clients call `Subscribe(SubscribeRequest)` with optional channel filter. Proto at `adapter/grpc/proto/pgcdc.proto`.
+- **Dead letter queue**: `--dlq stderr|pg_table|none`. Failed events captured to stderr (JSON lines) or `pgcdc_dead_letters` table. Adapters with DLQ support: webhook, embedding.
+- **Event routing**: `--route adapter=channel1,channel2`. Bus-level filtering before fan-out. Adapters without routes receive all events.
+- **Outbox detector**: `--detector outbox` polls a transactional outbox table using `SELECT ... FOR UPDATE SKIP LOCKED` for concurrency-safe processing. Configurable DELETE or `processed_at` update cleanup.
 - **Shutdown**: Signal cancels root context. Bus closes subscriber channels. HTTP server gets `shutdown_timeout` (default 5s) `context.WithTimeout` for graceful drain.
 - **Wiring**: `pgcdc.go` provides the reusable `Pipeline` type (detector + bus + adapters). `cmd/listen.go` adds CLI-specific HTTP servers on top.
 - **Observability**: Prometheus metrics exposed at `/metrics`. Rich health check at `/healthz` returns per-component status (200 when all up, 503 when any down). Standalone metrics server via `--metrics-addr`.
 - **Embedding adapter**: `--adapter embedding` with `--embedding-api-url`, `--embedding-columns`, `--embedding-api-key`. Calls any OpenAI-compatible endpoint, UPSERTs vector into pgvector table. INSERT/UPDATE → embed+upsert, DELETE → delete vector. Zero new deps — vectors stored as strings with `::vector` cast.
-- **Error types**: `pgcdcerr/` provides typed errors (`ErrBusClosed`, `WebhookDeliveryError`, `DetectorDisconnectedError`, `ExecProcessError`, `EmbeddingDeliveryError`) for `errors.Is`/`errors.As` matching.
+- **Error types**: `pgcdcerr/` provides typed errors (`ErrBusClosed`, `WebhookDeliveryError`, `DetectorDisconnectedError`, `ExecProcessError`, `EmbeddingDeliveryError`, `NatsPublishError`, `OutboxProcessError`, `IcebergFlushError`) for `errors.Is`/`errors.As` matching.
 
 ## Code Conventions
 
@@ -92,12 +109,12 @@ Context ──> Pipeline (pgcdc.go orchestrates everything)
 - Add external brokers (Redis, Kafka) — zero infra beyond PG is a design choice
 - Use `log` or `fmt.Printf` — slog only
 - Put raw SQL identifiers in Go strings — use `pgx.Identifier{}.Sanitize()`
-- Add dependencies without justification — prefer stdlib
+- Add dependencies without justification — prefer stdlib (exception: `nats.go` for NATS adapter)
 - Hardcode timeouts or backoff values — put them in config with defaults
 
 ## Dependencies
 
-Direct deps (keep minimal): `pgx/v5` (PG driver), `pglogrepl` (WAL logical replication protocol), `cobra` + `viper` (CLI/config), `chi/v5` (HTTP router), `google/uuid` (UUIDv7), `errgroup` (concurrency), `prometheus/client_golang` (metrics), `coder/websocket` (WebSocket adapter), `testcontainers-go` (test only).
+Direct deps (keep minimal): `pgx/v5` (PG driver), `pglogrepl` (WAL logical replication protocol), `cobra` + `viper` (CLI/config), `chi/v5` (HTTP router), `google/uuid` (UUIDv7), `errgroup` (concurrency), `prometheus/client_golang` (metrics), `coder/websocket` (WebSocket adapter), `nats-io/nats.go` (NATS JetStream adapter), `redis/go-redis/v9` (Redis adapter), `google.golang.org/grpc` + `google.golang.org/protobuf` (gRPC adapter), `testcontainers-go` (test only).
 
 ## Testing
 
@@ -180,14 +197,21 @@ adapter/        Output adapter interface + implementations
   pgtable/      INSERT into PostgreSQL table
   ws/           WebSocket broker
   embedding/    Embed text columns → UPSERT into pgvector table
+  nats/         NATS JetStream publish
+  search/       Typesense / Meilisearch sync
+  redis/        Redis cache invalidation / sync
+  grpc/         gRPC streaming server
 bus/            Event fan-out
 snapshot/       Table snapshot (COPY-based row export)
 detector/       Change detection interface + implementations
   listennotify/ PostgreSQL LISTEN/NOTIFY
   walreplication/ PostgreSQL WAL logical replication
+  outbox/       Transactional outbox table polling
+checkpoint/     LSN checkpoint storage
 event/          Event model
 health/         Component health checker
 metrics/        Prometheus metrics definitions
+dlq/            Dead letter queue (stderr + PG table backends)
 pgcdcerr/      Typed error types
 internal/       CLI-specific internals (not importable)
   config/       Viper-based configuration structs
@@ -211,5 +235,14 @@ testutil/       Test utilities
 - `metrics/metrics.go` — Prometheus metric definitions
 - `pgcdcerr/errors.go` — Typed errors (ErrBusClosed, WebhookDeliveryError, DetectorDisconnectedError, ExecProcessError, EmbeddingDeliveryError)
 - `adapter/embedding/embedding.go` — Embedding adapter: OpenAI-compatible API + pgvector UPSERT/DELETE
+- `adapter/nats/nats.go` — NATS JetStream adapter: publish with dedup + auto-stream creation
+- `adapter/search/search.go` — Search adapter: Typesense/Meilisearch sync with batching
+- `adapter/redis/redis.go` — Redis adapter: cache invalidation (DEL) or sync (SET/DEL)
+- `adapter/grpc/grpc.go` — gRPC streaming adapter: broker pattern like SSE/WS
+- `dlq/dlq.go` — DLQ interface + StderrDLQ + PGTableDLQ + NopDLQ
+- `detector/outbox/outbox.go` — Outbox detector: poll-based with FOR UPDATE SKIP LOCKED
+- `detector/walreplication/oidmap.go` — Static OID → type name mapping for 40+ PG types
+- `checkpoint/checkpoint.go` — LSN checkpoint store interface + PG implementation
+- `cmd/slot.go` — Replication slot management CLI (list, status, drop)
 - `internal/server/server.go` — HTTP server with SSE, WS, metrics, and health endpoints (CLI-only)
 - `scenarios/helpers_test.go` — Shared test infrastructure (PG container, pipeline wiring)

@@ -22,6 +22,9 @@ var eventsTableSQL embed.FS
 //go:embed sql/embedding_table_template.sql
 var embeddingTableSQL embed.FS
 
+//go:embed sql/outbox_table_template.sql
+var outboxTableSQL embed.FS
+
 var (
 	validTableName       = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 	validChannelName     = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_:.\-]*$`)
@@ -47,6 +50,10 @@ type embeddingTableData struct {
 	Dimension int
 }
 
+type outboxTableData struct {
+	Table string
+}
+
 var initCmd = &cobra.Command{
 	Use:   "init",
 	Short: "Generate SQL setup for a table (trigger, publication, or events table)",
@@ -63,7 +70,7 @@ func init() {
 	initCmd.Flags().String("channel", "", "channel name (default: pgcdc:<table>)")
 	initCmd.Flags().String("detector", "listen_notify", "detector type: listen_notify or wal")
 	initCmd.Flags().String("publication", "", "publication name for WAL detector (default: pgcdc_<table>)")
-	initCmd.Flags().String("adapter", "", "adapter type: pg_table or embedding (generates table SQL)")
+	initCmd.Flags().String("adapter", "", "adapter type: pg_table, embedding, or outbox (generates table SQL)")
 	initCmd.Flags().Int("dimension", 1536, "vector dimension for embedding adapter (default: 1536)")
 	_ = initCmd.MarkFlagRequired("table")
 }
@@ -85,8 +92,10 @@ func runInit(cmd *cobra.Command, args []string) error {
 		case "embedding":
 			dimension, _ := cmd.Flags().GetInt("dimension")
 			return runInitEmbedding(table, dimension)
+		case "outbox":
+			return runInitOutbox(table)
 		default:
-			return fmt.Errorf("unknown adapter type %q for init: expected pg_table or embedding", adapterType)
+			return fmt.Errorf("unknown adapter type %q for init: expected pg_table, embedding, or outbox", adapterType)
 		}
 	}
 
@@ -177,6 +186,28 @@ func runInitPGTable(table string) error {
 	}
 
 	data := eventsTableData{
+		Table: table,
+	}
+
+	if err := tmpl.Execute(os.Stdout, data); err != nil {
+		return fmt.Errorf("execute template: %w", err)
+	}
+
+	return nil
+}
+
+func runInitOutbox(table string) error {
+	tmplBytes, err := outboxTableSQL.ReadFile("sql/outbox_table_template.sql")
+	if err != nil {
+		return fmt.Errorf("read embedded template: %w", err)
+	}
+
+	tmpl, err := template.New("outbox_table").Parse(string(tmplBytes))
+	if err != nil {
+		return fmt.Errorf("parse template: %w", err)
+	}
+
+	data := outboxTableData{
 		Table: table,
 	}
 

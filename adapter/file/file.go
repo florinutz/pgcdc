@@ -77,8 +77,9 @@ func (a *Adapter) Start(ctx context.Context, events <-chan event.Event) error {
 			}
 			if err := a.f.Sync(); err != nil {
 				a.logger.Warn("failed to sync file", "error", err)
+			} else {
+				metrics.EventsDelivered.WithLabelValues("file").Inc()
 			}
-			metrics.EventsDelivered.WithLabelValues("file").Inc()
 
 			if err := a.maybeRotate(); err != nil {
 				return fmt.Errorf("file adapter rotation: %w", err)

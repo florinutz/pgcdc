@@ -21,6 +21,12 @@ type Config struct {
 	Snapshot        SnapshotConfig  `mapstructure:"snapshot"`
 	Embedding       EmbeddingConfig `mapstructure:"embedding"`
 	Iceberg         IcebergConfig   `mapstructure:"iceberg"`
+	Nats            NatsConfig      `mapstructure:"nats"`
+	Outbox          OutboxConfig    `mapstructure:"outbox"`
+	DLQ             DLQConfig       `mapstructure:"dlq"`
+	Search          SearchConfig    `mapstructure:"search"`
+	Redis           RedisConfig     `mapstructure:"redis"`
+	GRPC            GRPCConfig      `mapstructure:"grpc"`
 }
 
 type BusConfig struct {
@@ -105,12 +111,70 @@ type IcebergConfig struct {
 }
 
 type DetectorConfig struct {
-	Type        string        `mapstructure:"type"`
+	Type              string        `mapstructure:"type"`
+	BackoffBase       time.Duration `mapstructure:"backoff_base"`
+	BackoffCap        time.Duration `mapstructure:"backoff_cap"`
+	Publication       string        `mapstructure:"publication"`
+	TxMetadata        bool          `mapstructure:"tx_metadata"`
+	TxMarkers         bool          `mapstructure:"tx_markers"`
+	PersistentSlot    bool          `mapstructure:"persistent_slot"`
+	SlotName          string        `mapstructure:"slot_name"`
+	CheckpointDB      string        `mapstructure:"checkpoint_db"`
+	IncludeSchema     bool          `mapstructure:"include_schema"`
+	SchemaEvents      bool          `mapstructure:"schema_events"`
+	HeartbeatInterval time.Duration `mapstructure:"heartbeat_interval"`
+	HeartbeatTable    string        `mapstructure:"heartbeat_table"`
+	SlotLagWarn       int64         `mapstructure:"slot_lag_warn"`
+}
+
+type NatsConfig struct {
+	URL         string        `mapstructure:"url"`
+	Subject     string        `mapstructure:"subject"`
+	Stream      string        `mapstructure:"stream"`
+	CredFile    string        `mapstructure:"cred_file"`
+	MaxAge      time.Duration `mapstructure:"max_age"`
 	BackoffBase time.Duration `mapstructure:"backoff_base"`
 	BackoffCap  time.Duration `mapstructure:"backoff_cap"`
-	Publication string        `mapstructure:"publication"`
-	TxMetadata  bool          `mapstructure:"tx_metadata"`
-	TxMarkers   bool          `mapstructure:"tx_markers"`
+}
+
+type OutboxConfig struct {
+	Table         string        `mapstructure:"table"`
+	PollInterval  time.Duration `mapstructure:"poll_interval"`
+	BatchSize     int           `mapstructure:"batch_size"`
+	KeepProcessed bool          `mapstructure:"keep_processed"`
+	BackoffBase   time.Duration `mapstructure:"backoff_base"`
+	BackoffCap    time.Duration `mapstructure:"backoff_cap"`
+}
+
+type DLQConfig struct {
+	Type  string `mapstructure:"type"`
+	Table string `mapstructure:"table"`
+	DBURL string `mapstructure:"db_url"`
+}
+
+type SearchConfig struct {
+	Engine        string        `mapstructure:"engine"`
+	URL           string        `mapstructure:"url"`
+	APIKey        string        `mapstructure:"api_key"`
+	Index         string        `mapstructure:"index"`
+	IDColumn      string        `mapstructure:"id_column"`
+	BatchSize     int           `mapstructure:"batch_size"`
+	BatchInterval time.Duration `mapstructure:"batch_interval"`
+	BackoffBase   time.Duration `mapstructure:"backoff_base"`
+	BackoffCap    time.Duration `mapstructure:"backoff_cap"`
+}
+
+type RedisConfig struct {
+	URL         string        `mapstructure:"url"`
+	Mode        string        `mapstructure:"mode"`
+	KeyPrefix   string        `mapstructure:"key_prefix"`
+	IDColumn    string        `mapstructure:"id_column"`
+	BackoffBase time.Duration `mapstructure:"backoff_base"`
+	BackoffCap  time.Duration `mapstructure:"backoff_cap"`
+}
+
+type GRPCConfig struct {
+	Addr string `mapstructure:"addr"`
 }
 
 func Default() Config {
@@ -157,9 +221,12 @@ func Default() Config {
 			BatchSize: 1000,
 		},
 		Detector: DetectorConfig{
-			Type:        "listen_notify",
-			BackoffBase: 5 * time.Second,
-			BackoffCap:  60 * time.Second,
+			Type:              "listen_notify",
+			BackoffBase:       5 * time.Second,
+			BackoffCap:        60 * time.Second,
+			HeartbeatInterval: 30 * time.Second,
+			HeartbeatTable:    "pgcdc_heartbeat",
+			SlotLagWarn:       100 * 1024 * 1024, // 100 MB
 		},
 		Iceberg: IcebergConfig{
 			CatalogType:   "hadoop",
@@ -170,6 +237,41 @@ func Default() Config {
 			FlushSize:     10000,
 			BackoffBase:   5 * time.Second,
 			BackoffCap:    60 * time.Second,
+		},
+		Nats: NatsConfig{
+			Subject:     "pgcdc",
+			Stream:      "pgcdc",
+			MaxAge:      24 * time.Hour,
+			BackoffBase: 1 * time.Second,
+			BackoffCap:  30 * time.Second,
+		},
+		Outbox: OutboxConfig{
+			Table:        "pgcdc_outbox",
+			PollInterval: 500 * time.Millisecond,
+			BatchSize:    100,
+			BackoffBase:  1 * time.Second,
+			BackoffCap:   30 * time.Second,
+		},
+		DLQ: DLQConfig{
+			Type:  "stderr",
+			Table: "pgcdc_dead_letters",
+		},
+		Search: SearchConfig{
+			Engine:        "typesense",
+			IDColumn:      "id",
+			BatchSize:     100,
+			BatchInterval: 1 * time.Second,
+			BackoffBase:   1 * time.Second,
+			BackoffCap:    30 * time.Second,
+		},
+		Redis: RedisConfig{
+			Mode:        "invalidate",
+			IDColumn:    "id",
+			BackoffBase: 1 * time.Second,
+			BackoffCap:  30 * time.Second,
+		},
+		GRPC: GRPCConfig{
+			Addr: ":9090",
 		},
 		Embedding: EmbeddingConfig{
 			Model:       "text-embedding-3-small",

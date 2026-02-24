@@ -10,8 +10,9 @@ import (
 type Status string
 
 const (
-	StatusUp   Status = "up"
-	StatusDown Status = "down"
+	StatusUp       Status = "up"
+	StatusDown     Status = "down"
+	StatusDegraded Status = "degraded"
 )
 
 // Checker tracks the health of registered components.
@@ -54,14 +55,19 @@ func (c *Checker) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
 	comps := make(map[string]Status, len(c.components))
 	for name, status := range c.components {
 		comps[name] = status
-		if status != StatusUp {
+		switch status {
+		case StatusDown:
 			overall = StatusDown
+		case StatusDegraded:
+			if overall == StatusUp {
+				overall = StatusDegraded
+			}
 		}
 	}
 	c.mu.RUnlock()
 
 	w.Header().Set("Content-Type", "application/json")
-	if overall != StatusUp {
+	if overall == StatusDown {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}
 	_ = json.NewEncoder(w).Encode(response{

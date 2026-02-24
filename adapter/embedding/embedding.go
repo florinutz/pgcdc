@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/florinutz/pgcdc/dlq"
 	"github.com/florinutz/pgcdc/event"
 	"github.com/florinutz/pgcdc/internal/backoff"
 	"github.com/florinutz/pgcdc/metrics"
@@ -45,7 +46,11 @@ type Adapter struct {
 	backoffCap  time.Duration
 	client      *http.Client
 	logger      *slog.Logger
+	dlq         dlq.DLQ
 }
+
+// SetDLQ sets the dead letter queue for failed deliveries.
+func (a *Adapter) SetDLQ(d dlq.DLQ) { a.dlq = d }
 
 // New creates an embedding adapter.
 // apiURL is an OpenAI-compatible endpoint (e.g. https://api.openai.com/v1/embeddings).
@@ -210,6 +215,11 @@ func (a *Adapter) run(ctx context.Context, events <-chan event.Event) error {
 			if err != nil {
 				metrics.EmbeddingAPIErrors.Inc()
 				a.logger.Error("embedding failed, skipping event", "event_id", ev.ID, "error", err)
+				if a.dlq != nil {
+					if dlqErr := a.dlq.Record(ctx, ev, "embedding", err); dlqErr != nil {
+						a.logger.Error("dlq record failed", "error", dlqErr)
+					}
+				}
 				continue
 			}
 

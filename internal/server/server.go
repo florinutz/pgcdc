@@ -71,9 +71,10 @@ func NewMetricsServer(checker *health.Checker) *http.Server {
 	}
 	r.Handle("/metrics", promhttp.Handler())
 	return &http.Server{
-		Handler:     r,
-		ReadTimeout: 5 * time.Second,
-		IdleTimeout: 60 * time.Second,
+		Handler:      r,
+		ReadTimeout:  5 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  60 * time.Second,
 	}
 }
 

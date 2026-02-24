@@ -76,6 +76,35 @@ func (e *EmbeddingDeliveryError) Unwrap() error {
 	return e.Err
 }
 
+// NatsPublishError indicates that a NATS publish failed.
+type NatsPublishError struct {
+	EventID string
+	Subject string
+	Err     error
+}
+
+func (e *NatsPublishError) Error() string {
+	return fmt.Sprintf("nats publish failed for event %s to subject %s: %v", e.EventID, e.Subject, e.Err)
+}
+
+func (e *NatsPublishError) Unwrap() error {
+	return e.Err
+}
+
+// OutboxProcessError indicates that an outbox poll cycle failed.
+type OutboxProcessError struct {
+	Table string
+	Err   error
+}
+
+func (e *OutboxProcessError) Error() string {
+	return fmt.Sprintf("outbox process failed for table %s: %v", e.Table, e.Err)
+}
+
+func (e *OutboxProcessError) Unwrap() error {
+	return e.Err
+}
+
 // IcebergFlushError indicates that the Iceberg adapter failed to flush after consecutive attempts.
 type IcebergFlushError struct {
 	Attempts int
