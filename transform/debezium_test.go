@@ -338,6 +338,29 @@ func TestDebezium_MissingSchema(t *testing.T) {
 	}
 }
 
+func TestDebezium_EmptyOperation(t *testing.T) {
+	ev := event.Event{
+		Operation: "",
+		Payload:   json.RawMessage(`{"op":"","table":"t","row":null,"old":null}`),
+		CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	}
+
+	fn := Debezium()
+	got, err := fn(ev)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var envelope map[string]any
+	if err := json.Unmarshal(got.Payload, &envelope); err != nil {
+		t.Fatal(err)
+	}
+
+	if envelope["op"] != "" {
+		t.Errorf("op = %v, want empty string", envelope["op"])
+	}
+}
+
 func TestDebezium_UnknownOperation(t *testing.T) {
 	ev := event.Event{
 		Operation: "TRUNCATE",
