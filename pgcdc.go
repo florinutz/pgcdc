@@ -8,6 +8,7 @@ import (
 
 	"github.com/florinutz/pgcdc/ack"
 	"github.com/florinutz/pgcdc/adapter"
+	"github.com/florinutz/pgcdc/backpressure"
 	"github.com/florinutz/pgcdc/bus"
 	"github.com/florinutz/pgcdc/checkpoint"
 	"github.com/florinutz/pgcdc/detector"
@@ -26,6 +27,13 @@ import (
 // all adapters have confirmed.
 type CooperativeCheckpointer interface {
 	SetCooperativeLSN(fn func() uint64)
+}
+
+// Throttleable is implemented by detectors that support source-aware
+// backpressure. The controller throttles or pauses the detector when WAL
+// lag exceeds configured thresholds.
+type Throttleable interface {
+	SetBackpressureController(ctrl *backpressure.Controller)
 }
 
 // Pipeline orchestrates a detector, bus, and set of adapters into a running
@@ -49,6 +57,9 @@ type Pipeline struct {
 	cooperativeCheckpoint bool
 	ackTracker            *ack.Tracker
 	autoAckAdapters       map[string]bool // adapter name -> true if auto-acked on channel send
+
+	// Backpressure controller (nil when disabled).
+	backpressureCtrl *backpressure.Controller
 }
 
 // Option configures a Pipeline.
@@ -147,6 +158,15 @@ func WithCooperativeCheckpoint(enabled bool) Option {
 	}
 }
 
+// WithBackpressure sets the backpressure controller for the pipeline.
+// The controller monitors WAL lag and throttles/pauses the detector when
+// thresholds are exceeded.
+func WithBackpressure(ctrl *backpressure.Controller) Option {
+	return func(p *Pipeline) {
+		p.backpressureCtrl = ctrl
+	}
+}
+
 // DLQAware is implemented by adapters that can record failed events to a DLQ.
 type DLQAware interface {
 	SetDLQ(d dlq.DLQ)
@@ -174,6 +194,9 @@ func NewPipeline(det detector.Detector, opts ...Option) *Pipeline {
 		if da, ok := a.(DLQAware); ok && p.dlq != nil {
 			da.SetDLQ(p.dlq)
 		}
+	}
+	if p.backpressureCtrl != nil {
+		p.health.Register("backpressure")
 	}
 
 	// Set up cooperative checkpointing.
@@ -215,7 +238,21 @@ func (p *Pipeline) Run(ctx context.Context) error {
 		}
 	}
 
+	// Wire backpressure controller into the detector if supported.
+	if p.backpressureCtrl != nil {
+		if t, ok := p.detector.(Throttleable); ok {
+			t.SetBackpressureController(p.backpressureCtrl)
+		}
+	}
+
 	g, gCtx := errgroup.WithContext(ctx)
+
+	// Start backpressure controller if configured.
+	if p.backpressureCtrl != nil {
+		g.Go(func() error {
+			return p.backpressureCtrl.Run(gCtx)
+		})
+	}
 
 	// Start the bus.
 	g.Go(func() error {
@@ -346,11 +383,23 @@ func (p *Pipeline) wrapSubscription(name string, inCh <-chan event.Event, routeF
 	go func() {
 		defer close(out)
 		for ev := range inCh {
+			// Save the original LSN before transforms may alter it.
+			origLSN := ev.LSN
+
 			// Route filter: auto-ack filtered (dropped) events.
 			if routeFilter != nil && !routeFilter(ev) {
-				if p.ackTracker != nil && ev.LSN > 0 {
-					p.ackTracker.Ack(name, ev.LSN)
+				if p.ackTracker != nil && origLSN > 0 {
+					p.ackTracker.Ack(name, origLSN)
 				}
+				continue
+			}
+
+			// Backpressure load shedding: auto-ack and skip shed adapters.
+			if p.backpressureCtrl != nil && p.backpressureCtrl.IsShed(name) {
+				if p.ackTracker != nil && origLSN > 0 {
+					p.ackTracker.Ack(name, origLSN)
+				}
+				metrics.BackpressureLoadShed.WithLabelValues(name).Inc()
 				continue
 			}
 
@@ -368,8 +417,8 @@ func (p *Pipeline) wrapSubscription(name string, inCh <-chan event.Event, routeF
 							slog.String("error", err.Error()),
 						)
 					}
-					if p.ackTracker != nil && ev.LSN > 0 {
-						p.ackTracker.Ack(name, ev.LSN)
+					if p.ackTracker != nil && origLSN > 0 {
+						p.ackTracker.Ack(name, origLSN)
 					}
 					continue
 				}
@@ -379,8 +428,8 @@ func (p *Pipeline) wrapSubscription(name string, inCh <-chan event.Event, routeF
 			out <- ev
 
 			// Auto-ack for non-Acknowledger adapters: ack on channel send.
-			if autoAck && p.ackTracker != nil && ev.LSN > 0 {
-				p.ackTracker.Ack(name, ev.LSN)
+			if autoAck && p.ackTracker != nil && origLSN > 0 {
+				p.ackTracker.Ack(name, origLSN)
 			}
 		}
 	}()

@@ -50,6 +50,7 @@ Context ──> Pipeline (pgcdc.go orchestrates everything)
 - **Schema evolution**: `--schema-events` emits `SCHEMA_CHANGE` events on `pgcdc:_schema` channel when RelationMessage columns change (added, removed, type changed).
 - **Heartbeat**: `--heartbeat-interval 30s` periodically writes to `pgcdc_heartbeat` table to keep replication slots advancing on idle databases. Prevents WAL bloat.
 - **Slot lag monitoring**: `pgcdc_slot_lag_bytes` gauge metric + log warnings when lag exceeds `--slot-lag-warn` threshold (default 100MB).
+- **Source-aware backpressure**: `--backpressure` monitors WAL lag and automatically throttles/pauses/sheds to prevent PG disk exhaustion (requires `--detector wal` + `--persistent-slot`). Three zones: green (full speed), yellow (throttle detector + shed best-effort adapters), red (pause detector + shed normal+best-effort). Hysteresis: red exits only when lag drops below warn. Throttle proportional to lag position in yellow band. `--bp-warn-threshold` (default 500MB), `--bp-critical-threshold` (default 2GB), `--bp-max-throttle` (default 500ms), `--bp-poll-interval` (default 10s). `--adapter-priority name=critical|normal|best-effort`. Shed = auto-ack events without delivering (cooperative checkpoint advances normally). Metrics: `pgcdc_backpressure_state`, `pgcdc_backpressure_throttle_duration_seconds`, `pgcdc_backpressure_load_shed_total{adapter}`.
 - **NATS JetStream adapter**: `--adapter nats` publishes events to NATS JetStream with subject mapping (`pgcdc:orders` → `pgcdc.orders`), dedup via `Nats-Msg-Id` header, auto-stream creation.
 - **Search adapter**: `--adapter search` syncs to Typesense or Meilisearch. Batched upserts, individual deletes. `--search-engine`, `--search-url`, `--search-api-key`, `--search-index`.
 - **Redis adapter**: `--adapter redis` for cache invalidation (`DEL` on any change) or sync (`SET`/`DEL`). `--redis-url`, `--redis-mode invalidate|sync`, `--redis-key-prefix`.
@@ -210,6 +211,7 @@ adapter/        Output adapter interface + implementations
   redis/        Redis cache invalidation / sync
   grpc/         gRPC streaming server
 ack/            Cooperative checkpoint LSN tracker
+backpressure/   Source-aware WAL lag backpressure (throttle/pause/shed)
 bus/            Event fan-out (fast or reliable mode)
 transform/      Event transform pipeline (drop, rename, mask, filter)
 snapshot/       Table snapshot (COPY-based row export + incremental chunk-based)
@@ -243,6 +245,7 @@ testutil/       Test utilities
 - `detector/detector.go` — Detector interface
 - `bus/bus.go` — Fan-out with configurable fast (drop) or reliable (block) mode
 - `ack/tracker.go` — Cooperative checkpoint LSN tracker (min across all adapters)
+- `backpressure/backpressure.go` — Source-aware backpressure controller: zone transitions (green/yellow/red), proportional throttle, pause/resume, adapter shedding by priority
 - `transform/transform.go` — TransformFunc interface, Chain, ErrDropEvent; `drop_columns.go`, `rename_fields.go`, `mask.go`, `filter.go`, `debezium.go` for built-in transforms
 - `internal/config/config.go` — All config structs + defaults (CLI-only)
 - `event/event.go` — Event model (UUIDv7, JSON payload, LSN for WAL events)

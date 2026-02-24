@@ -328,4 +328,22 @@ var (
 		Name: "pgcdc_plugin_errors_total",
 		Help: "Total Wasm plugin errors.",
 	}, []string{"plugin", "type"})
+
+	// Backpressure metrics.
+
+	BackpressureState = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "pgcdc_backpressure_state",
+		Help: "Current backpressure zone: 0=green, 1=yellow, 2=red.",
+	})
+
+	BackpressureThrottleDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "pgcdc_backpressure_throttle_duration_seconds",
+		Help:    "Observed throttle sleep durations between WAL reads.",
+		Buckets: []float64{0.001, 0.005, 0.01, 0.05, 0.1, 0.25, 0.5},
+	})
+
+	BackpressureLoadShed = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "pgcdc_backpressure_load_shed_total",
+		Help: "Events auto-acked due to backpressure load shedding.",
+	}, []string{"adapter"})
 )

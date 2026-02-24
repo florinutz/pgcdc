@@ -26,6 +26,7 @@ import (
 	"github.com/florinutz/pgcdc/adapter/stdout"
 	"github.com/florinutz/pgcdc/adapter/webhook"
 	"github.com/florinutz/pgcdc/adapter/ws"
+	"github.com/florinutz/pgcdc/backpressure"
 	"github.com/florinutz/pgcdc/bus"
 	"github.com/florinutz/pgcdc/checkpoint"
 	"github.com/florinutz/pgcdc/detector"
@@ -203,6 +204,14 @@ func init() {
 	f.String("debezium-connector-name", "pgcdc", "Debezium source.name field (requires --debezium-envelope)")
 	f.String("debezium-database", "", "Debezium source.db field (requires --debezium-envelope)")
 
+	// Backpressure flags (read directly, not viper-bound).
+	f.Bool("backpressure", false, "enable source-aware backpressure (requires --detector wal and --persistent-slot)")
+	f.Int64("bp-warn-threshold", 500*1024*1024, "yellow zone threshold in bytes (default 500MB)")
+	f.Int64("bp-critical-threshold", 2*1024*1024*1024, "red zone threshold in bytes (default 2GB)")
+	f.Duration("bp-max-throttle", 500*time.Millisecond, "max sleep between WAL reads in yellow zone")
+	f.Duration("bp-poll-interval", 10*time.Second, "backpressure lag polling interval")
+	f.StringSlice("adapter-priority", nil, "adapter priority: name=critical|normal|best-effort (repeatable)")
+
 	// Plugin flags (read directly, not viper-bound).
 	f.StringSlice("plugin-transform", nil, "wasm transform plugin paths (repeatable)")
 	f.StringSlice("plugin-transform-config", nil, "JSON config for each plugin-transform (parallel order)")
@@ -325,6 +334,14 @@ func runListen(cmd *cobra.Command, args []string) error {
 	// Cooperative checkpoint flag (read directly to avoid viper collisions).
 	cooperativeCheckpoint, _ := cmd.Flags().GetBool("cooperative-checkpoint")
 
+	// Backpressure flags (read directly to avoid viper collisions).
+	bpEnabled, _ := cmd.Flags().GetBool("backpressure")
+	bpWarnThreshold, _ := cmd.Flags().GetInt64("bp-warn-threshold")
+	bpCriticalThreshold, _ := cmd.Flags().GetInt64("bp-critical-threshold")
+	bpMaxThrottle, _ := cmd.Flags().GetDuration("bp-max-throttle")
+	bpPollInterval, _ := cmd.Flags().GetDuration("bp-poll-interval")
+	adapterPriorityFlags, _ := cmd.Flags().GetStringSlice("adapter-priority")
+
 	// all-tables flag (read directly — no viper binding needed).
 	allTables, _ := cmd.Flags().GetBool("all-tables")
 	if allTables {
@@ -377,6 +394,12 @@ func runListen(cmd *cobra.Command, args []string) error {
 	}
 	if incrementalSnapshot && cfg.Detector.Type != "wal" {
 		return fmt.Errorf("--incremental-snapshot requires --detector wal")
+	}
+	if bpEnabled && cfg.Detector.Type != "wal" {
+		return fmt.Errorf("--backpressure requires --detector wal")
+	}
+	if bpEnabled && !persistentSlot {
+		return fmt.Errorf("--backpressure requires --persistent-slot")
 	}
 
 	// Validate adapters and check requirements early.
@@ -483,6 +506,39 @@ func runListen(cmd *cobra.Command, args []string) error {
 	}
 	if cooperativeCheckpoint {
 		opts = append(opts, pgcdc.WithCooperativeCheckpoint(true))
+	}
+
+	// Backpressure controller.
+	var bpCtrl *backpressure.Controller
+	if bpEnabled {
+		bpCtrl = backpressure.New(
+			bpWarnThreshold,
+			bpCriticalThreshold,
+			bpMaxThrottle,
+			bpPollInterval,
+			nil, // health checker injected by pipeline
+			logger,
+		)
+		for _, ap := range adapterPriorityFlags {
+			parts := strings.SplitN(ap, "=", 2)
+			if len(parts) != 2 {
+				logger.Warn("ignoring malformed adapter-priority (expected name=level)", "value", ap)
+				continue
+			}
+			var prio backpressure.AdapterPriority
+			switch parts[1] {
+			case "critical":
+				prio = backpressure.PriorityCritical
+			case "normal":
+				prio = backpressure.PriorityNormal
+			case "best-effort":
+				prio = backpressure.PriorityBestEffort
+			default:
+				return fmt.Errorf("unknown adapter priority %q for %q (expected critical, normal, or best-effort)", parts[1], parts[0])
+			}
+			bpCtrl.SetAdapterPriority(parts[0], prio)
+		}
+		opts = append(opts, pgcdc.WithBackpressure(bpCtrl))
 	}
 
 	// Wasm runtime (created eagerly when any plugin is configured).

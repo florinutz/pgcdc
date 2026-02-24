@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/url"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -18,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgproto3"
 
+	"github.com/florinutz/pgcdc/backpressure"
 	"github.com/florinutz/pgcdc/checkpoint"
 	"github.com/florinutz/pgcdc/event"
 	"github.com/florinutz/pgcdc/internal/backoff"
@@ -93,6 +95,14 @@ type Detector struct {
 	// checkpoint use the minimum acked LSN across all adapters instead of
 	// the detector's own receive position.
 	cooperativeLSNFn func() uint64
+
+	// Backpressure: lastLagBytes stores the most recent slot lag value written
+	// by monitorSlotLag, read by the backpressure controller's lagFn.
+	lastLagBytes atomic.Int64
+
+	// backpressureCtrl is the backpressure controller that throttles/pauses
+	// the detector when WAL lag is too high.
+	backpressureCtrl *backpressure.Controller
 }
 
 // txState tracks the current transaction when txMetadata is enabled.
@@ -201,6 +211,18 @@ func (d *Detector) SetProgressStore(store snapshot.ProgressStore) {
 // recycling past what adapters have confirmed.
 func (d *Detector) SetCooperativeLSN(fn func() uint64) {
 	d.cooperativeLSNFn = fn
+}
+
+// SetBackpressureController sets the backpressure controller that will
+// throttle or pause the detector when WAL lag is too high. Also wires the
+// controller's lag function to read the detector's last observed lag.
+// Requires persistent slot for lag monitoring; logs a warning otherwise.
+func (d *Detector) SetBackpressureController(ctrl *backpressure.Controller) {
+	if !d.persistentSlot {
+		d.logger.Warn("backpressure controller set but persistent slot is disabled; lag monitoring will not be active")
+	}
+	d.backpressureCtrl = ctrl
+	ctrl.SetLagFunc(func() int64 { return d.lastLagBytes.Load() })
 }
 
 // Start connects to PostgreSQL, creates a temporary replication slot, and
@@ -415,6 +437,26 @@ func (d *Detector) run(ctx context.Context, events chan<- event.Event) error {
 			}
 
 			nextStatusDeadline = time.Now().Add(standbyStatusInterval)
+		}
+
+		// Backpressure: pause in red zone (block until resumed).
+		if d.backpressureCtrl != nil && d.backpressureCtrl.IsPaused() {
+			d.logger.Warn("backpressure: detector paused, waiting for WAL lag to decrease")
+			if err := d.backpressureCtrl.WaitResume(ctx); err != nil {
+				return err
+			}
+			d.logger.Info("backpressure: detector resumed")
+		}
+		// Backpressure: throttle in yellow zone (context-aware sleep).
+		if d.backpressureCtrl != nil {
+			if throttle := d.backpressureCtrl.ThrottleDuration(); throttle > 0 {
+				metrics.BackpressureThrottleDuration.Observe(throttle.Seconds())
+				select {
+				case <-time.After(throttle):
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			}
 		}
 
 		receiveCtx, cancel := context.WithDeadline(ctx, nextStatusDeadline)
@@ -1040,6 +1082,7 @@ func (d *Detector) monitorSlotLag(ctx context.Context, slotName string) {
 	}
 
 	metrics.SlotLagBytes.Set(float64(*lagBytes))
+	d.lastLagBytes.Store(*lagBytes)
 
 	if d.slotLagWarn > 0 && *lagBytes > d.slotLagWarn {
 		d.logger.Warn("replication slot lag exceeds threshold",

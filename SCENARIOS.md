@@ -38,6 +38,8 @@ Each scenario = one file, one user journey, happy path + one critical failure.
 
 | 30 | All-tables zero-config | `all_tables_test.go` | FOR ALL TABLES publication captures INSERT events from multiple tables simultaneously; both `pgcdc:at_orders` and `pgcdc:at_customers` channels deliver events | N/A (single happy path) |
 
+| 31 | Source-aware backpressure | `backpressure_test.go` | WAL+persistent slot+cooperative checkpoint: backpressure controller transitions zones, events arrive throttled but not lost | Load shedding: critical adapter receives all events, best-effort adapter is shed in yellow zone |
+
 ## Adding a new scenario
 
 1. Create `scenarios/<name>_test.go`

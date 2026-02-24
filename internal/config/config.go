@@ -30,6 +30,7 @@ type Config struct {
 	Kafka               KafkaConfig               `mapstructure:"kafka"`
 	IncrementalSnapshot IncrementalSnapshotConfig `mapstructure:"incremental_snapshot"`
 	Transforms          TransformConfig           `mapstructure:"transforms"`
+	Backpressure        BackpressureConfig        `mapstructure:"backpressure"`
 	Plugins             PluginConfig              `mapstructure:"plugins"`
 }
 
@@ -233,6 +234,15 @@ type FilterSpec struct {
 	Operations []string `mapstructure:"operations"`
 }
 
+type BackpressureConfig struct {
+	Enabled           bool              `mapstructure:"enabled"`
+	WarnThreshold     int64             `mapstructure:"warn_threshold"`
+	CriticalThreshold int64             `mapstructure:"critical_threshold"`
+	MaxThrottle       time.Duration     `mapstructure:"max_throttle"`
+	PollInterval      time.Duration     `mapstructure:"poll_interval"`
+	AdapterPriorities map[string]string `mapstructure:"adapter_priorities"` // name -> "critical"|"normal"|"best-effort"
+}
+
 type PluginConfig struct {
 	Transforms []PluginTransformSpec `mapstructure:"transforms"`
 	Adapters   []PluginAdapterSpec   `mapstructure:"adapters"`
@@ -363,6 +373,12 @@ func Default() Config {
 		IncrementalSnapshot: IncrementalSnapshotConfig{
 			SignalTable: "pgcdc_signals",
 			ChunkSize:   1000,
+		},
+		Backpressure: BackpressureConfig{
+			WarnThreshold:     500 * 1024 * 1024,      // 500 MB
+			CriticalThreshold: 2 * 1024 * 1024 * 1024, // 2 GB
+			MaxThrottle:       500 * time.Millisecond,
+			PollInterval:      10 * time.Second,
 		},
 		Embedding: EmbeddingConfig{
 			Model:       "text-embedding-3-small",
