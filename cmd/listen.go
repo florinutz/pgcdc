@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -16,12 +17,7 @@ import (
 	embeddingadapter "github.com/florinutz/pgcdc/adapter/embedding"
 	execadapter "github.com/florinutz/pgcdc/adapter/exec"
 	fileadapter "github.com/florinutz/pgcdc/adapter/file"
-	grpcadapter "github.com/florinutz/pgcdc/adapter/grpc"
-	icebergadapter "github.com/florinutz/pgcdc/adapter/iceberg"
-	kafkaadapter "github.com/florinutz/pgcdc/adapter/kafka"
-	natsadapter "github.com/florinutz/pgcdc/adapter/nats"
 	"github.com/florinutz/pgcdc/adapter/pgtable"
-	redisadapter "github.com/florinutz/pgcdc/adapter/redis"
 	searchadapter "github.com/florinutz/pgcdc/adapter/search"
 	"github.com/florinutz/pgcdc/adapter/sse"
 	"github.com/florinutz/pgcdc/adapter/stdout"
@@ -199,6 +195,17 @@ func init() {
 	// Transform flags (read directly, not viper-bound — same pattern as --snapshot-first).
 	f.StringSlice("drop-columns", nil, "global: drop these columns from event payloads (repeatable)")
 	f.StringSlice("filter-operations", nil, "global: only pass events with these operations (e.g. INSERT,UPDATE)")
+
+	// Plugin flags (read directly, not viper-bound).
+	f.StringSlice("plugin-transform", nil, "wasm transform plugin paths (repeatable)")
+	f.StringSlice("plugin-transform-config", nil, "JSON config for each plugin-transform (parallel order)")
+	f.StringSlice("plugin-adapter", nil, "wasm adapter plugin paths (repeatable)")
+	f.StringSlice("plugin-adapter-name", nil, "names for each plugin-adapter (parallel order)")
+	f.StringSlice("plugin-adapter-config", nil, "JSON config for each plugin-adapter (parallel order)")
+	f.String("dlq-plugin-path", "", "wasm DLQ plugin path (use with --dlq plugin)")
+	f.String("dlq-plugin-config", "", "JSON config for DLQ plugin")
+	f.String("checkpoint-plugin", "", "wasm checkpoint store plugin path")
+	f.String("checkpoint-plugin-config", "", "JSON config for checkpoint plugin")
 
 	mustBindPFlag("dlq.type", f.Lookup("dlq"))
 	mustBindPFlag("dlq.table", f.Lookup("dlq-table"))
@@ -457,6 +464,14 @@ func runListen(cmd *cobra.Command, args []string) error {
 		opts = append(opts, pgcdc.WithCooperativeCheckpoint(true))
 	}
 
+	// Wasm runtime (created eagerly when any plugin is configured).
+	var wasmRT any
+	if anyPluginsConfigured(cfg, cmd) {
+		var wasmCleanup func()
+		wasmRT, wasmCleanup = initPluginRuntime(ctx, logger)
+		_ = wasmCleanup
+	}
+
 	// Set up DLQ.
 	var dlqInstance dlq.DLQ
 	switch cfg.DLQ.Type {
@@ -470,8 +485,30 @@ func runListen(cmd *cobra.Command, args []string) error {
 		dlqInstance = dlq.NewPGTableDLQ(dlqDB, cfg.DLQ.Table, logger)
 	case "none":
 		dlqInstance = dlq.NopDLQ{}
+	case "plugin":
+		dlqPluginPath, _ := cmd.Flags().GetString("dlq-plugin-path")
+		if dlqPluginPath == "" && cfg.Plugins.DLQ != nil {
+			dlqPluginPath = cfg.Plugins.DLQ.Path
+		}
+		if dlqPluginPath == "" {
+			return fmt.Errorf("--dlq plugin requires --dlq-plugin-path or plugins.dlq.path in config")
+		}
+		dlqPluginCfgStr, _ := cmd.Flags().GetString("dlq-plugin-config")
+		dlqPluginCfg := map[string]any{}
+		if dlqPluginCfgStr != "" {
+			if err := json.Unmarshal([]byte(dlqPluginCfgStr), &dlqPluginCfg); err != nil {
+				return fmt.Errorf("parse --dlq-plugin-config: %w", err)
+			}
+		} else if cfg.Plugins.DLQ != nil && cfg.Plugins.DLQ.Config != nil {
+			dlqPluginCfg = cfg.Plugins.DLQ.Config
+		}
+		var dlqErr error
+		dlqInstance, dlqErr = makePluginDLQ(ctx, wasmRT, dlqPluginPath, dlqPluginCfg, logger)
+		if dlqErr != nil {
+			return fmt.Errorf("create wasm dlq: %w", dlqErr)
+		}
 	default:
-		return fmt.Errorf("unknown DLQ type: %q (expected stderr, pg_table, or none)", cfg.DLQ.Type)
+		return fmt.Errorf("unknown DLQ type: %q (expected stderr, pg_table, plugin, or none)", cfg.DLQ.Type)
 	}
 	opts = append(opts, pgcdc.WithDLQ(dlqInstance))
 
@@ -504,17 +541,39 @@ func runListen(cmd *cobra.Command, args []string) error {
 			}
 			walDet.SetPersistentSlot(name)
 
-			// Set up checkpoint store.
-			cpDB := checkpointDB
-			if cpDB == "" {
-				cpDB = cfg.DatabaseURL
+			// Set up checkpoint store (plugin or PG).
+			cpPluginPath, _ := cmd.Flags().GetString("checkpoint-plugin")
+			if cpPluginPath == "" && cfg.Plugins.Checkpoint != nil {
+				cpPluginPath = cfg.Plugins.Checkpoint.Path
 			}
-			cpStore, cpErr := checkpoint.NewPGStore(ctx, cpDB, logger)
-			if cpErr != nil {
-				return fmt.Errorf("create checkpoint store: %w", cpErr)
+			if cpPluginPath != "" {
+				cpPluginCfgStr, _ := cmd.Flags().GetString("checkpoint-plugin-config")
+				cpPluginCfg := map[string]any{}
+				if cpPluginCfgStr != "" {
+					if err := json.Unmarshal([]byte(cpPluginCfgStr), &cpPluginCfg); err != nil {
+						return fmt.Errorf("parse --checkpoint-plugin-config: %w", err)
+					}
+				} else if cfg.Plugins.Checkpoint != nil && cfg.Plugins.Checkpoint.Config != nil {
+					cpPluginCfg = cfg.Plugins.Checkpoint.Config
+				}
+				cpStore, cpErr := makePluginCheckpoint(ctx, wasmRT, cpPluginPath, cpPluginCfg, logger)
+				if cpErr != nil {
+					return fmt.Errorf("create wasm checkpoint store: %w", cpErr)
+				}
+				walDet.SetCheckpointStore(cpStore)
+				opts = append(opts, pgcdc.WithCheckpointStore(cpStore))
+			} else {
+				cpDB := checkpointDB
+				if cpDB == "" {
+					cpDB = cfg.DatabaseURL
+				}
+				cpStore, cpErr := checkpoint.NewPGStore(ctx, cpDB, logger)
+				if cpErr != nil {
+					return fmt.Errorf("create checkpoint store: %w", cpErr)
+				}
+				walDet.SetCheckpointStore(cpStore)
+				opts = append(opts, pgcdc.WithCheckpointStore(cpStore))
 			}
-			walDet.SetCheckpointStore(cpStore)
-			opts = append(opts, pgcdc.WithCheckpointStore(cpStore))
 		}
 		if includeSchema {
 			walDet.SetIncludeSchema(true)
@@ -612,32 +671,17 @@ func runListen(cmd *cobra.Command, args []string) error {
 				logger,
 			)))
 		case "iceberg":
-			opts = append(opts, pgcdc.WithAdapter(icebergadapter.New(
-				cfg.Iceberg.CatalogType,
-				cfg.Iceberg.CatalogURI,
-				cfg.Iceberg.Warehouse,
-				cfg.Iceberg.Namespace,
-				cfg.Iceberg.Table,
-				cfg.Iceberg.Mode,
-				cfg.Iceberg.SchemaMode,
-				cfg.Iceberg.PrimaryKeys,
-				cfg.Iceberg.FlushInterval,
-				cfg.Iceberg.FlushSize,
-				cfg.Iceberg.BackoffBase,
-				cfg.Iceberg.BackoffCap,
-				logger,
-			)))
+			a, aErr := makeIcebergAdapter(cfg, logger)
+			if aErr != nil {
+				return aErr
+			}
+			opts = append(opts, pgcdc.WithAdapter(a))
 		case "nats":
-			opts = append(opts, pgcdc.WithAdapter(natsadapter.New(
-				cfg.Nats.URL,
-				cfg.Nats.Subject,
-				cfg.Nats.Stream,
-				cfg.Nats.CredFile,
-				cfg.Nats.MaxAge,
-				cfg.Nats.BackoffBase,
-				cfg.Nats.BackoffCap,
-				logger,
-			)))
+			a, aErr := makeNATSAdapter(cfg, logger)
+			if aErr != nil {
+				return aErr
+			}
+			opts = append(opts, pgcdc.WithAdapter(a))
 		case "search":
 			opts = append(opts, pgcdc.WithAdapter(searchadapter.New(
 				cfg.Search.Engine,
@@ -652,43 +696,47 @@ func runListen(cmd *cobra.Command, args []string) error {
 				logger,
 			)))
 		case "redis":
-			opts = append(opts, pgcdc.WithAdapter(redisadapter.New(
-				cfg.Redis.URL,
-				cfg.Redis.Mode,
-				cfg.Redis.KeyPrefix,
-				cfg.Redis.IDColumn,
-				cfg.Redis.BackoffBase,
-				cfg.Redis.BackoffCap,
-				logger,
-			)))
+			a, aErr := makeRedisAdapter(cfg, logger)
+			if aErr != nil {
+				return aErr
+			}
+			opts = append(opts, pgcdc.WithAdapter(a))
 		case "grpc":
-			opts = append(opts, pgcdc.WithAdapter(grpcadapter.New(
-				cfg.GRPC.Addr,
-				logger,
-			)))
+			a, aErr := makeGRPCAdapter(cfg, logger)
+			if aErr != nil {
+				return aErr
+			}
+			opts = append(opts, pgcdc.WithAdapter(a))
 		case "kafka":
-			opts = append(opts, pgcdc.WithAdapter(kafkaadapter.New(
-				cfg.Kafka.Brokers,
-				cfg.Kafka.Topic,
-				cfg.Kafka.SASLMechanism,
-				cfg.Kafka.SASLUsername,
-				cfg.Kafka.SASLPassword,
-				cfg.Kafka.TLSCAFile,
-				cfg.Kafka.TLS,
-				cfg.Kafka.BackoffBase,
-				cfg.Kafka.BackoffCap,
-				logger,
-			)))
+			a, aErr := makeKafkaAdapter(cfg, logger)
+			if aErr != nil {
+				return aErr
+			}
+			opts = append(opts, pgcdc.WithAdapter(a))
 		}
 	}
 
+	// Create plugin adapters from CLI flags and config.
+	pluginAdapterOpts, pluginAdapterCleanup, paErr := wirePluginAdapters(ctx, wasmRT, cmd, cfg, logger)
+	if paErr != nil {
+		return paErr
+	}
+	defer pluginAdapterCleanup()
+	opts = append(opts, pluginAdapterOpts...)
+
 	// Build transform options from CLI flags and config.
-	transformOpts := buildTransformOpts(cfg, cmd)
+	transformOpts, transformCleanup := buildTransformOpts(cfg, cmd, ctx, wasmRT, logger)
 	opts = append(opts, transformOpts...)
+	// Plugin transforms.
+	pluginTransformOpts, pluginTransformCleanup := buildPluginTransformOpts(ctx, wasmRT, cmd, cfg, logger)
+	opts = append(opts, pluginTransformOpts...)
 
 	// Build pipeline.
 	p := pgcdc.NewPipeline(det, opts...)
 	defer func() { _ = dlqInstance.Close() }()
+	defer transformCleanup()
+	defer pluginTransformCleanup()
+	defer closePluginRuntime(ctx, wasmRT)
 
 	// Use an errgroup to run the pipeline alongside CLI-specific HTTP servers.
 	g, gCtx := errgroup.WithContext(ctx)
@@ -763,7 +811,9 @@ func runListen(cmd *cobra.Command, args []string) error {
 }
 
 // buildTransformOpts parses CLI flags and config to produce pipeline transform options.
-func buildTransformOpts(cfg config.Config, cmd *cobra.Command) []pgcdc.Option {
+// Returns the options and a cleanup function. Plugin transforms are handled separately
+// by buildPluginTransformOpts.
+func buildTransformOpts(cfg config.Config, cmd *cobra.Command, _ context.Context, _ any, _ *slog.Logger) ([]pgcdc.Option, func()) {
 	var opts []pgcdc.Option
 
 	// CLI flag shortcuts → global transforms.
@@ -790,7 +840,7 @@ func buildTransformOpts(cfg config.Config, cmd *cobra.Command) []pgcdc.Option {
 		}
 	}
 
-	return opts
+	return opts, func() {}
 }
 
 // specToTransform converts a config TransformSpec into a TransformFunc.

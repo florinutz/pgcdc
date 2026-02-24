@@ -1,0 +1,14 @@
+/Users/florin/work/pgpipe/testdata/plugins/src/target/wasm32-wasip1/release/deps/serde-ae1621220c865b3f.d: /Users/florin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /Users/florin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /Users/florin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /Users/florin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /Users/florin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /Users/florin/work/pgpipe/testdata/plugins/src/target/wasm32-wasip1/release/build/serde-b4617ab0f745eadf/out/private.rs
+
+/Users/florin/work/pgpipe/testdata/plugins/src/target/wasm32-wasip1/release/deps/libserde-ae1621220c865b3f.rlib: /Users/florin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /Users/florin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /Users/florin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /Users/florin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /Users/florin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /Users/florin/work/pgpipe/testdata/plugins/src/target/wasm32-wasip1/release/build/serde-b4617ab0f745eadf/out/private.rs
+
+/Users/florin/work/pgpipe/testdata/plugins/src/target/wasm32-wasip1/release/deps/libserde-ae1621220c865b3f.rmeta: /Users/florin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /Users/florin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /Users/florin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /Users/florin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /Users/florin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /Users/florin/work/pgpipe/testdata/plugins/src/target/wasm32-wasip1/release/build/serde-b4617ab0f745eadf/out/private.rs
+
+/Users/florin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs:
+/Users/florin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs:
+/Users/florin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs:
+/Users/florin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs:
+/Users/florin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs:
+/Users/florin/work/pgpipe/testdata/plugins/src/target/wasm32-wasip1/release/build/serde-b4617ab0f745eadf/out/private.rs:
+
+# env-dep:OUT_DIR=/Users/florin/work/pgpipe/testdata/plugins/src/target/wasm32-wasip1/release/build/serde-b4617ab0f745eadf/out

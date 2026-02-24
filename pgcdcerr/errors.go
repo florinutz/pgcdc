@@ -133,3 +133,16 @@ func (e *IcebergFlushError) Error() string {
 func (e *IcebergFlushError) Unwrap() error {
 	return e.Err
 }
+
+// PluginError indicates that a Wasm plugin call failed.
+type PluginError struct {
+	Plugin string
+	Type   string // "transform", "adapter", "dlq", "checkpoint"
+	Err    error
+}
+
+func (e *PluginError) Error() string {
+	return fmt.Sprintf("plugin %s (%s): %s", e.Plugin, e.Type, e.Err)
+}
+
+func (e *PluginError) Unwrap() error { return e.Err }

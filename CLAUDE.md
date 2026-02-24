@@ -64,7 +64,8 @@ Context ──> Pipeline (pgcdc.go orchestrates everything)
 - **Incremental snapshots**: `--incremental-snapshot` enables chunk-based `SELECT ... WHERE pk > ? LIMIT N` snapshots running alongside live WAL streaming. Signal-table triggered (`pgcdc_signals`), progress persisted to `pgcdc_snapshot_progress`, crash-resumable. Emits `SNAPSHOT_STARTED`, `SNAPSHOT` (row), and `SNAPSHOT_COMPLETED` events on `pgcdc:_snapshot`. `--snapshot-chunk-size`, `--snapshot-chunk-delay`, `--snapshot-progress-db`.
 - **Transform pipeline**: `--drop-columns col1,col2` and `--filter-operations INSERT,UPDATE` as CLI shortcuts. Full config via `transforms.global` and `transforms.adapter.<name>` in YAML. Built-in types: `drop_columns`, `rename_fields`, `mask` (zero/hash/redact modes), `filter` (by field value or operation). Applied per-adapter or globally; dropped events increment `pgcdc_transform_dropped_total`, errors increment `pgcdc_transform_errors_total`.
 - **Cooperative checkpointing**: `--cooperative-checkpoint` (requires `--persistent-slot` + `--detector wal`). Adapters call `AckFunc` after delivery; checkpoint only advances to `min(all adapter ack positions)`. Non-`Acknowledger` adapters are auto-acked on channel send. Metrics: `pgcdc_ack_position{adapter}`, `pgcdc_cooperative_checkpoint_lsn`.
-- **Error types**: `pgcdcerr/` provides typed errors (`ErrBusClosed`, `WebhookDeliveryError`, `DetectorDisconnectedError`, `ExecProcessError`, `EmbeddingDeliveryError`, `NatsPublishError`, `OutboxProcessError`, `IcebergFlushError`, `IncrementalSnapshotError`) for `errors.Is`/`errors.As` matching.
+- **Wasm plugin system**: Extism-based (pure Go, no CGo) plugin system for 4 extension points: transforms, adapters, DLQ backends, checkpoint stores. Plugins compiled to `.wasm` from any Extism PDK language (Rust, Go, Python, TypeScript). Zero overhead when no plugins configured. JSON serialization (protobuf opt-in). Host functions: `pgcdc_log`, `pgcdc_metric_inc`, `pgcdc_http_request`. Config via `plugins:` YAML block or `--plugin-transform`, `--plugin-adapter`, `--dlq plugin`, `--checkpoint-plugin` CLI flags. Metrics: `pgcdc_plugin_calls_total`, `pgcdc_plugin_duration_seconds`, `pgcdc_plugin_errors_total`.
+- **Error types**: `pgcdcerr/` provides typed errors (`ErrBusClosed`, `WebhookDeliveryError`, `DetectorDisconnectedError`, `ExecProcessError`, `EmbeddingDeliveryError`, `NatsPublishError`, `OutboxProcessError`, `IcebergFlushError`, `IncrementalSnapshotError`, `PluginError`) for `errors.Is`/`errors.As` matching.
 
 ## Code Conventions
 
@@ -119,7 +120,7 @@ Context ──> Pipeline (pgcdc.go orchestrates everything)
 
 ## Dependencies
 
-Direct deps (keep minimal): `pgx/v5` (PG driver), `pglogrepl` (WAL logical replication protocol), `cobra` + `viper` (CLI/config), `chi/v5` (HTTP router), `google/uuid` (UUIDv7), `errgroup` (concurrency), `prometheus/client_golang` (metrics), `coder/websocket` (WebSocket adapter), `nats-io/nats.go` (NATS JetStream adapter), `segmentio/kafka-go` (Kafka adapter), `redis/go-redis/v9` (Redis adapter), `google.golang.org/grpc` + `google.golang.org/protobuf` (gRPC adapter), `testcontainers-go` (test only).
+Direct deps (keep minimal): `pgx/v5` (PG driver), `pglogrepl` (WAL logical replication protocol), `cobra` + `viper` (CLI/config), `chi/v5` (HTTP router), `google/uuid` (UUIDv7), `errgroup` (concurrency), `prometheus/client_golang` (metrics), `coder/websocket` (WebSocket adapter), `nats-io/nats.go` (NATS JetStream adapter), `segmentio/kafka-go` (Kafka adapter), `redis/go-redis/v9` (Redis adapter), `google.golang.org/grpc` + `google.golang.org/protobuf` (gRPC adapter), `extism/go-sdk` (Wasm plugin runtime), `testcontainers-go` (test only).
 
 ## Testing
 
@@ -220,6 +221,9 @@ event/          Event model
 health/         Component health checker
 metrics/        Prometheus metrics definitions
 dlq/            Dead letter queue (stderr + PG table backends)
+plugin/         Wasm plugin system
+  wasm/          Extism runtime, transforms, adapters, DLQ, checkpoint
+  proto/         Protobuf event definition (opt-in encoding for plugins)
 pgcdcerr/      Typed error types
 internal/       CLI-specific internals (not importable)
   config/       Viper-based configuration structs
@@ -255,5 +259,12 @@ testutil/       Test utilities
 - `detector/walreplication/oidmap.go` — Static OID → type name mapping for 40+ PG types
 - `checkpoint/checkpoint.go` — LSN checkpoint store interface + PG implementation
 - `cmd/slot.go` — Replication slot management CLI (list, status, drop)
+- `plugin/wasm/runtime.go` — Extism module compilation, instance pooling
+- `plugin/wasm/transform.go` — WasmTransform → transform.TransformFunc (preserves LSN across boundary)
+- `plugin/wasm/adapter.go` — WasmAdapter → adapter.Adapter + Acknowledger + DLQAware
+- `plugin/wasm/dlq.go` — WasmDLQ → dlq.DLQ
+- `plugin/wasm/checkpoint.go` — WasmCheckpointStore → checkpoint.Store
+- `plugin/wasm/host.go` — Host functions: pgcdc_log, pgcdc_metric_inc, pgcdc_http_request
+- `plugin/proto/event.proto` — Protobuf event definition for high-throughput plugins
 - `internal/server/server.go` — HTTP server with SSE, WS, metrics, and health endpoints (CLI-only)
 - `scenarios/helpers_test.go` — Shared test infrastructure (PG container, pipeline wiring)

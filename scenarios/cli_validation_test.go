@@ -29,7 +29,7 @@ func TestScenario_CLIValidation(t *testing.T) {
 	})
 
 	t.Run("unknown adapter", func(t *testing.T) {
-		output, err := runPGCDC("listen", "--db", "postgres://localhost/test", "--channel", "orders", "--adapter", "kafka")
+		output, err := runPGCDC("listen", "--db", "postgres://localhost/test", "--channel", "orders", "--adapter", "nonexistent")
 		if err == nil {
 			t.Fatal("expected error for unknown adapter")
 		}

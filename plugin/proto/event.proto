@@ -1,0 +1,19 @@
+syntax = "proto3";
+package pgcdc.plugin.v1;
+option go_package = "github.com/florinutz/pgcdc/plugin/proto";
+
+message Event {
+  string id = 1;
+  string channel = 2;
+  string operation = 3;
+  bytes payload = 4;
+  string source = 5;
+  int64 created_at_unix_ns = 6;
+  TransactionInfo transaction = 7;
+}
+
+message TransactionInfo {
+  uint32 xid = 1;
+  int64 commit_time_unix_ns = 2;
+  int32 seq = 3;
+}

@@ -30,6 +30,7 @@ type Config struct {
 	Kafka               KafkaConfig               `mapstructure:"kafka"`
 	IncrementalSnapshot IncrementalSnapshotConfig `mapstructure:"incremental_snapshot"`
 	Transforms          TransformConfig           `mapstructure:"transforms"`
+	Plugins             PluginConfig              `mapstructure:"plugins"`
 }
 
 type BusConfig struct {
@@ -224,6 +225,32 @@ type FilterSpec struct {
 	Equals     string   `mapstructure:"equals"`
 	In         []string `mapstructure:"in"`
 	Operations []string `mapstructure:"operations"`
+}
+
+type PluginConfig struct {
+	Transforms []PluginTransformSpec `mapstructure:"transforms"`
+	Adapters   []PluginAdapterSpec   `mapstructure:"adapters"`
+	DLQ        *PluginSpec           `mapstructure:"dlq"`
+	Checkpoint *PluginSpec           `mapstructure:"checkpoint"`
+}
+
+type PluginTransformSpec struct {
+	Name     string         `mapstructure:"name"`
+	Path     string         `mapstructure:"path"`
+	Config   map[string]any `mapstructure:"config"`
+	Encoding string         `mapstructure:"encoding"` // "json" (default) or "protobuf"
+	Scope    any            `mapstructure:"scope"`    // "global" or map with "adapter" key
+}
+
+type PluginAdapterSpec struct {
+	Name   string         `mapstructure:"name"`
+	Path   string         `mapstructure:"path"`
+	Config map[string]any `mapstructure:"config"`
+}
+
+type PluginSpec struct {
+	Path   string         `mapstructure:"path"`
+	Config map[string]any `mapstructure:"config"`
 }
 
 func Default() Config {

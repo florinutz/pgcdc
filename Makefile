@@ -1,11 +1,26 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X github.com/florinutz/pgcdc/cmd.Version=$(VERSION)
 
-.PHONY: build test test-scenarios test-all lint vet fmt bench coverage docker-build docker-up docker-down clean help
+.PHONY: build build-slim build-slim-stripped size test test-scenarios test-all lint vet fmt bench coverage docker-build docker-up docker-down clean help
+
+SLIM_TAGS := no_kafka,no_grpc,no_iceberg,no_nats,no_redis,no_plugins
 
 ## build: Compile the binary
 build:
 	go build -ldflags "$(LDFLAGS)" -o pgcdc ./cmd/pgcdc
+
+## build-slim: Binary without Kafka/gRPC/Iceberg/NATS/Redis/Wasm
+build-slim:
+	go build -tags "$(SLIM_TAGS)" -ldflags "$(LDFLAGS)" -o pgcdc-slim ./cmd/pgcdc
+
+## build-slim-stripped: Slim binary with debug symbols stripped
+build-slim-stripped:
+	go build -tags "$(SLIM_TAGS)" -ldflags "$(LDFLAGS) -s -w" -o pgcdc-slim ./cmd/pgcdc
+
+## size: Compare full and slim binary sizes
+size: build build-slim
+	@echo "Full:"; ls -lh pgcdc
+	@echo "Slim:"; ls -lh pgcdc-slim
 
 ## test: Run unit tests only (fast, no Docker)
 test:
@@ -53,7 +68,7 @@ coverage:
 
 ## clean: Remove build artifacts
 clean:
-	rm -f pgcdc
+	rm -f pgcdc pgcdc-slim
 	rm -rf dist/
 
 ## help: Show this help

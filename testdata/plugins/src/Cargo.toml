@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = [
+    "noop",
+    "drop_field",
+    "drop_event",
+    "echo_adapter",
+    "mem_dlq",
+    "mem_checkpoint",
+    "error_adapter",
+]

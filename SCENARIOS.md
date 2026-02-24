@@ -25,7 +25,6 @@ Each scenario = one file, one user journey, happy path + one critical failure.
 | 19 | Persistent slot | `persistent_slot_test.go` | WAL detector with persistent slot creates non-temporary replication slot; checkpoint table stores LSN; events survive reconnect | Slot survives disconnect: detector reconnects to existing slot, events resume flowing |
 | 20 | NATS JetStream | `nats_test.go` | NOTIFY → detector → bus → NATS adapter publishes to JetStream with correct subject mapping and dedup ID | N/A (single happy path with full round-trip verification) |
 | 21 | Outbox pattern | `outbox_test.go` | Outbox detector polls table, emits events, deletes processed rows; events arrive at stdout with correct channel/operation/payload | Keep-processed mode: rows have processed_at set instead of being deleted |
-
 | 22 | Search sync | `search_test.go` | NOTIFY → detector → bus → search adapter upserts document to Typesense; DELETE removes document | N/A (happy path with full round-trip) |
 | 23 | Redis cache | `redis_test.go` | NOTIFY → detector → bus → redis adapter DELs key in invalidate mode; SET key in sync mode | N/A (happy path with both modes) |
 | 24 | gRPC streaming | `grpc_test.go` | NOTIFY → detector → bus → gRPC adapter streams event to connected client; channel filtering works | N/A (happy path with channel filter) |
@@ -34,6 +33,8 @@ Each scenario = one file, one user journey, happy path + one critical failure.
 | 27 | Cooperative checkpoint | `cooperative_checkpoint_test.go` | WAL+persistent slot+reliable bus mode: stdout adapter acks events, checkpoint advances to min acked LSN | Slow adapter delays checkpoint: checkpoint stalls at slow adapter's position, advances after release |
 
 | 28 | Kafka delivery | `kafka_test.go` | NOTIFY → detector → bus → kafka adapter publishes to topic with correct key/headers; channel name maps to topic (`pgcdc:orders`→`pgcdc.orders`) | Terminal topic error: event recorded to DLQ, adapter continues |
+
+| 29 | Wasm plugins | `plugin_test.go` | Wasm transform drops field from payload; Wasm transform returns empty = event dropped; Wasm adapter receives events via handle(); DLQ plugin records; checkpoint store load/save | Wasm adapter error → DLQ |
 
 ## Adding a new scenario
 

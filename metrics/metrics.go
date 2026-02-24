@@ -310,4 +310,22 @@ var (
 		Name: "pgcdc_transform_errors_total",
 		Help: "Total number of transform errors.",
 	}, []string{"adapter"})
+
+	// Plugin metrics.
+
+	PluginCalls = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "pgcdc_plugin_calls_total",
+		Help: "Total Wasm plugin invocations.",
+	}, []string{"plugin", "type"})
+
+	PluginDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "pgcdc_plugin_duration_seconds",
+		Help:    "Wasm plugin call duration.",
+		Buckets: []float64{0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1},
+	}, []string{"plugin", "type"})
+
+	PluginErrors = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "pgcdc_plugin_errors_total",
+		Help: "Total Wasm plugin errors.",
+	}, []string{"plugin", "type"})
 )
