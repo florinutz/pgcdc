@@ -34,6 +34,7 @@ import (
 	"github.com/florinutz/pgcdc/dlq"
 	"github.com/florinutz/pgcdc/internal/config"
 	"github.com/florinutz/pgcdc/internal/server"
+	"github.com/florinutz/pgcdc/snapshot"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"golang.org/x/sync/errgroup"
@@ -97,6 +98,13 @@ func init() {
 	f.Bool("snapshot-first", false, "run a table snapshot before live WAL streaming (requires --detector wal)")
 	f.String("snapshot-table", "", "table to snapshot (required with --snapshot-first)")
 	f.String("snapshot-where", "", "optional WHERE clause for snapshot")
+
+	// Incremental snapshot flags (no viper bindings — read directly to avoid collision).
+	f.Bool("incremental-snapshot", false, "enable incremental snapshots via signal table (requires --detector wal)")
+	f.String("snapshot-signal-table", "pgcdc_signals", "signal table name")
+	f.Int("snapshot-chunk-size", 1000, "rows per chunk for incremental snapshots")
+	f.Duration("snapshot-chunk-delay", 0, "delay between chunks for incremental snapshots")
+	f.String("snapshot-progress-db", "", "PostgreSQL URL for progress storage (default: same as --db)")
 
 	// Embedding adapter flags.
 	f.String("embedding-api-url", "", "OpenAI-compatible embedding API URL")
@@ -261,6 +269,13 @@ func runListen(cmd *cobra.Command, args []string) error {
 	heartbeatTable, _ := cmd.Flags().GetString("heartbeat-table")
 	slotLagWarn, _ := cmd.Flags().GetInt64("slot-lag-warn")
 
+	// Incremental snapshot flags (read directly to avoid viper collisions).
+	incrementalSnapshot, _ := cmd.Flags().GetBool("incremental-snapshot")
+	snapshotSignalTable, _ := cmd.Flags().GetString("snapshot-signal-table")
+	snapshotChunkSize, _ := cmd.Flags().GetInt("snapshot-chunk-size")
+	snapshotChunkDelay, _ := cmd.Flags().GetDuration("snapshot-chunk-delay")
+	snapshotProgressDB, _ := cmd.Flags().GetString("snapshot-progress-db")
+
 	// Validation.
 	if cfg.Detector.Type != "wal" && (cfg.Detector.TxMetadata || cfg.Detector.TxMarkers) {
 		return fmt.Errorf("--tx-metadata and --tx-markers require --detector wal")
@@ -279,6 +294,9 @@ func runListen(cmd *cobra.Command, args []string) error {
 	}
 	if snapshotFirst && snapshotTable == "" {
 		return fmt.Errorf("--snapshot-first requires --snapshot-table")
+	}
+	if incrementalSnapshot && cfg.Detector.Type != "wal" {
+		return fmt.Errorf("--incremental-snapshot requires --detector wal")
 	}
 
 	// Validate adapters and check requirements early.
@@ -447,6 +465,19 @@ func runListen(cmd *cobra.Command, args []string) error {
 		}
 		if slotLagWarn > 0 {
 			walDet.SetSlotLagWarn(slotLagWarn)
+		}
+		if incrementalSnapshot {
+			walDet.SetIncrementalSnapshot(snapshotSignalTable, snapshotChunkSize, snapshotChunkDelay)
+			progDB := snapshotProgressDB
+			if progDB == "" {
+				progDB = cfg.DatabaseURL
+			}
+			progStore, progErr := snapshot.NewPGProgressStore(ctx, progDB, logger)
+			if progErr != nil {
+				return fmt.Errorf("create snapshot progress store: %w", progErr)
+			}
+			walDet.SetProgressStore(progStore)
+			defer func() { _ = progStore.Close() }()
 		}
 		det = walDet
 	case "outbox":

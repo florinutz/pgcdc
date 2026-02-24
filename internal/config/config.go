@@ -3,30 +3,31 @@ package config
 import "time"
 
 type Config struct {
-	DatabaseURL     string          `mapstructure:"database_url"`
-	Channels        []string        `mapstructure:"channels"`
-	Adapters        []string        `mapstructure:"adapters"`
-	LogLevel        string          `mapstructure:"log_level"`
-	LogFormat       string          `mapstructure:"log_format"`
-	ShutdownTimeout time.Duration   `mapstructure:"shutdown_timeout"`
-	MetricsAddr     string          `mapstructure:"metrics_addr"`
-	Bus             BusConfig       `mapstructure:"bus"`
-	Webhook         WebhookConfig   `mapstructure:"webhook"`
-	SSE             SSEConfig       `mapstructure:"sse"`
-	File            FileConfig      `mapstructure:"file"`
-	Exec            ExecConfig      `mapstructure:"exec"`
-	PGTable         PGTableConfig   `mapstructure:"pg_table"`
-	WebSocket       WebSocketConfig `mapstructure:"websocket"`
-	Detector        DetectorConfig  `mapstructure:"detector"`
-	Snapshot        SnapshotConfig  `mapstructure:"snapshot"`
-	Embedding       EmbeddingConfig `mapstructure:"embedding"`
-	Iceberg         IcebergConfig   `mapstructure:"iceberg"`
-	Nats            NatsConfig      `mapstructure:"nats"`
-	Outbox          OutboxConfig    `mapstructure:"outbox"`
-	DLQ             DLQConfig       `mapstructure:"dlq"`
-	Search          SearchConfig    `mapstructure:"search"`
-	Redis           RedisConfig     `mapstructure:"redis"`
-	GRPC            GRPCConfig      `mapstructure:"grpc"`
+	DatabaseURL         string                    `mapstructure:"database_url"`
+	Channels            []string                  `mapstructure:"channels"`
+	Adapters            []string                  `mapstructure:"adapters"`
+	LogLevel            string                    `mapstructure:"log_level"`
+	LogFormat           string                    `mapstructure:"log_format"`
+	ShutdownTimeout     time.Duration             `mapstructure:"shutdown_timeout"`
+	MetricsAddr         string                    `mapstructure:"metrics_addr"`
+	Bus                 BusConfig                 `mapstructure:"bus"`
+	Webhook             WebhookConfig             `mapstructure:"webhook"`
+	SSE                 SSEConfig                 `mapstructure:"sse"`
+	File                FileConfig                `mapstructure:"file"`
+	Exec                ExecConfig                `mapstructure:"exec"`
+	PGTable             PGTableConfig             `mapstructure:"pg_table"`
+	WebSocket           WebSocketConfig           `mapstructure:"websocket"`
+	Detector            DetectorConfig            `mapstructure:"detector"`
+	Snapshot            SnapshotConfig            `mapstructure:"snapshot"`
+	Embedding           EmbeddingConfig           `mapstructure:"embedding"`
+	Iceberg             IcebergConfig             `mapstructure:"iceberg"`
+	Nats                NatsConfig                `mapstructure:"nats"`
+	Outbox              OutboxConfig              `mapstructure:"outbox"`
+	DLQ                 DLQConfig                 `mapstructure:"dlq"`
+	Search              SearchConfig              `mapstructure:"search"`
+	Redis               RedisConfig               `mapstructure:"redis"`
+	GRPC                GRPCConfig                `mapstructure:"grpc"`
+	IncrementalSnapshot IncrementalSnapshotConfig `mapstructure:"incremental_snapshot"`
 }
 
 type BusConfig struct {
@@ -177,6 +178,14 @@ type GRPCConfig struct {
 	Addr string `mapstructure:"addr"`
 }
 
+type IncrementalSnapshotConfig struct {
+	Enabled     bool          `mapstructure:"enabled"`
+	SignalTable string        `mapstructure:"signal_table"`
+	ChunkSize   int           `mapstructure:"chunk_size"`
+	ChunkDelay  time.Duration `mapstructure:"chunk_delay"`
+	ProgressDB  string        `mapstructure:"progress_db"`
+}
+
 func Default() Config {
 	return Config{
 		Channels:        []string{},
@@ -272,6 +281,10 @@ func Default() Config {
 		},
 		GRPC: GRPCConfig{
 			Addr: ":9090",
+		},
+		IncrementalSnapshot: IncrementalSnapshotConfig{
+			SignalTable: "pgcdc_signals",
+			ChunkSize:   1000,
 		},
 		Embedding: EmbeddingConfig{
 			Model:       "text-embedding-3-small",

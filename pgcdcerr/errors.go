@@ -105,6 +105,21 @@ func (e *OutboxProcessError) Unwrap() error {
 	return e.Err
 }
 
+// IncrementalSnapshotError indicates that an incremental snapshot failed.
+type IncrementalSnapshotError struct {
+	SnapshotID string
+	Table      string
+	Err        error
+}
+
+func (e *IncrementalSnapshotError) Error() string {
+	return fmt.Sprintf("incremental snapshot %s for table %s failed: %v", e.SnapshotID, e.Table, e.Err)
+}
+
+func (e *IncrementalSnapshotError) Unwrap() error {
+	return e.Err
+}
+
 // IcebergFlushError indicates that the Iceberg adapter failed to flush after consecutive attempts.
 type IcebergFlushError struct {
 	Attempts int

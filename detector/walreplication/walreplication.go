@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pglogrepl"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -77,6 +79,15 @@ type Detector struct {
 
 	// Slot lag warning threshold in bytes.
 	slotLagWarn int64
+
+	// Incremental snapshot fields.
+	incrementalEnabled bool
+	signalTable        string
+	snapshotChunkSize  int
+	snapshotChunkDelay time.Duration
+	progressStore      snapshot.ProgressStore
+	activeSnapshots    map[string]context.CancelFunc // table -> cancel
+	snapshotMu         sync.Mutex
 }
 
 // txState tracks the current transaction when txMetadata is enabled.
@@ -160,6 +171,23 @@ func (d *Detector) SetHeartbeat(interval time.Duration, table, dbURL string) {
 // SetSlotLagWarn sets the slot lag warning threshold in bytes.
 func (d *Detector) SetSlotLagWarn(bytes int64) {
 	d.slotLagWarn = bytes
+}
+
+// SetIncrementalSnapshot enables signal-triggered incremental snapshots.
+func (d *Detector) SetIncrementalSnapshot(signalTable string, chunkSize int, chunkDelay time.Duration) {
+	d.incrementalEnabled = true
+	d.signalTable = signalTable
+	if chunkSize <= 0 {
+		chunkSize = 1000
+	}
+	d.snapshotChunkSize = chunkSize
+	d.snapshotChunkDelay = chunkDelay
+	d.activeSnapshots = make(map[string]context.CancelFunc)
+}
+
+// SetProgressStore sets the progress store for incremental snapshot persistence.
+func (d *Detector) SetProgressStore(store snapshot.ProgressStore) {
+	d.progressStore = store
 }
 
 // Start connects to PostgreSQL, creates a temporary replication slot, and
@@ -334,6 +362,11 @@ func (d *Detector) run(ctx context.Context, events chan<- event.Event) error {
 		go d.runSlotLagMonitor(ctx, slotName)
 	}
 
+	// Resume incomplete incremental snapshots from progress store.
+	if d.incrementalEnabled && d.progressStore != nil {
+		d.resumeIncompleteSnapshots(ctx, events)
+	}
+
 	// Message loop.
 	clientXLogPos := consistentPoint
 	nextStatusDeadline := time.Now().Add(standbyStatusInterval)
@@ -447,6 +480,11 @@ func (d *Detector) run(ctx context.Context, events chan<- event.Event) error {
 				}
 				if err := d.emitEvent(ctx, events, relations, m.RelationID, "INSERT", m.Tuple, nil, currentTx); err != nil {
 					return err
+				}
+				if d.incrementalEnabled {
+					if rel, ok := relations[m.RelationID]; ok && rel.RelationName == d.signalTable {
+						d.handleSignal(ctx, events, rel, m.Tuple)
+					}
 				}
 
 			case *pglogrepl.UpdateMessage:
@@ -815,6 +853,130 @@ func (d *Detector) heartbeatOnce(ctx context.Context, dbURL string) error {
 	}
 
 	return nil
+}
+
+// handleSignal parses a signal table INSERT and dispatches the appropriate action.
+func (d *Detector) handleSignal(ctx context.Context, events chan<- event.Event, rel *pglogrepl.RelationMessage, tuple *pglogrepl.TupleData) {
+	row := tupleToMap(rel, tuple)
+
+	signal, _ := row["signal"].(string)
+	payloadStr, _ := row["payload"].(string)
+
+	var payload map[string]any
+	if payloadStr != "" {
+		if err := json.Unmarshal([]byte(payloadStr), &payload); err != nil {
+			d.logger.Warn("failed to parse signal payload", "signal", signal, "error", err)
+			return
+		}
+	}
+
+	table, _ := payload["table"].(string)
+	if table == "" {
+		d.logger.Warn("signal missing table in payload", "signal", signal)
+		return
+	}
+
+	switch signal {
+	case "execute-snapshot":
+		snapshotID, _ := payload["snapshot_id"].(string)
+		if snapshotID != "" {
+			d.startIncrementalSnapshotWithID(ctx, events, table, snapshotID)
+		} else {
+			d.startIncrementalSnapshot(ctx, events, table)
+		}
+	case "stop-snapshot":
+		d.stopIncrementalSnapshot(table)
+	default:
+		d.logger.Warn("unknown signal type", "signal", signal)
+	}
+}
+
+// startIncrementalSnapshot starts a new incremental snapshot goroutine for the given table.
+func (d *Detector) startIncrementalSnapshot(ctx context.Context, events chan<- event.Event, table string) {
+	id, err := uuid.NewV7()
+	if err != nil {
+		d.logger.Error("generate snapshot id", "error", err)
+		return
+	}
+	d.startIncrementalSnapshotWithID(ctx, events, table, id.String())
+}
+
+// startIncrementalSnapshotWithID starts an incremental snapshot with a specific ID.
+func (d *Detector) startIncrementalSnapshotWithID(ctx context.Context, events chan<- event.Event, table, snapshotID string) {
+	d.snapshotMu.Lock()
+	if _, active := d.activeSnapshots[table]; active {
+		d.snapshotMu.Unlock()
+		d.logger.Warn("incremental snapshot already active for table, ignoring", "table", table)
+		return
+	}
+
+	snapCtx, cancel := context.WithCancel(ctx)
+	d.activeSnapshots[table] = cancel
+	d.snapshotMu.Unlock()
+
+	d.logger.Info("starting incremental snapshot",
+		"table", table,
+		"snapshot_id", snapshotID,
+	)
+
+	go func() {
+		defer func() {
+			d.snapshotMu.Lock()
+			delete(d.activeSnapshots, table)
+			d.snapshotMu.Unlock()
+		}()
+
+		snap := snapshot.NewIncremental(d.dbURL, table, d.snapshotChunkSize, d.snapshotChunkDelay, d.progressStore, snapshotID, d.logger)
+		if err := snap.Run(snapCtx, events); err != nil {
+			if snapCtx.Err() == nil {
+				d.logger.Error("incremental snapshot failed",
+					"table", table,
+					"snapshot_id", snapshotID,
+					"error", &pgcdcerr.IncrementalSnapshotError{
+						SnapshotID: snapshotID,
+						Table:      table,
+						Err:        err,
+					},
+				)
+			}
+		}
+	}()
+}
+
+// stopIncrementalSnapshot cancels a running incremental snapshot for the given table.
+func (d *Detector) stopIncrementalSnapshot(table string) {
+	d.snapshotMu.Lock()
+	cancel, ok := d.activeSnapshots[table]
+	d.snapshotMu.Unlock()
+
+	if !ok {
+		d.logger.Warn("no active snapshot to stop", "table", table)
+		return
+	}
+
+	d.logger.Info("stopping incremental snapshot", "table", table)
+	cancel()
+}
+
+// resumeIncompleteSnapshots restarts any snapshots that were running or paused
+// when the detector last shut down.
+func (d *Detector) resumeIncompleteSnapshots(ctx context.Context, events chan<- event.Event) {
+	for _, status := range []snapshot.SnapshotStatus{snapshot.StatusRunning, snapshot.StatusPaused} {
+		records, err := d.progressStore.List(ctx, &status)
+		if err != nil {
+			d.logger.Warn("failed to list incomplete snapshots", "status", status, "error", err)
+			continue
+		}
+		for _, rec := range records {
+			d.logger.Info("resuming incomplete snapshot",
+				"snapshot_id", rec.SnapshotID,
+				"table", rec.TableName,
+				"status", rec.Status,
+				"rows_processed", rec.RowsProcessed,
+			)
+			d.startIncrementalSnapshotWithID(ctx, events, rec.TableName, rec.SnapshotID)
+		}
+	}
 }
 
 // monitorSlotLag queries the replication slot lag and updates metrics.

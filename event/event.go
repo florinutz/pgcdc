@@ -10,7 +10,9 @@ import (
 
 // Common operation constants.
 const (
-	OpSnapshot = "SNAPSHOT"
+	OpSnapshot          = "SNAPSHOT"
+	OpSnapshotStarted   = "SNAPSHOT_STARTED"
+	OpSnapshotCompleted = "SNAPSHOT_COMPLETED"
 )
 
 // TransactionInfo contains optional PostgreSQL transaction metadata.

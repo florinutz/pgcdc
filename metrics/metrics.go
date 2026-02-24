@@ -121,6 +121,29 @@ var (
 		Help: "Total bytes written to Iceberg storage.",
 	})
 
+	// Incremental snapshot metrics.
+
+	IncrementalSnapshotRowsExported = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "pgcdc_incremental_snapshot_rows_exported_total",
+		Help: "Total number of rows exported during incremental snapshots.",
+	})
+
+	IncrementalSnapshotChunks = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "pgcdc_incremental_snapshot_chunks_total",
+		Help: "Total number of chunks read during incremental snapshots.",
+	})
+
+	IncrementalSnapshotDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "pgcdc_incremental_snapshot_duration_seconds",
+		Help:    "Duration of incremental snapshot operations.",
+		Buckets: []float64{1, 5, 10, 30, 60, 120, 300, 600, 1800, 3600},
+	})
+
+	IncrementalSnapshotsActive = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "pgcdc_incremental_snapshots_active",
+		Help: "Number of currently active incremental snapshots.",
+	})
+
 	// Checkpoint metrics.
 
 	CheckpointLSN = promauto.NewGauge(prometheus.GaugeOpts{

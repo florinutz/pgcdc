@@ -29,6 +29,7 @@ Each scenario = one file, one user journey, happy path + one critical failure.
 | 22 | Search sync | `search_test.go` | NOTIFY → detector → bus → search adapter upserts document to Typesense; DELETE removes document | N/A (happy path with full round-trip) |
 | 23 | Redis cache | `redis_test.go` | NOTIFY → detector → bus → redis adapter DELs key in invalidate mode; SET key in sync mode | N/A (happy path with both modes) |
 | 24 | gRPC streaming | `grpc_test.go` | NOTIFY → detector → bus → gRPC adapter streams event to connected client; channel filtering works | N/A (happy path with channel filter) |
+| 25 | Incremental snapshot | `incremental_snapshot_test.go` | Signal table INSERT triggers chunked snapshot alongside live WAL streaming; SNAPSHOT_STARTED + data events + SNAPSHOT_COMPLETED emitted | Crash recovery: cancel mid-snapshot, verify progress saved, restart resumes from last chunk |
 
 ## Adding a new scenario
 

@@ -25,6 +25,9 @@ var embeddingTableSQL embed.FS
 //go:embed sql/outbox_table_template.sql
 var outboxTableSQL embed.FS
 
+//go:embed sql/signal_table_template.sql
+var signalTableSQL embed.FS
+
 var (
 	validTableName       = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 	validChannelName     = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_:.\-]*$`)
@@ -54,6 +57,10 @@ type outboxTableData struct {
 	Table string
 }
 
+type signalTableData struct {
+	Table string
+}
+
 var initCmd = &cobra.Command{
 	Use:   "init",
 	Short: "Generate SQL setup for a table (trigger, publication, or events table)",
@@ -70,7 +77,7 @@ func init() {
 	initCmd.Flags().String("channel", "", "channel name (default: pgcdc:<table>)")
 	initCmd.Flags().String("detector", "listen_notify", "detector type: listen_notify or wal")
 	initCmd.Flags().String("publication", "", "publication name for WAL detector (default: pgcdc_<table>)")
-	initCmd.Flags().String("adapter", "", "adapter type: pg_table, embedding, or outbox (generates table SQL)")
+	initCmd.Flags().String("adapter", "", "adapter type: pg_table, embedding, outbox, or signal (generates table SQL)")
 	initCmd.Flags().Int("dimension", 1536, "vector dimension for embedding adapter (default: 1536)")
 	_ = initCmd.MarkFlagRequired("table")
 }
@@ -94,8 +101,10 @@ func runInit(cmd *cobra.Command, args []string) error {
 			return runInitEmbedding(table, dimension)
 		case "outbox":
 			return runInitOutbox(table)
+		case "signal":
+			return runInitSignal(table)
 		default:
-			return fmt.Errorf("unknown adapter type %q for init: expected pg_table, embedding, or outbox", adapterType)
+			return fmt.Errorf("unknown adapter type %q for init: expected pg_table, embedding, outbox, or signal", adapterType)
 		}
 	}
 
@@ -236,6 +245,28 @@ func runInitEmbedding(table string, dimension int) error {
 	data := embeddingTableData{
 		Table:     table,
 		Dimension: dimension,
+	}
+
+	if err := tmpl.Execute(os.Stdout, data); err != nil {
+		return fmt.Errorf("execute template: %w", err)
+	}
+
+	return nil
+}
+
+func runInitSignal(table string) error {
+	tmplBytes, err := signalTableSQL.ReadFile("sql/signal_table_template.sql")
+	if err != nil {
+		return fmt.Errorf("read embedded template: %w", err)
+	}
+
+	tmpl, err := template.New("signal_table").Parse(string(tmplBytes))
+	if err != nil {
+		return fmt.Errorf("parse template: %w", err)
+	}
+
+	data := signalTableData{
+		Table: table,
 	}
 
 	if err := tmpl.Execute(os.Stdout, data); err != nil {
