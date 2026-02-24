@@ -199,6 +199,9 @@ func init() {
 	// Transform flags (read directly, not viper-bound — same pattern as --snapshot-first).
 	f.StringSlice("drop-columns", nil, "global: drop these columns from event payloads (repeatable)")
 	f.StringSlice("filter-operations", nil, "global: only pass events with these operations (e.g. INSERT,UPDATE)")
+	f.Bool("debezium-envelope", false, "global: rewrite payloads into Debezium-compatible envelope format")
+	f.String("debezium-connector-name", "pgcdc", "Debezium source.name field (requires --debezium-envelope)")
+	f.String("debezium-database", "", "Debezium source.db field (requires --debezium-envelope)")
 
 	// Plugin flags (read directly, not viper-bound).
 	f.StringSlice("plugin-transform", nil, "wasm transform plugin paths (repeatable)")
@@ -872,6 +875,16 @@ func buildTransformOpts(cfg config.Config, cmd *cobra.Command, _ context.Context
 	if ops, _ := cmd.Flags().GetStringSlice("filter-operations"); len(ops) > 0 {
 		opts = append(opts, pgcdc.WithTransform(transform.FilterOperation(ops...)))
 	}
+	if ok, _ := cmd.Flags().GetBool("debezium-envelope"); ok {
+		var dopts []transform.DebeziumOption
+		if name, _ := cmd.Flags().GetString("debezium-connector-name"); name != "" && name != "pgcdc" {
+			dopts = append(dopts, transform.WithConnectorName(name))
+		}
+		if db, _ := cmd.Flags().GetString("debezium-database"); db != "" {
+			dopts = append(dopts, transform.WithDatabase(db))
+		}
+		opts = append(opts, pgcdc.WithTransform(transform.Debezium(dopts...)))
+	}
 
 	// Config file: global transforms.
 	for _, spec := range cfg.Transforms.Global {
@@ -932,6 +945,15 @@ func specToTransform(spec config.TransformSpec) transform.TransformFunc {
 			return transform.FilterField(spec.Filter.Field, spec.Filter.Equals)
 		}
 		return nil
+	case "debezium":
+		var dopts []transform.DebeziumOption
+		if spec.Debezium.ConnectorName != "" {
+			dopts = append(dopts, transform.WithConnectorName(spec.Debezium.ConnectorName))
+		}
+		if spec.Debezium.Database != "" {
+			dopts = append(dopts, transform.WithDatabase(spec.Debezium.Database))
+		}
+		return transform.Debezium(dopts...)
 	default:
 		return nil
 	}

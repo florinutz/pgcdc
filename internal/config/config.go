@@ -208,11 +208,17 @@ type TransformConfig struct {
 }
 
 type TransformSpec struct {
-	Type    string            `mapstructure:"type"`    // drop_columns, rename_fields, mask, filter
-	Columns []string          `mapstructure:"columns"` // for drop_columns
-	Mapping map[string]string `mapstructure:"mapping"` // for rename_fields
-	Fields  []MaskFieldSpec   `mapstructure:"fields"`  // for mask
-	Filter  FilterSpec        `mapstructure:"filter"`  // for filter
+	Type     string            `mapstructure:"type"`     // drop_columns, rename_fields, mask, filter, debezium
+	Columns  []string          `mapstructure:"columns"`  // for drop_columns
+	Mapping  map[string]string `mapstructure:"mapping"`  // for rename_fields
+	Fields   []MaskFieldSpec   `mapstructure:"fields"`   // for mask
+	Filter   FilterSpec        `mapstructure:"filter"`   // for filter
+	Debezium DebeziumSpec      `mapstructure:"debezium"` // for debezium
+}
+
+type DebeziumSpec struct {
+	ConnectorName string `mapstructure:"connector_name"`
+	Database      string `mapstructure:"database"`
 }
 
 type MaskFieldSpec struct {

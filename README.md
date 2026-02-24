@@ -35,6 +35,7 @@ PostgreSQL ──▶ pgcdc (single Go binary) ──▶ Webhook, SSE, WebSocket,
 | Redis cache invalidation | Yes | No | No | No |
 | Dead letter queue | Yes | Yes | Yes | No |
 | Event routing | Yes | Yes (SMTs) | No | Yes |
+| Debezium-compatible output | Yes | Native | No | No |
 | External deps | 0 | Kafka+ZK | Managed | 0 |
 
 ## Quick Start
@@ -130,6 +131,45 @@ pgcdc listen ... --dlq pg_table --dlq-table pgcdc_dead_letters
 # Disable
 pgcdc listen ... --dlq none
 ```
+
+## Transforms
+
+Apply built-in transforms to events before they reach adapters:
+
+```bash
+# Drop sensitive columns
+pgcdc listen --all-tables --drop-columns password,api_key --db postgres://...
+
+# Only pass INSERT and UPDATE events
+pgcdc listen --all-tables --filter-operations INSERT,UPDATE --db postgres://...
+
+# Rewrite payloads into Debezium envelope (for Kafka Connect sinks, Flink, etc.)
+pgcdc listen --all-tables --adapter kafka \
+  --kafka-brokers localhost:9092 \
+  --debezium-envelope \
+  --debezium-connector-name my-pg-source \
+  --debezium-database mydb \
+  --db postgres://...
+```
+
+The `--debezium-envelope` flag reshapes the payload into the standard Debezium before/after/op/source envelope, enabling drop-in migration of downstream consumers without code changes.
+
+Full transform config via YAML (global or per-adapter):
+
+```yaml
+transforms:
+  global:
+    - type: debezium
+      debezium:
+        connector_name: my-pg-source
+        database: orders_db
+  adapter:
+    kafka:
+      - type: drop_columns
+        columns: [internal_id, created_by]
+```
+
+Built-in transform types: `drop_columns`, `rename_fields`, `mask` (hash/redact/partial), `filter` (by operation or field value), `debezium`.
 
 ## Snapshot: Initial Data Sync
 
