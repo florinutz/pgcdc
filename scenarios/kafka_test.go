@@ -16,8 +16,9 @@ import (
 	"github.com/florinutz/pgcdc/detector/listennotify"
 	"github.com/florinutz/pgcdc/dlq"
 	"github.com/florinutz/pgcdc/event"
-	kafkago "github.com/segmentio/kafka-go"
 	kafkatc "github.com/testcontainers/testcontainers-go/modules/kafka"
+	"github.com/twmb/franz-go/pkg/kadm"
+	"github.com/twmb/franz-go/pkg/kgo"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -67,6 +68,38 @@ func startKafka(t *testing.T) []string {
 	return brokers
 }
 
+// readOneRecord reads a single record from the given Kafka topic within the timeout.
+func readOneRecord(t *testing.T, brokers []string, topic string, timeout time.Duration) *kgo.Record {
+	t.Helper()
+
+	consumer, err := kgo.NewClient(
+		kgo.SeedBrokers(brokers...),
+		kgo.ConsumeTopics(topic),
+		kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()),
+	)
+	if err != nil {
+		t.Fatalf("create kafka consumer: %v", err)
+	}
+	defer consumer.Close()
+
+	readCtx, readCancel := context.WithTimeout(context.Background(), timeout)
+	defer readCancel()
+
+	var received *kgo.Record
+	for received == nil && readCtx.Err() == nil {
+		fetches := consumer.PollFetches(readCtx)
+		fetches.EachRecord(func(r *kgo.Record) {
+			if received == nil {
+				received = r
+			}
+		})
+	}
+	if received == nil {
+		t.Fatal("no kafka message received within timeout")
+	}
+	return received
+}
+
 func TestScenario_KafkaAdapter(t *testing.T) {
 	connStr := startPostgres(t)
 
@@ -74,7 +107,7 @@ func TestScenario_KafkaAdapter(t *testing.T) {
 		brokers := startKafka(t)
 
 		logger := testLogger()
-		a := kafkaadapter.New(brokers, "", "", "", "", "", false, 0, 0, nil, logger)
+		a := kafkaadapter.New(brokers, "", "", "", "", "", false, 0, 0, nil, logger, "")
 
 		// Pre-create the topic to avoid "Unknown Topic Or Partition" race.
 		channel := "kafka_test"
@@ -108,24 +141,9 @@ func TestScenario_KafkaAdapter(t *testing.T) {
 		payload := `{"op":"INSERT","table":"orders","row":{"id":1,"item":"widget"}}`
 		sendNotify(t, connStr, channel, payload)
 
-		// Read back from the Kafka topic using kafka-go reader.
+		// Read back from the Kafka topic.
 		// Topic mapping: "kafka_test" → "kafka_test" (no colon, no substitution).
-		expectedTopic := channel
-		r := kafkago.NewReader(kafkago.ReaderConfig{
-			Brokers:     brokers,
-			Topic:       expectedTopic,
-			StartOffset: kafkago.FirstOffset,
-			MaxWait:     500 * time.Millisecond,
-		})
-		defer r.Close()
-
-		readCtx, readCancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer readCancel()
-
-		msg, err := r.ReadMessage(readCtx)
-		if err != nil {
-			t.Fatalf("read kafka message: %v", err)
-		}
+		msg := readOneRecord(t, brokers, channel, 15*time.Second)
 
 		// The adapter sends ev.Payload as the message value (raw inner JSON),
 		// with metadata in headers and message key.
@@ -174,28 +192,30 @@ func TestScenario_KafkaAdapter(t *testing.T) {
 		// Create a topic with max.message.bytes=100 via the admin client.
 		// Messages larger than 100 bytes will trigger MessageSizeTooLarge (terminal error).
 		tinyTopic := "kafka_dlq_test"
-		adminClient := &kafkago.Client{Addr: kafkago.TCP(brokers...)}
+		cl, err := kgo.NewClient(kgo.SeedBrokers(brokers...))
+		if err != nil {
+			t.Fatalf("create admin client: %v", err)
+		}
+		admin := kadm.NewClient(cl)
 		createCtx, createCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer createCancel()
-		_, err := adminClient.CreateTopics(createCtx, &kafkago.CreateTopicsRequest{
-			Topics: []kafkago.TopicConfig{
-				{
-					Topic:             tinyTopic,
-					NumPartitions:     1,
-					ReplicationFactor: 1,
-					ConfigEntries: []kafkago.ConfigEntry{
-						{ConfigName: "max.message.bytes", ConfigValue: "100"},
-					},
-				},
-			},
-		})
+		maxBytes := "100"
+		resps, err := admin.CreateTopics(createCtx, 1, 1, map[string]*string{
+			"max.message.bytes": &maxBytes,
+		}, tinyTopic)
+		cl.Close()
 		if err != nil {
 			t.Fatalf("create topic: %v", err)
+		}
+		for _, resp := range resps.Sorted() {
+			if resp.Err != nil {
+				t.Fatalf("create topic %s: %v", resp.Topic, resp.Err)
+			}
 		}
 
 		capDLQ := &captureDLQ{}
 		logger := testLogger()
-		a := kafkaadapter.New(brokers, tinyTopic, "", "", "", "", false, 0, 0, nil, logger)
+		a := kafkaadapter.New(brokers, tinyTopic, "", "", "", "", false, 0, 0, nil, logger, "")
 		a.SetDLQ(capDLQ)
 
 		// Wire a minimal pipeline.
@@ -250,5 +270,88 @@ func TestScenario_KafkaAdapter(t *testing.T) {
 			time.Sleep(200 * time.Millisecond)
 		}
 		t.Fatal("expected event to be recorded to DLQ, but none received within timeout")
+	})
+
+	t.Run("transactional exactly-once", func(t *testing.T) {
+		brokers := startKafka(t)
+
+		logger := testLogger()
+		channel := "kafka_txn_test"
+		ensureKafkaTopic(t, brokers, channel)
+
+		// Create adapter with transactional ID.
+		a := kafkaadapter.New(brokers, "", "", "", "", "", false, 0, 0, nil, logger, "pgcdc-test-txn")
+
+		// Wire pipeline.
+		pipelineCtx, pipelineCancel := context.WithCancel(context.Background())
+		det := listennotify.New(connStr, []string{channel}, 0, 0, logger)
+		b := bus.New(64, logger)
+
+		g, gCtx := errgroup.WithContext(pipelineCtx)
+		g.Go(func() error { return b.Start(gCtx) })
+		g.Go(func() error { return det.Start(gCtx, b.Ingest()) })
+
+		sub, err := b.Subscribe(a.Name())
+		if err != nil {
+			pipelineCancel()
+			t.Fatalf("subscribe kafka: %v", err)
+		}
+		g.Go(func() error { return a.Start(gCtx, sub) })
+
+		t.Cleanup(func() {
+			pipelineCancel()
+			_ = g.Wait()
+		})
+
+		// Wait for adapter to establish connection.
+		time.Sleep(3 * time.Second)
+
+		// Send a NOTIFY event.
+		payload := `{"op":"INSERT","table":"orders","row":{"id":99,"item":"txn-widget"}}`
+		sendNotify(t, connStr, channel, payload)
+
+		// Read from Kafka — transactional events are committed atomically.
+		// Use read_committed isolation via consumer option.
+		consumer, err := kgo.NewClient(
+			kgo.SeedBrokers(brokers...),
+			kgo.ConsumeTopics(channel),
+			kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()),
+			kgo.FetchIsolationLevel(kgo.ReadCommitted()),
+		)
+		if err != nil {
+			t.Fatalf("create kafka consumer: %v", err)
+		}
+		defer consumer.Close()
+
+		readCtx, readCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer readCancel()
+
+		var msg *kgo.Record
+		for msg == nil && readCtx.Err() == nil {
+			fetches := consumer.PollFetches(readCtx)
+			fetches.EachRecord(func(r *kgo.Record) {
+				if msg == nil {
+					msg = r
+				}
+			})
+		}
+		if msg == nil {
+			t.Fatal("no kafka message received within timeout")
+		}
+
+		// Verify the payload.
+		var raw map[string]any
+		if err := json.Unmarshal(msg.Value, &raw); err != nil {
+			t.Fatalf("unmarshal payload: %v\nraw: %s", err, string(msg.Value))
+		}
+		if raw["op"] != "INSERT" {
+			t.Errorf("payload op = %v, want INSERT", raw["op"])
+		}
+		if raw["table"] != "orders" {
+			t.Errorf("payload table = %v, want orders", raw["table"])
+		}
+
+		fmt.Fprintf(os.Stderr, "Transactional Kafka message received: topic=%s key=%s\n",
+			msg.Topic, string(msg.Key))
 	})
 }

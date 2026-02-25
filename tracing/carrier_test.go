@@ -3,11 +3,11 @@ package tracing
 import (
 	"testing"
 
-	kafkago "github.com/segmentio/kafka-go"
+	"github.com/twmb/franz-go/pkg/kgo"
 )
 
 func TestKafkaCarrier_SetGet(t *testing.T) {
-	headers := []kafkago.Header{
+	headers := []kgo.RecordHeader{
 		{Key: "existing", Value: []byte("value")},
 	}
 	carrier := KafkaCarrier{Headers: &headers}
@@ -40,7 +40,7 @@ func TestKafkaCarrier_SetGet(t *testing.T) {
 }
 
 func TestKafkaCarrier_Keys(t *testing.T) {
-	headers := []kafkago.Header{
+	headers := []kgo.RecordHeader{
 		{Key: "a", Value: []byte("1")},
 		{Key: "b", Value: []byte("2")},
 	}

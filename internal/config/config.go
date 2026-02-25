@@ -193,16 +193,17 @@ type GRPCConfig struct {
 }
 
 type KafkaConfig struct {
-	Brokers       []string      `mapstructure:"brokers"`
-	Topic         string        `mapstructure:"topic"`
-	SASLMechanism string        `mapstructure:"sasl_mechanism"`
-	SASLUsername  string        `mapstructure:"sasl_username"`
-	SASLPassword  string        `mapstructure:"sasl_password"`
-	TLS           bool          `mapstructure:"tls"`
-	TLSCAFile     string        `mapstructure:"tls_ca_file"`
-	BackoffBase   time.Duration `mapstructure:"backoff_base"`
-	BackoffCap    time.Duration `mapstructure:"backoff_cap"`
-	Encoding      string        `mapstructure:"encoding"` // json, avro, protobuf
+	Brokers         []string      `mapstructure:"brokers"`
+	Topic           string        `mapstructure:"topic"`
+	SASLMechanism   string        `mapstructure:"sasl_mechanism"`
+	SASLUsername    string        `mapstructure:"sasl_username"`
+	SASLPassword    string        `mapstructure:"sasl_password"`
+	TLS             bool          `mapstructure:"tls"`
+	TLSCAFile       string        `mapstructure:"tls_ca_file"`
+	BackoffBase     time.Duration `mapstructure:"backoff_base"`
+	BackoffCap      time.Duration `mapstructure:"backoff_cap"`
+	Encoding        string        `mapstructure:"encoding"`         // json, avro, protobuf
+	TransactionalID string        `mapstructure:"transactional_id"` // empty = idempotent only
 }
 
 type IncrementalSnapshotConfig struct {

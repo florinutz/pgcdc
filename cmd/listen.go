@@ -161,6 +161,7 @@ func init() {
 	f.String("kafka-sasl-password", "", "SASL password")
 	f.Bool("kafka-tls", false, "enable TLS for Kafka connection")
 	f.String("kafka-tls-ca-file", "", "CA certificate file for Kafka TLS")
+	f.String("kafka-transactional-id", "", "Kafka transactional.id for exactly-once delivery (empty = idempotent only)")
 
 	// Encoding flags (read directly, not viper-bound).
 	f.String("kafka-encoding", "json", "Kafka message encoding: json, avro, or protobuf")
@@ -279,6 +280,7 @@ func init() {
 	mustBindPFlag("kafka.sasl_password", f.Lookup("kafka-sasl-password"))
 	mustBindPFlag("kafka.tls", f.Lookup("kafka-tls"))
 	mustBindPFlag("kafka.tls_ca_file", f.Lookup("kafka-tls-ca-file"))
+	mustBindPFlag("kafka.transactional_id", f.Lookup("kafka-transactional-id"))
 	mustBindPFlag("kafka.encoding", f.Lookup("kafka-encoding"))
 	mustBindPFlag("nats.encoding", f.Lookup("nats-encoding"))
 	mustBindPFlag("encoding.schema_registry_url", f.Lookup("schema-registry-url"))

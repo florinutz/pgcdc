@@ -1,13 +1,13 @@
 package tracing
 
 import (
-	kafkago "github.com/segmentio/kafka-go"
+	"github.com/twmb/franz-go/pkg/kgo"
 )
 
-// KafkaCarrier adapts a slice of kafka-go headers to the
+// KafkaCarrier adapts a slice of franz-go record headers to the
 // propagation.TextMapCarrier interface for W3C trace context injection.
 type KafkaCarrier struct {
-	Headers *[]kafkago.Header
+	Headers *[]kgo.RecordHeader
 }
 
 // Get returns the value for the given key, or empty string if not found.
@@ -28,7 +28,7 @@ func (c KafkaCarrier) Set(key, value string) {
 			return
 		}
 	}
-	*c.Headers = append(*c.Headers, kafkago.Header{Key: key, Value: []byte(value)})
+	*c.Headers = append(*c.Headers, kgo.RecordHeader{Key: key, Value: []byte(value)})
 }
 
 // Keys returns all header keys.

@@ -21,24 +21,32 @@ import (
 	"github.com/florinutz/pgcdc/encoding/registry"
 
 	kafkaadapter "github.com/florinutz/pgcdc/adapter/kafka"
-	kafkago "github.com/segmentio/kafka-go"
+	"github.com/twmb/franz-go/pkg/kadm"
+	"github.com/twmb/franz-go/pkg/kgo"
 	"golang.org/x/sync/errgroup"
 )
 
-// ensureKafkaTopic pre-creates a Kafka topic so the writer doesn't hit
+// ensureKafkaTopic pre-creates a Kafka topic so the producer doesn't hit
 // "Unknown Topic Or Partition" on the first produce.
 func ensureKafkaTopic(t *testing.T, brokers []string, topic string) {
 	t.Helper()
-	client := &kafkago.Client{Addr: kafkago.TCP(brokers...)}
+	cl, err := kgo.NewClient(kgo.SeedBrokers(brokers...))
+	if err != nil {
+		t.Fatalf("create kafka client: %v", err)
+	}
+	defer cl.Close()
+
+	admin := kadm.NewClient(cl)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_, err := client.CreateTopics(ctx, &kafkago.CreateTopicsRequest{
-		Topics: []kafkago.TopicConfig{
-			{Topic: topic, NumPartitions: 1, ReplicationFactor: 1},
-		},
-	})
+	resps, err := admin.CreateTopics(ctx, 1, 1, nil, topic)
 	if err != nil {
 		t.Fatalf("create topic %s: %v", topic, err)
+	}
+	for _, resp := range resps.Sorted() {
+		if resp.Err != nil {
+			t.Fatalf("create topic %s: %v", resp.Topic, resp.Err)
+		}
 	}
 }
 
@@ -51,7 +59,7 @@ func TestScenario_Encoding(t *testing.T) {
 		logger := testLogger()
 		enc := encoding.NewAvroEncoder(logger)
 		capDLQ := &captureDLQ{}
-		a := kafkaadapter.New(brokers, "", "", "", "", "", false, 0, 0, enc, logger)
+		a := kafkaadapter.New(brokers, "", "", "", "", "", false, 0, 0, enc, logger, "")
 		a.SetDLQ(capDLQ)
 
 		// Pre-create the topic to avoid "Unknown Topic Or Partition" race.
@@ -87,23 +95,12 @@ func TestScenario_Encoding(t *testing.T) {
 		sendNotify(t, connStr, channel, payload)
 
 		// Read from Kafka.
-		r := kafkago.NewReader(kafkago.ReaderConfig{
-			Brokers:     brokers,
-			Topic:       channel,
-			StartOffset: kafkago.FirstOffset,
-			MaxWait:     500 * time.Millisecond,
-		})
-		defer r.Close()
-
-		readCtx, readCancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer readCancel()
-
-		msg, err := r.ReadMessage(readCtx)
-		if err != nil {
+		msg := readOneRecord(t, brokers, channel, 15*time.Second)
+		if msg == nil {
 			if recs := capDLQ.captured(); len(recs) > 0 {
-				t.Fatalf("read kafka message: %v (DLQ error: %s)", err, recs[0].Error)
+				t.Fatalf("no kafka message (DLQ error: %s)", recs[0].Error)
 			}
-			t.Fatalf("read kafka message: %v", err)
+			t.Fatal("no kafka message received")
 		}
 
 		// Verify the message is NOT plain JSON (it's Avro-encoded).
@@ -158,7 +155,7 @@ func TestScenario_Encoding(t *testing.T) {
 		regClient := registry.New(mockReg.URL(), "", "")
 		enc := encoding.NewAvroEncoder(logger, encoding.WithRegistry(regClient))
 		capDLQ := &captureDLQ{}
-		a := kafkaadapter.New(brokers, "", "", "", "", "", false, 0, 0, enc, logger)
+		a := kafkaadapter.New(brokers, "", "", "", "", "", false, 0, 0, enc, logger, "")
 		a.SetDLQ(capDLQ)
 
 		// Pre-create the topic.
@@ -193,23 +190,12 @@ func TestScenario_Encoding(t *testing.T) {
 		sendNotify(t, connStr, channel, payload)
 
 		// Read from Kafka.
-		r := kafkago.NewReader(kafkago.ReaderConfig{
-			Brokers:     brokers,
-			Topic:       channel,
-			StartOffset: kafkago.FirstOffset,
-			MaxWait:     500 * time.Millisecond,
-		})
-		defer r.Close()
-
-		readCtx, readCancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer readCancel()
-
-		msg, err := r.ReadMessage(readCtx)
-		if err != nil {
+		msg := readOneRecord(t, brokers, channel, 15*time.Second)
+		if msg == nil {
 			if recs := capDLQ.captured(); len(recs) > 0 {
-				t.Fatalf("read kafka message: %v (DLQ error: %s)", err, recs[0].Error)
+				t.Fatalf("no kafka message (DLQ error: %s)", recs[0].Error)
 			}
-			t.Fatalf("read kafka message: %v", err)
+			t.Fatal("no kafka message received")
 		}
 
 		// Verify the schema was registered.
@@ -251,7 +237,7 @@ func TestScenario_Encoding(t *testing.T) {
 		enc := encoding.NewAvroEncoder(logger, encoding.WithRegistry(regClient))
 
 		capDLQ := &captureDLQ{}
-		a := kafkaadapter.New(brokers, "", "", "", "", "", false, 0, 0, enc, logger)
+		a := kafkaadapter.New(brokers, "", "", "", "", "", false, 0, 0, enc, logger, "")
 		a.SetDLQ(capDLQ)
 
 		// Wire pipeline.

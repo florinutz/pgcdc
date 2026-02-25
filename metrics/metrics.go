@@ -204,6 +204,16 @@ var (
 		Help: "Total number of Kafka publish errors.",
 	})
 
+	KafkaTransactions = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "pgcdc_kafka_transactions_total",
+		Help: "Total number of Kafka transactions committed.",
+	})
+
+	KafkaTransactionErrors = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "pgcdc_kafka_transaction_errors_total",
+		Help: "Total number of Kafka transaction errors (aborts).",
+	})
+
 	// Outbox metrics.
 
 	OutboxPolled = promauto.NewCounter(prometheus.CounterOpts{

@@ -24,5 +24,6 @@ func makeKafkaAdapter(cfg config.Config, enc encoding.Encoder, logger *slog.Logg
 		cfg.Kafka.BackoffCap,
 		enc,
 		logger,
+		cfg.Kafka.TransactionalID,
 	), nil
 }
