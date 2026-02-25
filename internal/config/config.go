@@ -36,6 +36,7 @@ type Config struct {
 	Plugins             PluginConfig              `mapstructure:"plugins"`
 	Encoding            EncodingConfig            `mapstructure:"encoding"`
 	MySQL               MySQLConfig               `mapstructure:"mysql"`
+	MongoDB             MongoDBConfig             `mapstructure:"mongodb"`
 	OTel                OTelConfig                `mapstructure:"otel"`
 }
 
@@ -317,6 +318,18 @@ type MySQLConfig struct {
 	BackoffCap   time.Duration `mapstructure:"backoff_cap"`
 }
 
+type MongoDBConfig struct {
+	URI          string        `mapstructure:"uri"`
+	Scope        string        `mapstructure:"scope"` // "collection", "database", or "cluster"
+	Database     string        `mapstructure:"database"`
+	Collections  []string      `mapstructure:"collections"`
+	FullDocument string        `mapstructure:"full_document"` // "updateLookup", "default", etc.
+	MetadataDB   string        `mapstructure:"metadata_db"`
+	MetadataColl string        `mapstructure:"metadata_coll"`
+	BackoffBase  time.Duration `mapstructure:"backoff_base"`
+	BackoffCap   time.Duration `mapstructure:"backoff_cap"`
+}
+
 type EncodingConfig struct {
 	SchemaRegistryURL      string `mapstructure:"schema_registry_url"`
 	SchemaRegistryUsername string `mapstructure:"schema_registry_username"`
@@ -446,6 +459,13 @@ func Default() Config {
 		MySQL: MySQLConfig{
 			Flavor:       "mysql",
 			BinlogPrefix: "mysql-bin",
+			BackoffBase:  5 * time.Second,
+			BackoffCap:   60 * time.Second,
+		},
+		MongoDB: MongoDBConfig{
+			Scope:        "collection",
+			FullDocument: "updateLookup",
+			MetadataColl: "pgcdc_resume_tokens",
 			BackoffBase:  5 * time.Second,
 			BackoffCap:   60 * time.Second,
 		},

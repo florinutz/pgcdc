@@ -179,6 +179,20 @@ func (e *MySQLReplicationError) Unwrap() error {
 	return e.Err
 }
 
+// MongoDBChangeStreamError indicates that the MongoDB change stream detector encountered an error.
+type MongoDBChangeStreamError struct {
+	URI string
+	Err error
+}
+
+func (e *MongoDBChangeStreamError) Error() string {
+	return fmt.Sprintf("mongodb change stream error (uri %s): %v", e.URI, e.Err)
+}
+
+func (e *MongoDBChangeStreamError) Unwrap() error {
+	return e.Err
+}
+
 // PluginError indicates that a Wasm plugin call failed.
 type PluginError struct {
 	Plugin string

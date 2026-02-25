@@ -1,6 +1,6 @@
 # pgcdc
 
-PostgreSQL and MySQL change data capture (LISTEN/NOTIFY, WAL logical replication, outbox pattern, or MySQL binlog) streaming to webhooks, SSE, stdout, files, exec processes, PG tables, WebSockets, pgvector embeddings, NATS JetStream, Kafka, Typesense/Meilisearch, Redis, gRPC, and S3-compatible object storage.
+PostgreSQL, MySQL, and MongoDB change data capture (LISTEN/NOTIFY, WAL logical replication, outbox pattern, MySQL binlog, or MongoDB Change Streams) streaming to webhooks, SSE, stdout, files, exec processes, PG tables, WebSockets, pgvector embeddings, NATS JetStream, Kafka, Typesense/Meilisearch, Redis, gRPC, and S3-compatible object storage.
 
 ## Quick Start
 
@@ -25,7 +25,8 @@ Context ──> Pipeline (pgcdc.go orchestrates everything)
   (listennotify     |                   ──> Adapter (webhook)     ──> DLQ
    walreplication   |                   ──> Adapter (file)
    outbox           |                   ──> Adapter (exec)
-   or mysql)        |
+   mysql            |
+   or mongodb)      |
                     |                   ──> Adapter (pg_table)
                     |                   ──> Adapter (SSE broker)  ──> HTTP server
               ingest chan               ──> Adapter (WS broker)   ──> HTTP server
@@ -63,6 +64,7 @@ Context ──> Pipeline (pgcdc.go orchestrates everything)
 - **Event routing**: `--route adapter=channel1,channel2`. Bus-level filtering before fan-out. Adapters without routes receive all events.
 - **Outbox detector**: `--detector outbox` polls a transactional outbox table using `SELECT ... FOR UPDATE SKIP LOCKED` for concurrency-safe processing. Configurable DELETE or `processed_at` update cleanup.
 - **MySQL binlog detector**: `--detector mysql` connects to MySQL as a replication slave using `go-mysql-org/go-mysql` `BinlogSyncer`. Captures INSERT/UPDATE/DELETE from MySQL binlog (ROW format required). `--mysql-addr`, `--mysql-user`, `--mysql-password`, `--mysql-server-id` (required, > 0), `--mysql-tables` (schema.table filter), `--mysql-gtid` (GTID mode), `--mysql-flavor` (mysql/mariadb). Events emitted on `pgcdc:<schema>.<table>` channels. Column names resolved from TableMapEvent metadata (MySQL 8.0.1+), `information_schema` fallback, or `col_N` fallback. Position encoded as `(file_seq << 32) | offset` for checkpoint compatibility.
+- **MongoDB Change Streams detector**: `--detector mongodb` uses MongoDB's native Change Streams API (requires replica set or sharded cluster). Captures insert/update/replace/delete operations. `--mongodb-uri` (required), `--mongodb-database` (required unless cluster scope), `--mongodb-collections` (collection filter), `--mongodb-scope collection|database|cluster`, `--mongodb-full-document updateLookup|default`. Events emitted on `pgcdc:<database>.<collection>` channels. System events (drop/rename/invalidate) on `pgcdc:_mongo`. Resume tokens persisted to MongoDB metadata collection (`pgcdc_resume_tokens`) for crash-resumable streaming. `--mongodb-metadata-db`, `--mongodb-metadata-coll`. No cooperative checkpoint or backpressure support (no WAL LSN equivalent). Metrics: `pgcdc_mongodb_events_received_total`, `pgcdc_mongodb_errors_total`, `pgcdc_mongodb_resume_token_saves_total`.
 - **Shutdown**: Signal cancels root context. Bus closes subscriber channels. HTTP server gets `shutdown_timeout` (default 5s) `context.WithTimeout` for graceful drain.
 - **SIGHUP config reload**: `kill -HUP <pid>` re-reads the YAML config file and atomically swaps `transforms:` and `routes:` sections for all running adapters with zero event loss. CLI flags, plugin transforms, adapters, detectors, and bus mode remain immutable. Implementation: `sync/atomic.Pointer[wrapperConfig]` per adapter; the wrapper goroutine loads from this pointer on every event. `Pipeline.Reload(ReloadConfig)` rebuilds and stores atomically. Metrics: `pgcdc_config_reloads_total`, `pgcdc_config_reload_errors_total`. YAML `routes:` section maps adapter names to channel lists (CLI `--route` wins for same adapter name).
 - **Wiring**: `pgcdc.go` provides the reusable `Pipeline` type (detector + bus + adapters). `cmd/listen.go` adds CLI-specific HTTP servers on top.
@@ -72,7 +74,7 @@ Context ──> Pipeline (pgcdc.go orchestrates everything)
 - **Transform pipeline**: `--drop-columns col1,col2` and `--filter-operations INSERT,UPDATE` as CLI shortcuts. Full config via `transforms.global` and `transforms.adapter.<name>` in YAML. Built-in types: `drop_columns`, `rename_fields`, `mask` (zero/hash/redact modes), `filter` (by field value or operation), `debezium` (rewrites payload into Debezium envelope with before/after/op/source/transaction blocks — `--debezium-envelope`, `--debezium-connector-name`, `--debezium-database`). Applied per-adapter or globally; dropped events increment `pgcdc_transform_dropped_total`, errors increment `pgcdc_transform_errors_total`.
 - **Cooperative checkpointing**: `--cooperative-checkpoint` (requires `--persistent-slot` + `--detector wal`). Adapters call `AckFunc` after delivery; checkpoint only advances to `min(all adapter ack positions)`. Non-`Acknowledger` adapters are auto-acked on channel send. Metrics: `pgcdc_ack_position{adapter}`, `pgcdc_cooperative_checkpoint_lsn`.
 - **Wasm plugin system**: Extism-based (pure Go, no CGo) plugin system for 4 extension points: transforms, adapters, DLQ backends, checkpoint stores. Plugins compiled to `.wasm` from any Extism PDK language (Rust, Go, Python, TypeScript). Zero overhead when no plugins configured. JSON serialization (protobuf opt-in). Host functions: `pgcdc_log`, `pgcdc_metric_inc`, `pgcdc_http_request`. Config via `plugins:` YAML block or `--plugin-transform`, `--plugin-adapter`, `--dlq plugin`, `--checkpoint-plugin` CLI flags. Metrics: `pgcdc_plugin_calls_total`, `pgcdc_plugin_duration_seconds`, `pgcdc_plugin_errors_total`.
-- **Error types**: `pgcdcerr/` provides typed errors (`ErrBusClosed`, `WebhookDeliveryError`, `DetectorDisconnectedError`, `ExecProcessError`, `EmbeddingDeliveryError`, `NatsPublishError`, `OutboxProcessError`, `IcebergFlushError`, `S3UploadError`, `IncrementalSnapshotError`, `PluginError`) for `errors.Is`/`errors.As` matching.
+- **Error types**: `pgcdcerr/` provides typed errors (`ErrBusClosed`, `WebhookDeliveryError`, `DetectorDisconnectedError`, `ExecProcessError`, `EmbeddingDeliveryError`, `NatsPublishError`, `OutboxProcessError`, `IcebergFlushError`, `S3UploadError`, `IncrementalSnapshotError`, `PluginError`, `MongoDBChangeStreamError`) for `errors.Is`/`errors.As` matching.
 
 ## Code Conventions
 
@@ -127,7 +129,7 @@ Context ──> Pipeline (pgcdc.go orchestrates everything)
 
 ## Dependencies
 
-Direct deps (keep minimal): `pgx/v5` (PG driver), `pglogrepl` (WAL logical replication protocol), `cobra` + `viper` (CLI/config), `chi/v5` (HTTP router), `google/uuid` (UUIDv7), `errgroup` (concurrency), `prometheus/client_golang` (metrics), `coder/websocket` (WebSocket adapter), `nats-io/nats.go` (NATS JetStream adapter), `twmb/franz-go` (Kafka adapter), `redis/go-redis/v9` (Redis adapter), `google.golang.org/grpc` + `google.golang.org/protobuf` (gRPC adapter), `aws/aws-sdk-go-v2` (S3 adapter), `extism/go-sdk` (Wasm plugin runtime), `go-mysql-org/go-mysql` (MySQL binlog replication), `go-sql-driver/mysql` (MySQL driver for schema queries), `testcontainers-go` (test only).
+Direct deps (keep minimal): `pgx/v5` (PG driver), `pglogrepl` (WAL logical replication protocol), `cobra` + `viper` (CLI/config), `chi/v5` (HTTP router), `google/uuid` (UUIDv7), `errgroup` (concurrency), `prometheus/client_golang` (metrics), `coder/websocket` (WebSocket adapter), `nats-io/nats.go` (NATS JetStream adapter), `twmb/franz-go` (Kafka adapter), `redis/go-redis/v9` (Redis adapter), `google.golang.org/grpc` + `google.golang.org/protobuf` (gRPC adapter), `aws/aws-sdk-go-v2` (S3 adapter), `extism/go-sdk` (Wasm plugin runtime), `go-mysql-org/go-mysql` (MySQL binlog replication), `go-sql-driver/mysql` (MySQL driver for schema queries), `go.mongodb.org/mongo-driver/v2` (MongoDB Change Streams detector), `testcontainers-go` (test only).
 
 ## Testing
 
@@ -226,6 +228,7 @@ detector/       Change detection interface + implementations
   walreplication/ PostgreSQL WAL logical replication
   outbox/       Transactional outbox table polling
   mysql/        MySQL binlog replication
+  mongodb/      MongoDB Change Streams
 checkpoint/     LSN checkpoint storage
 event/          Event model
 health/         Component health checker
@@ -259,7 +262,7 @@ testutil/       Test utilities
 - `event/event.go` — Event model (UUIDv7, JSON payload, LSN for WAL events)
 - `health/health.go` — Component health checker
 - `metrics/metrics.go` — Prometheus metric definitions
-- `pgcdcerr/errors.go` — Typed errors (ErrBusClosed, WebhookDeliveryError, DetectorDisconnectedError, ExecProcessError, EmbeddingDeliveryError, NatsPublishError, OutboxProcessError, IcebergFlushError, IncrementalSnapshotError)
+- `pgcdcerr/errors.go` — Typed errors (ErrBusClosed, WebhookDeliveryError, DetectorDisconnectedError, ExecProcessError, EmbeddingDeliveryError, NatsPublishError, OutboxProcessError, IcebergFlushError, IncrementalSnapshotError, MongoDBChangeStreamError)
 - `adapter/embedding/embedding.go` — Embedding adapter: OpenAI-compatible API + pgvector UPSERT/DELETE
 - `adapter/nats/nats.go` — NATS JetStream adapter: publish with dedup + auto-stream creation
 - `adapter/kafka/kafka.go` — Kafka adapter: publish with RequireAll acks, SASL/TLS, DLQ for terminal errors
@@ -272,6 +275,8 @@ testutil/       Test utilities
 - `detector/outbox/outbox.go` — Outbox detector: poll-based with FOR UPDATE SKIP LOCKED
 - `detector/mysql/mysql.go` — MySQL binlog detector: BinlogSyncer-based CDC with reconnect loop
 - `detector/mysql/position.go` — MySQL binlog position ↔ uint64 encoding for checkpoint compatibility
+- `detector/mongodb/mongodb.go` — MongoDB Change Streams detector: watch → emit loop with reconnect
+- `detector/mongodb/resume.go` — Resume token load/save to MongoDB metadata collection
 - `detector/walreplication/oidmap.go` — Static OID → type name mapping for 40+ PG types
 - `checkpoint/checkpoint.go` — LSN checkpoint store interface + PG implementation
 - `cmd/slot.go` — Replication slot management CLI (list, status, drop)

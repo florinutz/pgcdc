@@ -425,6 +425,23 @@ var (
 		Help: "Total number of MySQL binlog replication errors.",
 	})
 
+	// MongoDB detector metrics.
+
+	MongoDBEventsReceived = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "pgcdc_mongodb_events_received_total",
+		Help: "Total number of events received from MongoDB change streams.",
+	})
+
+	MongoDBErrors = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "pgcdc_mongodb_errors_total",
+		Help: "Total number of MongoDB change stream errors.",
+	})
+
+	MongoDBResumeTokenSaves = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "pgcdc_mongodb_resume_token_saves_total",
+		Help: "Total number of resume token saves to MongoDB.",
+	})
+
 	// Config reload metrics.
 
 	ConfigReloads = promauto.NewCounter(prometheus.CounterOpts{

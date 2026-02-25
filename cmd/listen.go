@@ -32,6 +32,7 @@ import (
 	"github.com/florinutz/pgcdc/checkpoint"
 	"github.com/florinutz/pgcdc/detector"
 	"github.com/florinutz/pgcdc/detector/listennotify"
+	mongodbdetector "github.com/florinutz/pgcdc/detector/mongodb"
 	mysqldetector "github.com/florinutz/pgcdc/detector/mysql"
 	"github.com/florinutz/pgcdc/detector/outbox"
 	"github.com/florinutz/pgcdc/detector/walreplication"
@@ -69,7 +70,7 @@ func init() {
 	f.Int("retries", 5, "webhook max retries")
 	f.String("signing-key", "", "HMAC signing key for webhook")
 	f.String("metrics-addr", "", "standalone metrics/health server address (e.g. :9090)")
-	f.String("detector", "listen_notify", "detector type: listen_notify, wal, outbox, or mysql")
+	f.String("detector", "listen_notify", "detector type: listen_notify, wal, outbox, mysql, or mongodb")
 	f.String("publication", "", "PostgreSQL publication name (required for --detector wal)")
 	f.Bool("all-tables", false, "auto-create a FOR ALL TABLES publication and start WAL streaming (zero-config)")
 	f.Bool("tx-metadata", false, "include transaction metadata in WAL events (xid, commit_time, seq)")
@@ -246,6 +247,23 @@ func init() {
 	mustBindPFlag("mysql.use_gtid", f.Lookup("mysql-gtid"))
 	mustBindPFlag("mysql.flavor", f.Lookup("mysql-flavor"))
 	mustBindPFlag("mysql.binlog_prefix", f.Lookup("mysql-binlog-prefix"))
+
+	// MongoDB detector flags.
+	f.String("mongodb-uri", "", "MongoDB connection URI")
+	f.String("mongodb-scope", "collection", "MongoDB watch scope: collection, database, or cluster")
+	f.String("mongodb-database", "", "MongoDB database name")
+	f.StringSlice("mongodb-collections", nil, "MongoDB collections to watch (repeatable)")
+	f.String("mongodb-full-document", "updateLookup", "MongoDB fullDocument option: updateLookup, default, whenAvailable, required")
+	f.String("mongodb-metadata-db", "", "MongoDB database for resume token storage (default: same as --mongodb-database)")
+	f.String("mongodb-metadata-coll", "pgcdc_resume_tokens", "MongoDB collection for resume token storage")
+
+	mustBindPFlag("mongodb.uri", f.Lookup("mongodb-uri"))
+	mustBindPFlag("mongodb.scope", f.Lookup("mongodb-scope"))
+	mustBindPFlag("mongodb.database", f.Lookup("mongodb-database"))
+	mustBindPFlag("mongodb.collections", f.Lookup("mongodb-collections"))
+	mustBindPFlag("mongodb.full_document", f.Lookup("mongodb-full-document"))
+	mustBindPFlag("mongodb.metadata_db", f.Lookup("mongodb-metadata-db"))
+	mustBindPFlag("mongodb.metadata_coll", f.Lookup("mongodb-metadata-coll"))
 
 	// Bus mode flag.
 	f.String("bus-mode", "fast", "bus fan-out mode: fast (drop on full) or reliable (block on full)")
@@ -816,8 +834,26 @@ func runListen(cmd *cobra.Command, args []string) error {
 			mysqlDet.SetTracer(tp.Tracer("pgcdc"))
 		}
 		det = mysqlDet
+	case "mongodb":
+		if cfg.MongoDB.URI == "" {
+			return fmt.Errorf("--mongodb-uri is required for MongoDB detector")
+		}
+		if cfg.MongoDB.Scope != "cluster" && cfg.MongoDB.Database == "" {
+			return fmt.Errorf("--mongodb-database is required for MongoDB detector (unless --mongodb-scope=cluster)")
+		}
+		mongoDet := mongodbdetector.New(
+			cfg.MongoDB.URI, cfg.MongoDB.Scope, cfg.MongoDB.Database,
+			cfg.MongoDB.Collections, cfg.MongoDB.FullDocument,
+			cfg.MongoDB.MetadataDB, cfg.MongoDB.MetadataColl,
+			cfg.MongoDB.BackoffBase, cfg.MongoDB.BackoffCap,
+			logger,
+		)
+		if tp != nil {
+			mongoDet.SetTracer(tp.Tracer("pgcdc"))
+		}
+		det = mongoDet
 	default:
-		return fmt.Errorf("unknown detector type: %q (expected listen_notify, wal, outbox, or mysql)", cfg.Detector.Type)
+		return fmt.Errorf("unknown detector type: %q (expected listen_notify, wal, outbox, mysql, or mongodb)", cfg.Detector.Type)
 	}
 
 	// Create adapters.
