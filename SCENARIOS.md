@@ -37,6 +37,7 @@ Each scenario = one file, one user journey, happy path + one critical failure.
 | 31 | Source-aware backpressure | `backpressure_test.go` | WAL+persistent slot+cooperative checkpoint: backpressure controller transitions zones, events arrive throttled but not lost | Load shedding: critical adapter receives all events, best-effort adapter is shed in yellow zone |
 | 32 | Avro/Protobuf encoding | `encoding_test.go` | NOTIFY → detector → bus → Kafka adapter with Avro encoder produces binary Avro message; Schema Registry integration registers schema and prepends Confluent wire format header | Schema Registry unavailable: encoding error goes to DLQ, adapter continues |
 | 33 | OTel tracing propagation | `tracing_test.go` | NOTIFY → detector → bus → webhook adapter with stdout tracer: W3C `traceparent` header present in webhook HTTP requests with valid format | N/A (single happy path) |
+| 34 | DLQ commands | `dlq_test.go` | DLQ list shows failed records; replay delivers to new webhook and marks replayed_at; purge --replayed removes replayed records | Replay to still-failing adapter: record NOT marked as replayed |
 
 ## Adding a new scenario
 

@@ -124,10 +124,16 @@ func (d *PGTableDLQ) ensureTable(ctx context.Context) error {
 		adapter TEXT NOT NULL,
 		error TEXT NOT NULL,
 		payload JSONB NOT NULL,
-		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		replayed_at TIMESTAMPTZ
 	)`, safeTable)
 	if _, err := d.conn.Exec(ctx, ddl); err != nil {
 		return fmt.Errorf("create dlq table: %w", err)
+	}
+	// Migrate existing tables that lack the replayed_at column.
+	alter := fmt.Sprintf(`ALTER TABLE %s ADD COLUMN IF NOT EXISTS replayed_at TIMESTAMPTZ`, safeTable)
+	if _, err := d.conn.Exec(ctx, alter); err != nil {
+		return fmt.Errorf("alter dlq table: %w", err)
 	}
 	d.created = true
 	return nil
