@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/florinutz/pgcdc/event"
 	"github.com/florinutz/pgcdc/internal/backoff"
@@ -34,6 +36,12 @@ type Detector struct {
 	backoffBase   time.Duration
 	backoffCap    time.Duration
 	logger        *slog.Logger
+	tracer        trace.Tracer
+}
+
+// SetTracer sets the OpenTelemetry tracer for creating per-event spans.
+func (d *Detector) SetTracer(t trace.Tracer) {
+	d.tracer = t
 }
 
 // New creates an outbox detector. Duration and size parameters default to
@@ -192,6 +200,20 @@ func (d *Detector) poll(ctx context.Context, conn *pgx.Conn, safeTable string, e
 		if evErr != nil {
 			d.logger.Error("create event failed", "error", evErr, "outbox_id", r.ID)
 			continue
+		}
+
+		if d.tracer != nil {
+			_, span := d.tracer.Start(ctx, "pgcdc.detect",
+				trace.WithSpanKind(trace.SpanKindProducer),
+				trace.WithAttributes(
+					attribute.String("pgcdc.event.id", ev.ID),
+					attribute.String("pgcdc.channel", ev.Channel),
+					attribute.String("pgcdc.operation", r.Operation),
+					attribute.String("pgcdc.source", source),
+				),
+			)
+			ev.SpanContext = span.SpanContext()
+			span.End()
 		}
 
 		select {

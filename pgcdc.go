@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"log/slog"
 
+	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
+
 	"github.com/florinutz/pgcdc/ack"
 	"github.com/florinutz/pgcdc/adapter"
 	"github.com/florinutz/pgcdc/backpressure"
@@ -36,6 +39,13 @@ type Throttleable interface {
 	SetBackpressureController(ctrl *backpressure.Controller)
 }
 
+// Traceable is implemented by detectors that support OpenTelemetry tracing.
+// When enabled, the detector creates a PRODUCER span per event and stores
+// its SpanContext on the event for downstream correlation.
+type Traceable interface {
+	SetTracer(t trace.Tracer)
+}
+
 // Pipeline orchestrates a detector, bus, and set of adapters into a running
 // event pipeline. It is the primary entry point for using pgcdc as a library.
 type Pipeline struct {
@@ -60,6 +70,9 @@ type Pipeline struct {
 
 	// Backpressure controller (nil when disabled).
 	backpressureCtrl *backpressure.Controller
+
+	// OpenTelemetry tracer provider (noop when not configured).
+	tracerProvider trace.TracerProvider
 }
 
 // Option configures a Pipeline.
@@ -167,6 +180,14 @@ func WithBackpressure(ctrl *backpressure.Controller) Option {
 	}
 }
 
+// WithTracerProvider sets the OpenTelemetry TracerProvider for the pipeline.
+// If not set, a noop provider is used (zero overhead).
+func WithTracerProvider(tp trace.TracerProvider) Option {
+	return func(p *Pipeline) {
+		p.tracerProvider = tp
+	}
+}
+
 // DLQAware is implemented by adapters that can record failed events to a DLQ.
 type DLQAware interface {
 	SetDLQ(d dlq.DLQ)
@@ -184,15 +205,24 @@ func NewPipeline(det detector.Detector, opts ...Option) *Pipeline {
 	if p.logger == nil {
 		p.logger = slog.Default()
 	}
+	if p.tracerProvider == nil {
+		p.tracerProvider = noop.NewTracerProvider()
+	}
 	if p.health == nil {
 		p.health = health.NewChecker()
 		p.health.Register("detector")
 		p.health.Register("bus")
 	}
+
+	// Wire tracer into adapters.
+	tracer := p.tracerProvider.Tracer("github.com/florinutz/pgcdc")
 	for _, a := range p.adapters {
 		p.health.Register(a.Name())
 		if da, ok := a.(DLQAware); ok && p.dlq != nil {
 			da.SetDLQ(p.dlq)
+		}
+		if ta, ok := a.(adapter.Traceable); ok {
+			ta.SetTracer(tracer)
 		}
 	}
 	if p.backpressureCtrl != nil {
@@ -243,6 +273,12 @@ func (p *Pipeline) Run(ctx context.Context) error {
 		if t, ok := p.detector.(Throttleable); ok {
 			t.SetBackpressureController(p.backpressureCtrl)
 		}
+	}
+
+	// Wire tracer into detector if supported.
+	if t, ok := p.detector.(Traceable); ok {
+		tracer := p.tracerProvider.Tracer("github.com/florinutz/pgcdc")
+		t.SetTracer(tracer)
 	}
 
 	g, gCtx := errgroup.WithContext(ctx)

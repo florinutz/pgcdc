@@ -8,8 +8,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/nats-io/nats.go"
+	natsclient "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/florinutz/pgcdc/adapter"
 	"github.com/florinutz/pgcdc/encoding"
@@ -32,7 +37,11 @@ type Adapter struct {
 	backoffCap    time.Duration
 	logger        *slog.Logger
 	ackFn         adapter.AckFunc
+	tracer        trace.Tracer
 }
+
+// SetTracer implements adapter.Traceable.
+func (a *Adapter) SetTracer(t trace.Tracer) { a.tracer = t }
 
 // SetAckFunc implements adapter.Acknowledger.
 func (a *Adapter) SetAckFunc(fn adapter.AckFunc) { a.ackFn = fn }
@@ -109,15 +118,15 @@ func (a *Adapter) Start(ctx context.Context, events <-chan event.Event) error {
 }
 
 func (a *Adapter) run(ctx context.Context, events <-chan event.Event) error {
-	opts := []nats.Option{
-		nats.Name("pgcdc"),
-		nats.MaxReconnects(-1),
+	opts := []natsclient.Option{
+		natsclient.Name("pgcdc"),
+		natsclient.MaxReconnects(-1),
 	}
 	if a.credFile != "" {
-		opts = append(opts, nats.UserCredentials(a.credFile))
+		opts = append(opts, natsclient.UserCredentials(a.credFile))
 	}
 
-	nc, err := nats.Connect(a.url, opts...)
+	nc, err := natsclient.Connect(a.url, opts...)
 	if err != nil {
 		return fmt.Errorf("nats connect: %w", err)
 	}
@@ -171,19 +180,56 @@ func (a *Adapter) run(ctx context.Context, events <-chan event.Event) error {
 				data = encoded
 			}
 
+			// Build NATS message with headers for trace context and dedup.
+			msg := &natsclient.Msg{
+				Subject: subject,
+				Data:    data,
+				Header:  natsclient.Header{},
+			}
+			msg.Header.Set("Nats-Msg-Id", ev.ID)
+
+			// Create delivery span and inject trace context into NATS headers.
+			var span trace.Span
+			if a.tracer != nil {
+				var spanOpts []trace.SpanStartOption
+				spanOpts = append(spanOpts,
+					trace.WithSpanKind(trace.SpanKindConsumer),
+					trace.WithAttributes(
+						attribute.String("pgcdc.adapter", adapterName),
+						attribute.String("pgcdc.event.id", ev.ID),
+						attribute.String("pgcdc.channel", ev.Channel),
+						attribute.String("pgcdc.operation", ev.Operation),
+					),
+				)
+				pubCtx := ctx
+				if ev.SpanContext.IsValid() {
+					spanOpts = append(spanOpts, trace.WithLinks(trace.Link{SpanContext: ev.SpanContext}))
+					pubCtx = trace.ContextWithRemoteSpanContext(ctx, ev.SpanContext)
+				}
+				pubCtx, span = a.tracer.Start(pubCtx, "pgcdc.adapter.deliver", spanOpts...)
+				// nats.Header is http.Header — use propagation.HeaderCarrier directly.
+				otel.GetTextMapPropagator().Inject(pubCtx, propagation.HeaderCarrier(msg.Header))
+			}
+
 			start := time.Now()
-			_, err = js.Publish(ctx, subject, data,
-				jetstream.WithMsgID(ev.ID),
-			)
+			_, err = js.PublishMsg(ctx, msg)
 			duration := time.Since(start)
 			metrics.NatsPublishDuration.Observe(duration.Seconds())
 
 			if err != nil {
 				metrics.NatsErrors.Inc()
+				if span != nil {
+					span.RecordError(err)
+					span.SetStatus(codes.Error, err.Error())
+					span.End()
+				}
 				// Do NOT ack: return error to trigger reconnect (event is lost — pre-existing limitation).
 				return fmt.Errorf("publish event %s: %w", ev.ID, err)
 			}
 
+			if span != nil {
+				span.End()
+			}
 			metrics.NatsPublished.Inc()
 			metrics.EventsDelivered.WithLabelValues(adapterName).Inc()
 			if a.ackFn != nil && ev.LSN > 0 {

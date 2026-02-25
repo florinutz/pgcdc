@@ -19,6 +19,9 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgproto3"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/florinutz/pgcdc/backpressure"
 	"github.com/florinutz/pgcdc/checkpoint"
 	"github.com/florinutz/pgcdc/event"
@@ -103,6 +106,9 @@ type Detector struct {
 	// backpressureCtrl is the backpressure controller that throttles/pauses
 	// the detector when WAL lag is too high.
 	backpressureCtrl *backpressure.Controller
+
+	// tracer creates spans for event detection. Nil/noop when tracing disabled.
+	tracer trace.Tracer
 }
 
 // txState tracks the current transaction when txMetadata is enabled.
@@ -211,6 +217,11 @@ func (d *Detector) SetProgressStore(store snapshot.ProgressStore) {
 // recycling past what adapters have confirmed.
 func (d *Detector) SetCooperativeLSN(fn func() uint64) {
 	d.cooperativeLSNFn = fn
+}
+
+// SetTracer sets the OpenTelemetry tracer for creating per-event spans.
+func (d *Detector) SetTracer(t trace.Tracer) {
+	d.tracer = t
 }
 
 // SetBackpressureController sets the backpressure controller that will
@@ -658,6 +669,22 @@ func (d *Detector) emitEvent(
 
 	ev.LSN = uint64(currentLSN)
 
+	if d.tracer != nil {
+		_, span := d.tracer.Start(ctx, "pgcdc.detect",
+			trace.WithSpanKind(trace.SpanKindProducer),
+			trace.WithAttributes(
+				attribute.String("pgcdc.event.id", ev.ID),
+				attribute.String("pgcdc.channel", ev.Channel),
+				attribute.String("pgcdc.operation", op),
+				attribute.String("pgcdc.source", source),
+				attribute.Int64("pgcdc.lsn", int64(currentLSN)),
+				attribute.String("pgcdc.table", rel.RelationName),
+			),
+		)
+		ev.SpanContext = span.SpanContext()
+		span.End()
+	}
+
 	select {
 	case events <- ev:
 	case <-ctx.Done():
@@ -690,6 +717,21 @@ func (d *Detector) emitMarker(ctx context.Context, events chan<- event.Event, op
 	}
 
 	ev.LSN = uint64(currentLSN)
+
+	if d.tracer != nil {
+		_, span := d.tracer.Start(ctx, "pgcdc.detect",
+			trace.WithSpanKind(trace.SpanKindProducer),
+			trace.WithAttributes(
+				attribute.String("pgcdc.event.id", ev.ID),
+				attribute.String("pgcdc.channel", txnChannel),
+				attribute.String("pgcdc.operation", op),
+				attribute.String("pgcdc.source", source),
+				attribute.Int64("pgcdc.lsn", int64(currentLSN)),
+			),
+		)
+		ev.SpanContext = span.SpanContext()
+		span.End()
+	}
 
 	select {
 	case events <- ev:
@@ -855,6 +897,22 @@ func (d *Detector) emitSchemaChange(ctx context.Context, events chan<- event.Eve
 	}
 
 	ev.LSN = uint64(currentLSN)
+
+	if d.tracer != nil {
+		_, span := d.tracer.Start(ctx, "pgcdc.detect",
+			trace.WithSpanKind(trace.SpanKindProducer),
+			trace.WithAttributes(
+				attribute.String("pgcdc.event.id", ev.ID),
+				attribute.String("pgcdc.channel", schemaChannel),
+				attribute.String("pgcdc.operation", "SCHEMA_CHANGE"),
+				attribute.String("pgcdc.source", source),
+				attribute.Int64("pgcdc.lsn", int64(currentLSN)),
+				attribute.String("pgcdc.table", rel.RelationName),
+			),
+		)
+		ev.SpanContext = span.SpanContext()
+		span.End()
+	}
 
 	select {
 	case events <- ev:

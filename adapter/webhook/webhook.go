@@ -13,12 +13,17 @@ import (
 	"net/http"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/florinutz/pgcdc/adapter"
 	"github.com/florinutz/pgcdc/dlq"
 	"github.com/florinutz/pgcdc/event"
 	"github.com/florinutz/pgcdc/internal/backoff"
 	"github.com/florinutz/pgcdc/metrics"
 	"github.com/florinutz/pgcdc/pgcdcerr"
+	"github.com/florinutz/pgcdc/tracing"
 )
 
 const (
@@ -41,7 +46,11 @@ type Adapter struct {
 	logger      *slog.Logger
 	dlq         dlq.DLQ
 	ackFn       adapter.AckFunc
+	tracer      trace.Tracer
 }
+
+// SetTracer implements adapter.Traceable.
+func (a *Adapter) SetTracer(t trace.Tracer) { a.tracer = t }
 
 // SetDLQ sets the dead letter queue for failed deliveries.
 func (a *Adapter) SetDLQ(d dlq.DLQ) { a.dlq = d }
@@ -99,7 +108,33 @@ func (a *Adapter) Start(ctx context.Context, events <-chan event.Event) error {
 				a.logger.Info("webhook adapter stopping", "reason", "channel closed")
 				return nil
 			}
-			if err := a.deliver(ctx, ev); err != nil {
+
+			// Create delivery span linked to the detector span.
+			deliverCtx := ctx
+			var span trace.Span
+			if a.tracer != nil {
+				var opts []trace.SpanStartOption
+				opts = append(opts,
+					trace.WithSpanKind(trace.SpanKindConsumer),
+					trace.WithAttributes(
+						attribute.String("pgcdc.adapter", "webhook"),
+						attribute.String("pgcdc.event.id", ev.ID),
+						attribute.String("pgcdc.channel", ev.Channel),
+						attribute.String("pgcdc.operation", ev.Operation),
+					),
+				)
+				if ev.SpanContext.IsValid() {
+					opts = append(opts, trace.WithLinks(trace.Link{SpanContext: ev.SpanContext}))
+					deliverCtx = trace.ContextWithRemoteSpanContext(ctx, ev.SpanContext)
+				}
+				deliverCtx, span = a.tracer.Start(deliverCtx, "pgcdc.adapter.deliver", opts...)
+			}
+
+			if err := a.deliver(deliverCtx, ev); err != nil {
+				if span != nil {
+					span.RecordError(err)
+					span.SetStatus(codes.Error, err.Error())
+				}
 				a.logger.Error("delivery failed, skipping event",
 					"event_id", ev.ID,
 					"channel", ev.Channel,
@@ -110,6 +145,9 @@ func (a *Adapter) Start(ctx context.Context, events <-chan event.Event) error {
 						a.logger.Error("dlq record failed", "error", dlqErr)
 					}
 				}
+			}
+			if span != nil {
+				span.End()
 			}
 			// Ack after terminal outcome (delivery, DLQ record, or non-retryable skip).
 			if a.ackFn != nil && ev.LSN > 0 {
@@ -162,6 +200,9 @@ func (a *Adapter) deliver(ctx context.Context, ev event.Event) error {
 		req.Header.Set("User-Agent", userAgent)
 		req.Header.Set("X-PGCDC-Event-ID", ev.ID)
 		req.Header.Set("X-PGCDC-Channel", ev.Channel)
+
+		// Inject W3C trace context (traceparent) if span is active.
+		tracing.InjectHTTP(ctx, req.Header)
 
 		// Custom headers from config.
 		for k, v := range a.headers {

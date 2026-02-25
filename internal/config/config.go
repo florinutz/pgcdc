@@ -33,6 +33,13 @@ type Config struct {
 	Backpressure        BackpressureConfig        `mapstructure:"backpressure"`
 	Plugins             PluginConfig              `mapstructure:"plugins"`
 	Encoding            EncodingConfig            `mapstructure:"encoding"`
+	OTel                OTelConfig                `mapstructure:"otel"`
+}
+
+type OTelConfig struct {
+	Exporter    string  `mapstructure:"exporter"`
+	Endpoint    string  `mapstructure:"endpoint"`
+	SampleRatio float64 `mapstructure:"sample_ratio"`
 }
 
 type BusConfig struct {
@@ -388,6 +395,10 @@ func Default() Config {
 			CriticalThreshold: 2 * 1024 * 1024 * 1024, // 2 GB
 			MaxThrottle:       500 * time.Millisecond,
 			PollInterval:      10 * time.Second,
+		},
+		OTel: OTelConfig{
+			Exporter:    "none",
+			SampleRatio: 1.0,
 		},
 		Embedding: EmbeddingConfig{
 			Model:       "text-embedding-3-small",

@@ -19,4 +19,5 @@ message Event {
   bytes payload = 4;
   string source = 5;
   string created_at = 6;
+  string traceparent = 7;
 }

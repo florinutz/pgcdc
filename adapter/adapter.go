@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/florinutz/pgcdc/event"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type Adapter interface {
@@ -22,4 +23,10 @@ type AckFunc func(lsn uint64)
 // AckFunc via SetAckFunc when cooperative checkpointing is enabled.
 type Acknowledger interface {
 	SetAckFunc(fn AckFunc)
+}
+
+// Traceable is implemented by adapters that support OpenTelemetry tracing.
+// The pipeline injects a tracer when tracing is enabled.
+type Traceable interface {
+	SetTracer(t trace.Tracer)
 }

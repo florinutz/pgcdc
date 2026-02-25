@@ -11,6 +11,7 @@ import (
 	pb "github.com/florinutz/pgcdc/adapter/grpc/proto"
 	"github.com/florinutz/pgcdc/event"
 	"github.com/florinutz/pgcdc/metrics"
+	"github.com/florinutz/pgcdc/tracing"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -126,12 +127,13 @@ func (a *Adapter) removeClient(id uint64) {
 
 func (a *Adapter) broadcast(ev event.Event) {
 	protoEv := &pb.Event{
-		Id:        ev.ID,
-		Channel:   ev.Channel,
-		Operation: ev.Operation,
-		Payload:   ev.Payload,
-		Source:    ev.Source,
-		CreatedAt: ev.CreatedAt.Format(time.RFC3339Nano),
+		Id:          ev.ID,
+		Channel:     ev.Channel,
+		Operation:   ev.Operation,
+		Payload:     ev.Payload,
+		Source:      ev.Source,
+		CreatedAt:   ev.CreatedAt.Format(time.RFC3339Nano),
+		Traceparent: tracing.FormatTraceparent(ev.SpanContext),
 	}
 
 	a.mu.RLock()

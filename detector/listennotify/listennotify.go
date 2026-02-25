@@ -7,6 +7,9 @@ import (
 	"log/slog"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/florinutz/pgcdc/event"
 	"github.com/florinutz/pgcdc/internal/backoff"
 	"github.com/florinutz/pgcdc/pgcdcerr"
@@ -29,6 +32,12 @@ type Detector struct {
 	backoffBase time.Duration
 	backoffCap  time.Duration
 	logger      *slog.Logger
+	tracer      trace.Tracer
+}
+
+// SetTracer sets the OpenTelemetry tracer for creating per-event spans.
+func (d *Detector) SetTracer(t trace.Tracer) {
+	d.tracer = t
 }
 
 // New creates a LISTEN/NOTIFY detector for the given channels.
@@ -128,6 +137,21 @@ func (d *Detector) run(ctx context.Context, events chan<- event.Event) error {
 			d.logger.Error("failed to create event", "error", err)
 			continue
 		}
+
+		if d.tracer != nil {
+			_, span := d.tracer.Start(ctx, "pgcdc.detect",
+				trace.WithSpanKind(trace.SpanKindProducer),
+				trace.WithAttributes(
+					attribute.String("pgcdc.event.id", ev.ID),
+					attribute.String("pgcdc.channel", ev.Channel),
+					attribute.String("pgcdc.operation", op),
+					attribute.String("pgcdc.source", source),
+				),
+			)
+			ev.SpanContext = span.SpanContext()
+			span.End()
+		}
+
 		select {
 		case events <- ev:
 		case <-ctx.Done():

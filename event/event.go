@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Common operation constants.
@@ -24,14 +26,15 @@ type TransactionInfo struct {
 }
 
 type Event struct {
-	ID          string           `json:"id"`
-	Channel     string           `json:"channel"`
-	Operation   string           `json:"operation"`
-	Payload     json.RawMessage  `json:"payload"`
-	Source      string           `json:"source"`
-	CreatedAt   time.Time        `json:"created_at"`
-	Transaction *TransactionInfo `json:"transaction,omitempty"`
-	LSN         uint64           `json:"-"` // WAL position; 0 for non-WAL sources and snapshot events
+	ID          string            `json:"id"`
+	Channel     string            `json:"channel"`
+	Operation   string            `json:"operation"`
+	Payload     json.RawMessage   `json:"payload"`
+	Source      string            `json:"source"`
+	CreatedAt   time.Time         `json:"created_at"`
+	Transaction *TransactionInfo  `json:"transaction,omitempty"`
+	LSN         uint64            `json:"-"` // WAL position; 0 for non-WAL sources and snapshot events
+	SpanContext trace.SpanContext `json:"-"` // Trace context; zero value when tracing disabled
 }
 
 func New(channel, operation string, payload json.RawMessage, source string) (Event, error) {

@@ -10,11 +10,16 @@ import (
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/florinutz/pgcdc/dlq"
 	"github.com/florinutz/pgcdc/event"
 	"github.com/florinutz/pgcdc/internal/backoff"
 	"github.com/florinutz/pgcdc/metrics"
 	"github.com/florinutz/pgcdc/pgcdcerr"
+	"github.com/florinutz/pgcdc/tracing"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -47,7 +52,11 @@ type Adapter struct {
 	client      *http.Client
 	logger      *slog.Logger
 	dlq         dlq.DLQ
+	tracer      trace.Tracer
 }
+
+// SetTracer implements adapter.Traceable.
+func (a *Adapter) SetTracer(t trace.Tracer) { a.tracer = t }
 
 // SetDLQ sets the dead letter queue for failed deliveries.
 func (a *Adapter) SetDLQ(d dlq.DLQ) { a.dlq = d }
@@ -181,25 +190,39 @@ func (a *Adapter) run(ctx context.Context, events <-chan event.Event) error {
 				return nil
 			}
 
+			embedCtx, span := a.startDeliverySpan(ctx, ev)
+			_ = embedCtx // used for API calls below
+
 			sourceID, sourceTable, content, isDel := a.extractPayload(ev)
 			if sourceID == "" {
 				a.logger.Warn("could not extract source ID, skipping event",
 					"event_id", ev.ID,
 					"id_column", a.idColumn,
 				)
+				if span != nil {
+					span.End()
+				}
 				continue
 			}
 
 			if isDel {
-				if _, err := conn.Exec(ctx, deleteSQL, sourceID); err != nil {
+				if _, err := conn.Exec(embedCtx, deleteSQL, sourceID); err != nil {
 					if conn.IsClosed() {
+						if span != nil {
+							span.RecordError(err)
+							span.SetStatus(codes.Error, err.Error())
+							span.End()
+						}
 						return fmt.Errorf("delete (connection lost): %w", err)
 					}
 					a.logger.Warn("delete failed, skipping event", "event_id", ev.ID, "error", err)
-					continue
+				} else {
+					metrics.EventsDelivered.WithLabelValues("embedding").Inc()
+					a.logger.Debug("vector deleted", "source_id", sourceID)
 				}
-				metrics.EventsDelivered.WithLabelValues("embedding").Inc()
-				a.logger.Debug("vector deleted", "source_id", sourceID)
+				if span != nil {
+					span.End()
+				}
 				continue
 			}
 
@@ -208,12 +231,20 @@ func (a *Adapter) run(ctx context.Context, events <-chan event.Event) error {
 					"event_id", ev.ID,
 					"columns", a.columns,
 				)
+				if span != nil {
+					span.End()
+				}
 				continue
 			}
 
-			vec, err := a.embed(ctx, ev.ID, content)
+			vec, err := a.embed(embedCtx, ev.ID, content)
 			if err != nil {
 				metrics.EmbeddingAPIErrors.Inc()
+				if span != nil {
+					span.RecordError(err)
+					span.SetStatus(codes.Error, err.Error())
+					span.End()
+				}
 				a.logger.Error("embedding failed, skipping event", "event_id", ev.ID, "error", err)
 				if a.dlq != nil {
 					if dlqErr := a.dlq.Record(ctx, ev, "embedding", err); dlqErr != nil {
@@ -224,17 +255,28 @@ func (a *Adapter) run(ctx context.Context, events <-chan event.Event) error {
 			}
 
 			vecStr := formatVector(vec)
-			_, err = conn.Exec(ctx, upsertSQL, sourceID, sourceTable, content, vecStr, ev.ID)
+			_, err = conn.Exec(embedCtx, upsertSQL, sourceID, sourceTable, content, vecStr, ev.ID)
 			if err != nil {
 				if conn.IsClosed() {
+					if span != nil {
+						span.RecordError(err)
+						span.SetStatus(codes.Error, err.Error())
+						span.End()
+					}
 					return fmt.Errorf("upsert (connection lost): %w", err)
 				}
 				a.logger.Warn("upsert failed, skipping event", "event_id", ev.ID, "error", err)
+				if span != nil {
+					span.End()
+				}
 				continue
 			}
 
 			metrics.EventsDelivered.WithLabelValues("embedding").Inc()
 			a.logger.Debug("vector upserted", "source_id", sourceID, "source_table", sourceTable)
+			if span != nil {
+				span.End()
+			}
 		}
 	}
 }
@@ -253,6 +295,29 @@ type embeddingResponse struct {
 	Usage struct {
 		TotalTokens int `json:"total_tokens"`
 	} `json:"usage"`
+}
+
+// startDeliverySpan creates a CONSUMER span linked to the detector span on the event.
+// Returns the enriched context and span (nil when tracing is disabled).
+func (a *Adapter) startDeliverySpan(ctx context.Context, ev event.Event) (context.Context, trace.Span) {
+	if a.tracer == nil {
+		return ctx, nil
+	}
+	var opts []trace.SpanStartOption
+	opts = append(opts,
+		trace.WithSpanKind(trace.SpanKindConsumer),
+		trace.WithAttributes(
+			attribute.String("pgcdc.adapter", "embedding"),
+			attribute.String("pgcdc.event.id", ev.ID),
+			attribute.String("pgcdc.channel", ev.Channel),
+			attribute.String("pgcdc.operation", ev.Operation),
+		),
+	)
+	if ev.SpanContext.IsValid() {
+		opts = append(opts, trace.WithLinks(trace.Link{SpanContext: ev.SpanContext}))
+		ctx = trace.ContextWithRemoteSpanContext(ctx, ev.SpanContext)
+	}
+	return a.tracer.Start(ctx, "pgcdc.adapter.deliver", opts...)
 }
 
 // embed calls the embedding API with per-event retry and returns the vector.
@@ -288,6 +353,8 @@ func (a *Adapter) embed(ctx context.Context, eventID, text string) ([]float64, e
 		if a.apiKey != "" {
 			req.Header.Set("Authorization", "Bearer "+a.apiKey)
 		}
+		// Inject W3C trace context if span is active.
+		tracing.InjectHTTP(ctx, req.Header)
 
 		start := time.Now()
 		resp, err := a.client.Do(req)

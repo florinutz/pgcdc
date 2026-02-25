@@ -31,16 +31,12 @@ Each scenario = one file, one user journey, happy path + one critical failure.
 | 25 | Incremental snapshot | `incremental_snapshot_test.go` | Signal table INSERT triggers chunked snapshot alongside live WAL streaming; SNAPSHOT_STARTED + data events + SNAPSHOT_COMPLETED emitted | Crash recovery: cancel mid-snapshot, verify progress saved, restart resumes from last chunk |
 | 26 | Transform pipeline | `transform_test.go` | NOTIFY → detector → bus → transform chain (drop columns, mask, rename) → stdout outputs transformed payload | Filter drops non-matching events: FilterField("op","UPDATE") drops INSERT, passes UPDATE |
 | 27 | Cooperative checkpoint | `cooperative_checkpoint_test.go` | WAL+persistent slot+reliable bus mode: stdout adapter acks events, checkpoint advances to min acked LSN | Slow adapter delays checkpoint: checkpoint stalls at slow adapter's position, advances after release |
-
 | 28 | Kafka delivery | `kafka_test.go` | NOTIFY → detector → bus → kafka adapter publishes to topic with correct key/headers; channel name maps to topic (`pgcdc:orders`→`pgcdc.orders`) | Terminal topic error: event recorded to DLQ, adapter continues |
-
 | 29 | Wasm plugins | `plugin_test.go` | Wasm transform drops field from payload; Wasm transform returns empty = event dropped; Wasm adapter receives events via handle(); DLQ plugin records; checkpoint store load/save | Wasm adapter error → DLQ |
-
 | 30 | All-tables zero-config | `all_tables_test.go` | FOR ALL TABLES publication captures INSERT events from multiple tables simultaneously; both `pgcdc:at_orders` and `pgcdc:at_customers` channels deliver events | N/A (single happy path) |
-
 | 31 | Source-aware backpressure | `backpressure_test.go` | WAL+persistent slot+cooperative checkpoint: backpressure controller transitions zones, events arrive throttled but not lost | Load shedding: critical adapter receives all events, best-effort adapter is shed in yellow zone |
-
 | 32 | Avro/Protobuf encoding | `encoding_test.go` | NOTIFY → detector → bus → Kafka adapter with Avro encoder produces binary Avro message; Schema Registry integration registers schema and prepends Confluent wire format header | Schema Registry unavailable: encoding error goes to DLQ, adapter continues |
+| 33 | OTel tracing propagation | `tracing_test.go` | NOTIFY → detector → bus → webhook adapter with stdout tracer: W3C `traceparent` header present in webhook HTTP requests with valid format | N/A (single happy path) |
 
 ## Adding a new scenario
 

@@ -11,12 +11,19 @@ import (
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/florinutz/pgcdc/adapter"
 	"github.com/florinutz/pgcdc/dlq"
 	"github.com/florinutz/pgcdc/encoding"
 	"github.com/florinutz/pgcdc/event"
 	"github.com/florinutz/pgcdc/internal/backoff"
 	"github.com/florinutz/pgcdc/metrics"
+	"github.com/florinutz/pgcdc/tracing"
 	kafkago "github.com/segmentio/kafka-go"
 	"github.com/segmentio/kafka-go/sasl"
 	"github.com/segmentio/kafka-go/sasl/plain"
@@ -37,7 +44,11 @@ type Adapter struct {
 	backoffBase time.Duration
 	backoffCap  time.Duration
 	logger      *slog.Logger
+	tracer      trace.Tracer
 }
+
+// SetTracer implements adapter.Traceable.
+func (a *Adapter) SetTracer(t trace.Tracer) { a.tracer = t }
 
 // SetDLQ implements pgcdc.DLQAware.
 func (a *Adapter) SetDLQ(d dlq.DLQ) { a.dlqInstance = d }
@@ -197,16 +208,40 @@ func (a *Adapter) run(ctx context.Context, events <-chan event.Event) error {
 				contentType = a.encoder.ContentType()
 			}
 
+			headers := []kafkago.Header{
+				{Key: "pgcdc-channel", Value: []byte(ev.Channel)},
+				{Key: "pgcdc-operation", Value: []byte(ev.Operation)},
+				{Key: "pgcdc-event-id", Value: []byte(ev.ID)},
+				{Key: "content-type", Value: []byte(contentType)},
+			}
+
+			// Create delivery span and inject trace context into Kafka headers.
+			var span trace.Span
+			writeCtx := ctx
+			if a.tracer != nil {
+				var opts []trace.SpanStartOption
+				opts = append(opts,
+					trace.WithSpanKind(trace.SpanKindConsumer),
+					trace.WithAttributes(
+						attribute.String("pgcdc.adapter", adapterName),
+						attribute.String("pgcdc.event.id", ev.ID),
+						attribute.String("pgcdc.channel", ev.Channel),
+						attribute.String("pgcdc.operation", ev.Operation),
+					),
+				)
+				if ev.SpanContext.IsValid() {
+					opts = append(opts, trace.WithLinks(trace.Link{SpanContext: ev.SpanContext}))
+					writeCtx = trace.ContextWithRemoteSpanContext(ctx, ev.SpanContext)
+				}
+				writeCtx, span = a.tracer.Start(writeCtx, "pgcdc.adapter.deliver", opts...)
+				otel.GetTextMapPropagator().Inject(writeCtx, propagation.TextMapCarrier(tracing.KafkaCarrier{Headers: &headers}))
+			}
+
 			msg := kafkago.Message{
-				Topic: topic,
-				Key:   []byte(ev.ID),
-				Value: value,
-				Headers: []kafkago.Header{
-					{Key: "pgcdc-channel", Value: []byte(ev.Channel)},
-					{Key: "pgcdc-operation", Value: []byte(ev.Operation)},
-					{Key: "pgcdc-event-id", Value: []byte(ev.ID)},
-					{Key: "content-type", Value: []byte(contentType)},
-				},
+				Topic:   topic,
+				Key:     []byte(ev.ID),
+				Value:   value,
+				Headers: headers,
 			}
 
 			start := time.Now()
@@ -215,6 +250,11 @@ func (a *Adapter) run(ctx context.Context, events <-chan event.Event) error {
 
 			if err != nil {
 				metrics.KafkaErrors.Add(1)
+				if span != nil {
+					span.RecordError(err)
+					span.SetStatus(codes.Error, err.Error())
+					span.End()
+				}
 				if ctx.Err() != nil {
 					return ctx.Err()
 				}
@@ -235,6 +275,9 @@ func (a *Adapter) run(ctx context.Context, events <-chan event.Event) error {
 				return fmt.Errorf("write message: %w", err)
 			}
 
+			if span != nil {
+				span.End()
+			}
 			metrics.KafkaPublished.Add(1)
 			metrics.EventsDelivered.WithLabelValues(adapterName).Inc()
 			if a.ackFn != nil && ev.LSN > 0 {

@@ -39,6 +39,7 @@ import (
 	"github.com/florinutz/pgcdc/internal/config"
 	"github.com/florinutz/pgcdc/internal/server"
 	"github.com/florinutz/pgcdc/snapshot"
+	"github.com/florinutz/pgcdc/tracing"
 	"github.com/florinutz/pgcdc/transform"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -231,6 +232,15 @@ func init() {
 	f.String("dlq-plugin-config", "", "JSON config for DLQ plugin")
 	f.String("checkpoint-plugin", "", "wasm checkpoint store plugin path")
 	f.String("checkpoint-plugin-config", "", "JSON config for checkpoint plugin")
+
+	// OpenTelemetry flags (read directly, not viper-bound).
+	f.String("otel-exporter", "none", "OTel trace exporter: none, stdout, or otlp")
+	f.String("otel-endpoint", "", "OTLP gRPC endpoint (overrides OTEL_EXPORTER_OTLP_ENDPOINT)")
+	f.Float64("otel-sample-ratio", 1.0, "trace sampling ratio (0.0-1.0)")
+
+	mustBindPFlag("otel.exporter", f.Lookup("otel-exporter"))
+	mustBindPFlag("otel.endpoint", f.Lookup("otel-endpoint"))
+	mustBindPFlag("otel.sample_ratio", f.Lookup("otel-sample-ratio"))
 
 	mustBindPFlag("dlq.type", f.Lookup("dlq"))
 	mustBindPFlag("dlq.table", f.Lookup("dlq-table"))
@@ -512,11 +522,24 @@ func runListen(cmd *cobra.Command, args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// Set up OpenTelemetry tracing.
+	tp, otelShutdown, otelErr := tracing.Setup(ctx, tracing.Config{
+		Exporter:     cfg.OTel.Exporter,
+		Endpoint:     cfg.OTel.Endpoint,
+		SampleRatio:  cfg.OTel.SampleRatio,
+		DetectorType: cfg.Detector.Type,
+	}, logger)
+	if otelErr != nil {
+		return fmt.Errorf("setup otel tracing: %w", otelErr)
+	}
+	defer otelShutdown()
+
 	// Build pipeline options (declared early so detector can append).
 	opts := []pgcdc.Option{
 		pgcdc.WithBusBuffer(cfg.Bus.BufferSize),
 		pgcdc.WithBusMode(busMode),
 		pgcdc.WithLogger(logger),
+		pgcdc.WithTracerProvider(tp),
 	}
 	if cooperativeCheckpoint {
 		opts = append(opts, pgcdc.WithCooperativeCheckpoint(true))
@@ -928,7 +951,7 @@ func ensureAllTablesPublication(ctx context.Context, dbURL, publication string, 
 	if err != nil {
 		return fmt.Errorf("connect: %w", err)
 	}
-	defer conn.Close(ctx)
+	defer func() { _ = conn.Close(ctx) }()
 
 	_, err = conn.Exec(ctx, fmt.Sprintf(
 		"CREATE PUBLICATION %s FOR ALL TABLES",

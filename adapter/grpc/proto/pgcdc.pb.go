@@ -73,6 +73,7 @@ type Event struct {
 	Payload       []byte                 `protobuf:"bytes,4,opt,name=payload,proto3" json:"payload,omitempty"`
 	Source        string                 `protobuf:"bytes,5,opt,name=source,proto3" json:"source,omitempty"`
 	CreatedAt     string                 `protobuf:"bytes,6,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	Traceparent   string                 `protobuf:"bytes,7,opt,name=traceparent,proto3" json:"traceparent,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -149,13 +150,20 @@ func (x *Event) GetCreatedAt() string {
 	return ""
 }
 
+func (x *Event) GetTraceparent() string {
+	if x != nil {
+		return x.Traceparent
+	}
+	return ""
+}
+
 var File_adapter_grpc_proto_pgcdc_proto protoreflect.FileDescriptor
 
 const file_adapter_grpc_proto_pgcdc_proto_rawDesc = "" +
 	"\n" +
 	"\x1eadapter/grpc/proto/pgcdc.proto\x12\x05pgcdc\".\n" +
 	"\x10SubscribeRequest\x12\x1a\n" +
-	"\bchannels\x18\x01 \x03(\tR\bchannels\"\xa0\x01\n" +
+	"\bchannels\x18\x01 \x03(\tR\bchannels\"\xc2\x01\n" +
 	"\x05Event\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x18\n" +
 	"\achannel\x18\x02 \x01(\tR\achannel\x12\x1c\n" +
@@ -163,7 +171,8 @@ const file_adapter_grpc_proto_pgcdc_proto_rawDesc = "" +
 	"\apayload\x18\x04 \x01(\fR\apayload\x12\x16\n" +
 	"\x06source\x18\x05 \x01(\tR\x06source\x12\x1d\n" +
 	"\n" +
-	"created_at\x18\x06 \x01(\tR\tcreatedAt2C\n" +
+	"created_at\x18\x06 \x01(\tR\tcreatedAt\x12 \n" +
+	"\vtraceparent\x18\a \x01(\tR\vtraceparent2C\n" +
 	"\vEventStream\x124\n" +
 	"\tSubscribe\x12\x17.pgcdc.SubscribeRequest\x1a\f.pgcdc.Event0\x01B/Z-github.com/florinutz/pgcdc/adapter/grpc/protob\x06proto3"
 

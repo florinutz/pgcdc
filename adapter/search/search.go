@@ -12,10 +12,15 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/florinutz/pgcdc/dlq"
 	"github.com/florinutz/pgcdc/event"
 	"github.com/florinutz/pgcdc/internal/backoff"
 	"github.com/florinutz/pgcdc/metrics"
+	"github.com/florinutz/pgcdc/tracing"
 )
 
 const (
@@ -42,7 +47,11 @@ type Adapter struct {
 	client        *http.Client
 	logger        *slog.Logger
 	dlq           dlq.DLQ
+	tracer        trace.Tracer
 }
+
+// SetTracer implements adapter.Traceable.
+func (a *Adapter) SetTracer(t trace.Tracer) { a.tracer = t }
 
 // SetDLQ sets the dead letter queue for failed deliveries.
 func (a *Adapter) SetDLQ(d dlq.DLQ) { a.dlq = d }
@@ -116,21 +125,58 @@ func (a *Adapter) Start(ctx context.Context, events <-chan event.Event) error {
 		mu.Unlock()
 
 		if len(upserts) > 0 {
+			flushCtx := ctx
+			var span trace.Span
+			if a.tracer != nil {
+				flushCtx, span = a.tracer.Start(ctx, "pgcdc.adapter.deliver",
+					trace.WithSpanKind(trace.SpanKindConsumer),
+					trace.WithAttributes(
+						attribute.String("pgcdc.adapter", "search"),
+						attribute.String("pgcdc.operation", "batch_upsert"),
+						attribute.Int("pgcdc.batch_size", len(upserts)),
+					),
+				)
+			}
 			start := time.Now()
-			if err := a.upsertDocuments(ctx, upserts); err != nil {
+			if err := a.upsertDocuments(flushCtx, upserts); err != nil {
 				metrics.SearchErrors.Inc()
 				a.logger.Error("search upsert failed", "count", len(upserts), "error", err)
+				if span != nil {
+					span.RecordError(err)
+					span.SetStatus(codes.Error, err.Error())
+				}
 			} else {
 				metrics.SearchUpserted.Add(float64(len(upserts)))
 				metrics.SearchBatchDuration.Observe(time.Since(start).Seconds())
 			}
+			if span != nil {
+				span.End()
+			}
 		}
 		for _, id := range dels {
-			if err := a.deleteDocument(ctx, id); err != nil {
+			delCtx := ctx
+			var span trace.Span
+			if a.tracer != nil {
+				delCtx, span = a.tracer.Start(ctx, "pgcdc.adapter.deliver",
+					trace.WithSpanKind(trace.SpanKindConsumer),
+					trace.WithAttributes(
+						attribute.String("pgcdc.adapter", "search"),
+						attribute.String("pgcdc.operation", "delete"),
+					),
+				)
+			}
+			if err := a.deleteDocument(delCtx, id); err != nil {
 				metrics.SearchErrors.Inc()
 				a.logger.Error("search delete failed", "id", id, "error", err)
+				if span != nil {
+					span.RecordError(err)
+					span.SetStatus(codes.Error, err.Error())
+				}
 			} else {
 				metrics.SearchDeleted.Inc()
+			}
+			if span != nil {
+				span.End()
 			}
 		}
 	}
@@ -269,6 +315,7 @@ func (a *Adapter) doRequest(ctx context.Context, method, url string, body []byte
 			return fmt.Errorf("create request: %w", err)
 		}
 		req.Header.Set("Content-Type", "application/json")
+		tracing.InjectHTTP(ctx, req.Header)
 
 		switch a.engine {
 		case "typesense":
