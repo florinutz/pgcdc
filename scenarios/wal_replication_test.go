@@ -202,6 +202,53 @@ func TestScenario_WALReplication(t *testing.T) {
 		}
 	})
 
+	t.Run("truncate captured", func(t *testing.T) {
+		createTable(t, connStr, "wal_trunc_orders")
+		createPublication(t, connStr, "pgcdc_wal_trunc_orders", "wal_trunc_orders")
+
+		capture := newLineCapture()
+		startWALPipeline(t, connStr, "pgcdc_wal_trunc_orders", stdout.New(capture, testLogger()))
+		time.Sleep(3 * time.Second)
+
+		// Insert a row first so TRUNCATE has something to clear.
+		insertRow(t, connStr, "wal_trunc_orders", map[string]any{"item": "doomed"})
+		_ = capture.waitLine(t, 10*time.Second) // consume INSERT
+
+		truncateTable(t, connStr, "wal_trunc_orders")
+		line := capture.waitLine(t, 10*time.Second)
+
+		var ev event.Event
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			t.Fatalf("invalid JSON output: %v\nraw: %s", err, line)
+		}
+		if ev.Channel != "pgcdc:wal_trunc_orders" {
+			t.Errorf("channel = %q, want %q", ev.Channel, "pgcdc:wal_trunc_orders")
+		}
+		if ev.Operation != "TRUNCATE" {
+			t.Errorf("operation = %q, want %q", ev.Operation, "TRUNCATE")
+		}
+		if ev.Source != "wal_replication" {
+			t.Errorf("source = %q, want %q", ev.Source, "wal_replication")
+		}
+
+		var payload map[string]any
+		if err := json.Unmarshal(ev.Payload, &payload); err != nil {
+			t.Fatalf("invalid payload JSON: %v", err)
+		}
+		if payload["op"] != "TRUNCATE" {
+			t.Errorf("payload.op = %v, want TRUNCATE", payload["op"])
+		}
+		if payload["table"] != "wal_trunc_orders" {
+			t.Errorf("payload.table = %v, want wal_trunc_orders", payload["table"])
+		}
+		if payload["row"] != nil {
+			t.Errorf("payload.row = %v, want nil", payload["row"])
+		}
+		if payload["old"] != nil {
+			t.Errorf("payload.old = %v, want nil", payload["old"])
+		}
+	})
+
 	t.Run("begin and commit markers wrap DML events", func(t *testing.T) {
 		createTable(t, connStr, "wal_marker_orders")
 		createPublication(t, connStr, "pgcdc_wal_marker_orders", "wal_marker_orders")

@@ -44,8 +44,8 @@ const (
 
 // Detector implements detector.Detector using PostgreSQL WAL logical replication.
 // It uses the pgoutput plugin to decode changes and emits events for INSERT,
-// UPDATE, and DELETE operations. No triggers required — changes are captured
-// directly from the write-ahead log.
+// UPDATE, DELETE, and TRUNCATE operations. No triggers required — changes are
+// captured directly from the write-ahead log.
 type Detector struct {
 	dbURL       string
 	publication string
@@ -583,7 +583,17 @@ func (d *Detector) run(ctx context.Context, events chan<- event.Event) error {
 					return err
 				}
 
-			case *pglogrepl.TruncateMessage, *pglogrepl.TypeMessage, *pglogrepl.OriginMessage:
+			case *pglogrepl.TruncateMessage:
+				for _, relID := range m.RelationIDs {
+					if currentTx != nil {
+						currentTx.seq++
+					}
+					if err := d.emitEvent(ctx, events, relations, relID, "TRUNCATE", nil, nil, currentTx, clientXLogPos); err != nil {
+						return err
+					}
+				}
+
+			case *pglogrepl.TypeMessage, *pglogrepl.OriginMessage:
 				// Ignored.
 			}
 		}

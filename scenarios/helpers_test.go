@@ -555,6 +555,22 @@ func deleteRow(t *testing.T, connStr, table string, id int) {
 	}
 }
 
+func truncateTable(t *testing.T, connStr, table string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := pgx.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("truncateTable connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	_, err = conn.Exec(ctx, fmt.Sprintf("TRUNCATE %s", pgx.Identifier{table}.Sanitize()))
+	if err != nil {
+		t.Fatalf("truncateTable: %v", err)
+	}
+}
+
 // startWALPipeline wires WAL detector -> bus -> adapters and starts them in an errgroup.
 func startWALPipeline(t *testing.T, connStr string, publication string, adapters ...adapter.Adapter) {
 	t.Helper()
