@@ -12,7 +12,13 @@ import (
 	"github.com/florinutz/pgcdc/metrics"
 )
 
-// Engine orchestrates multiple views, each with its own tumbling window.
+// Window is the common interface for all window types.
+type Window interface {
+	Add(meta EventMeta, payload map[string]any)
+	Flush() []event.Event
+}
+
+// Engine orchestrates multiple views, each with its own window.
 type Engine struct {
 	views  []*viewInstance
 	logger *slog.Logger
@@ -20,7 +26,7 @@ type Engine struct {
 
 type viewInstance struct {
 	def    *ViewDef
-	window *TumblingWindow
+	window Window
 }
 
 // NewEngine creates an engine from a set of view definitions.
@@ -33,13 +39,25 @@ func NewEngine(defs []*ViewDef, logger *slog.Logger) *Engine {
 	for i, def := range defs {
 		views[i] = &viewInstance{
 			def:    def,
-			window: NewTumblingWindow(def, logger),
+			window: newWindow(def, logger),
 		}
 	}
 
 	return &Engine{
 		views:  views,
 		logger: logger,
+	}
+}
+
+// newWindow creates the appropriate window type for a view definition.
+func newWindow(def *ViewDef, logger *slog.Logger) Window {
+	switch def.WindowType {
+	case WindowSliding:
+		return NewSlidingWindow(def, logger)
+	case WindowSession:
+		return NewSessionWindow(def, logger)
+	default:
+		return NewTumblingWindow(def, logger)
 	}
 }
 
@@ -92,9 +110,21 @@ func (e *Engine) Run(ctx context.Context, emit chan<- event.Event) error {
 	return ctx.Err()
 }
 
+// tickInterval returns the flush interval for a view based on its window type.
+func tickInterval(def *ViewDef) time.Duration {
+	switch def.WindowType {
+	case WindowSliding:
+		return def.SlideSize
+	case WindowSession:
+		return def.SessionGap
+	default:
+		return def.WindowSize
+	}
+}
+
 // runView runs a single view's ticker loop.
 func (e *Engine) runView(ctx context.Context, vi *viewInstance, emit chan<- event.Event) {
-	ticker := time.NewTicker(vi.def.WindowSize)
+	ticker := time.NewTicker(tickInterval(vi.def))
 	defer ticker.Stop()
 
 	for {

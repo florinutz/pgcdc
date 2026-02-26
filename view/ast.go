@@ -21,6 +21,17 @@ const (
 	AggAvg
 	AggMin
 	AggMax
+	AggCountDistinct
+	AggStddev
+)
+
+// WindowType identifies the type of window.
+type WindowType int
+
+const (
+	WindowTumbling WindowType = iota
+	WindowSliding
+	WindowSession
 )
 
 // SelectItem represents one item in the SELECT list.
@@ -44,12 +55,16 @@ type ViewDef struct {
 	MaxGroups int
 
 	// Parsed fields.
-	SelectItems []SelectItem
-	FromTable   string // must be "pgcdc_events"
-	Where       Predicate
-	GroupBy     []string // field names
-	Having      Predicate
-	WindowSize  time.Duration
+	SelectItems     []SelectItem
+	FromTable       string // must be "pgcdc_events"
+	Where           Predicate
+	GroupBy         []string // field names
+	Having          Predicate
+	WindowSize      time.Duration
+	WindowType      WindowType
+	SlideSize       time.Duration // for sliding windows
+	SessionGap      time.Duration // for session windows
+	AllowedLateness time.Duration // for late event handling
 }
 
 // Predicate is a compiled filter function over an event's metadata and payload.

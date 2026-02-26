@@ -14,6 +14,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/florinutz/pgcdc/adapter"
 	"github.com/florinutz/pgcdc/dlq"
 	"github.com/florinutz/pgcdc/event"
 	"github.com/florinutz/pgcdc/internal/backoff"
@@ -52,6 +53,7 @@ type Adapter struct {
 	client      *http.Client
 	logger      *slog.Logger
 	dlq         dlq.DLQ
+	ackFn       adapter.AckFunc
 	tracer      trace.Tracer
 }
 
@@ -123,6 +125,35 @@ func New(
 // Name returns the adapter name.
 func (a *Adapter) Name() string {
 	return "embedding"
+}
+
+// SetAckFunc implements adapter.Acknowledger.
+func (a *Adapter) SetAckFunc(fn adapter.AckFunc) { a.ackFn = fn }
+
+// Validate checks embedding API base URL reachability and pgvector DB connectivity.
+func (a *Adapter) Validate(ctx context.Context) error {
+	// Check API URL is reachable.
+	apiBase := strings.TrimSuffix(a.apiURL, "/embeddings")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiBase, nil)
+	if err != nil {
+		return fmt.Errorf("create api request: %w", err)
+	}
+	if a.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+a.apiKey)
+	}
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("embedding api check: %w", err)
+	}
+	_ = resp.Body.Close()
+
+	// Check pgvector DB connectivity.
+	conn, err := pgx.Connect(ctx, a.dbURL)
+	if err != nil {
+		return fmt.Errorf("pgvector db connect: %w", err)
+	}
+	_ = conn.Close(ctx)
+	return nil
 }
 
 // Start blocks, consuming events. It reconnects to the pgvector database with

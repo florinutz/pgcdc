@@ -40,6 +40,7 @@ import (
 	"github.com/florinutz/pgcdc/encoding"
 	"github.com/florinutz/pgcdc/encoding/registry"
 	"github.com/florinutz/pgcdc/internal/config"
+	"github.com/florinutz/pgcdc/internal/migrate"
 	"github.com/florinutz/pgcdc/internal/server"
 	"github.com/florinutz/pgcdc/metrics"
 	"github.com/florinutz/pgcdc/snapshot"
@@ -311,6 +312,41 @@ func init() {
 	f.String("dlq-plugin-config", "", "JSON config for DLQ plugin")
 	f.String("checkpoint-plugin", "", "wasm checkpoint store plugin path")
 	f.String("checkpoint-plugin-config", "", "JSON config for checkpoint plugin")
+
+	// Startup validation flag.
+	f.Bool("skip-validation", false, "skip adapter startup validation")
+	mustBindPFlag("skip_validation", f.Lookup("skip-validation"))
+
+	// Schema migrations flag.
+	f.Bool("skip-migrations", false, "skip internal schema migrations (for read-only DB users)")
+	mustBindPFlag("skip_migrations", f.Lookup("skip-migrations"))
+
+	// View query flag (repeatable, name:query format).
+	f.StringSlice("view-query", nil, "streaming SQL view query: name:query (repeatable, e.g. --view-query 'counts:SELECT COUNT(*) FROM pgcdc_events GROUP BY channel TUMBLING WINDOW 1m')")
+
+	// Circuit breaker flags for webhook.
+	f.Int("webhook-cb-failures", 0, "webhook circuit breaker max failures before open (0 = disabled)")
+	f.Duration("webhook-cb-reset", 60*time.Second, "webhook circuit breaker reset timeout")
+	mustBindPFlag("webhook.cb_max_failures", f.Lookup("webhook-cb-failures"))
+	mustBindPFlag("webhook.cb_reset_timeout", f.Lookup("webhook-cb-reset"))
+
+	// Rate limit flags for webhook.
+	f.Float64("webhook-rate-limit", 0, "webhook rate limit in events/second (0 = unlimited)")
+	f.Int("webhook-rate-burst", 0, "webhook rate limit burst size")
+	mustBindPFlag("webhook.rate_limit", f.Lookup("webhook-rate-limit"))
+	mustBindPFlag("webhook.rate_limit_burst", f.Lookup("webhook-rate-burst"))
+
+	// Circuit breaker flags for embedding.
+	f.Int("embedding-cb-failures", 0, "embedding circuit breaker max failures (0 = disabled)")
+	f.Duration("embedding-cb-reset", 60*time.Second, "embedding circuit breaker reset timeout")
+	mustBindPFlag("embedding.cb_max_failures", f.Lookup("embedding-cb-failures"))
+	mustBindPFlag("embedding.cb_reset_timeout", f.Lookup("embedding-cb-reset"))
+
+	// Rate limit flags for embedding.
+	f.Float64("embedding-rate-limit", 0, "embedding rate limit in events/second (0 = unlimited)")
+	f.Int("embedding-rate-burst", 0, "embedding rate limit burst size")
+	mustBindPFlag("embedding.rate_limit", f.Lookup("embedding-rate-limit"))
+	mustBindPFlag("embedding.rate_limit_burst", f.Lookup("embedding-rate-burst"))
 
 	// OpenTelemetry flags (read directly, not viper-bound).
 	f.String("otel-exporter", "none", "OTel trace exporter: none, stdout, or otlp")
@@ -644,6 +680,10 @@ func runListen(cmd *cobra.Command, args []string) error {
 		pgcdc.WithBusMode(busMode),
 		pgcdc.WithLogger(logger),
 		pgcdc.WithTracerProvider(tp),
+		pgcdc.WithShutdownTimeout(cfg.ShutdownTimeout),
+	}
+	if cfg.SkipValidation {
+		opts = append(opts, pgcdc.WithSkipValidation(true))
 	}
 	if cooperativeCheckpoint {
 		opts = append(opts, pgcdc.WithCooperativeCheckpoint(true))
@@ -1019,7 +1059,31 @@ func runListen(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Auto-create view adapter from YAML views: config (if not already added via --adapter view).
+	// Parse --view-query CLI flags and merge with YAML views (CLI wins on name conflict).
+	viewQueryFlags, _ := cmd.Flags().GetStringSlice("view-query")
+	for _, vq := range viewQueryFlags {
+		parts := strings.SplitN(vq, ":", 2)
+		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+			return fmt.Errorf("invalid --view-query format %q: expected name:query", vq)
+		}
+		// Check for duplicate name in YAML views — CLI wins.
+		replaced := false
+		for i, vc := range cfg.Views {
+			if vc.Name == parts[0] {
+				cfg.Views[i].Query = parts[1]
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			cfg.Views = append(cfg.Views, config.ViewConfig{
+				Name:  parts[0],
+				Query: parts[1],
+			})
+		}
+	}
+
+	// Auto-create view adapter from YAML views: config or --view-query (if not already added via --adapter view).
 	if len(cfg.Views) > 0 {
 		hasViewAdapter := false
 		for _, name := range cfg.Adapters {
@@ -1061,6 +1125,13 @@ func runListen(cmd *cobra.Command, args []string) error {
 
 	// Capture immutable CLI transforms for SIGHUP reload.
 	immutableCLITransforms := buildCLITransforms(cmd)
+
+	// Run schema migrations (unless --skip-migrations).
+	if !cfg.SkipMigrations && cfg.DatabaseURL != "" {
+		if err := migrate.Run(ctx, cfg.DatabaseURL, logger); err != nil {
+			logger.Warn("schema migration failed (use --skip-migrations to skip)", "error", err)
+		}
+	}
 
 	// Build pipeline.
 	p := pgcdc.NewPipeline(det, opts...)

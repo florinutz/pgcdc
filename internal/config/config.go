@@ -10,6 +10,8 @@ type Config struct {
 	LogFormat           string                    `mapstructure:"log_format"`
 	ShutdownTimeout     time.Duration             `mapstructure:"shutdown_timeout"`
 	MetricsAddr         string                    `mapstructure:"metrics_addr"`
+	SkipValidation      bool                      `mapstructure:"skip_validation"`
+	SkipMigrations      bool                      `mapstructure:"skip_migrations"`
 	Bus                 BusConfig                 `mapstructure:"bus"`
 	Webhook             WebhookConfig             `mapstructure:"webhook"`
 	SSE                 SSEConfig                 `mapstructure:"sse"`
@@ -54,13 +56,17 @@ type BusConfig struct {
 }
 
 type WebhookConfig struct {
-	URL         string            `mapstructure:"url"`
-	Headers     map[string]string `mapstructure:"headers"`
-	SigningKey  string            `mapstructure:"signing_key"`
-	MaxRetries  int               `mapstructure:"max_retries"`
-	Timeout     time.Duration     `mapstructure:"timeout"`
-	BackoffBase time.Duration     `mapstructure:"backoff_base"`
-	BackoffCap  time.Duration     `mapstructure:"backoff_cap"`
+	URL            string            `mapstructure:"url"`
+	Headers        map[string]string `mapstructure:"headers"`
+	SigningKey     string            `mapstructure:"signing_key"`
+	MaxRetries     int               `mapstructure:"max_retries"`
+	Timeout        time.Duration     `mapstructure:"timeout"`
+	BackoffBase    time.Duration     `mapstructure:"backoff_base"`
+	BackoffCap     time.Duration     `mapstructure:"backoff_cap"`
+	CBMaxFailures  int               `mapstructure:"cb_max_failures"`
+	CBResetTimeout time.Duration     `mapstructure:"cb_reset_timeout"`
+	RateLimit      float64           `mapstructure:"rate_limit"`
+	RateLimitBurst int               `mapstructure:"rate_limit_burst"`
 }
 
 type SSEConfig struct {
@@ -101,18 +107,22 @@ type SnapshotConfig struct {
 }
 
 type EmbeddingConfig struct {
-	APIURL      string        `mapstructure:"api_url"`
-	APIKey      string        `mapstructure:"api_key"`
-	Model       string        `mapstructure:"model"`
-	Columns     []string      `mapstructure:"columns"`
-	IDColumn    string        `mapstructure:"id_column"`
-	Table       string        `mapstructure:"table"`
-	DBURL       string        `mapstructure:"db_url"`
-	Dimension   int           `mapstructure:"dimension"`
-	MaxRetries  int           `mapstructure:"max_retries"`
-	Timeout     time.Duration `mapstructure:"timeout"`
-	BackoffBase time.Duration `mapstructure:"backoff_base"`
-	BackoffCap  time.Duration `mapstructure:"backoff_cap"`
+	APIURL         string        `mapstructure:"api_url"`
+	APIKey         string        `mapstructure:"api_key"`
+	Model          string        `mapstructure:"model"`
+	Columns        []string      `mapstructure:"columns"`
+	IDColumn       string        `mapstructure:"id_column"`
+	Table          string        `mapstructure:"table"`
+	DBURL          string        `mapstructure:"db_url"`
+	Dimension      int           `mapstructure:"dimension"`
+	MaxRetries     int           `mapstructure:"max_retries"`
+	Timeout        time.Duration `mapstructure:"timeout"`
+	BackoffBase    time.Duration `mapstructure:"backoff_base"`
+	BackoffCap     time.Duration `mapstructure:"backoff_cap"`
+	CBMaxFailures  int           `mapstructure:"cb_max_failures"`
+	CBResetTimeout time.Duration `mapstructure:"cb_reset_timeout"`
+	RateLimit      float64       `mapstructure:"rate_limit"`
+	RateLimitBurst int           `mapstructure:"rate_limit_burst"`
 }
 
 type IcebergConfig struct {
@@ -210,6 +220,10 @@ type KafkaConfig struct {
 	BackoffCap      time.Duration `mapstructure:"backoff_cap"`
 	Encoding        string        `mapstructure:"encoding"`         // json, avro, protobuf
 	TransactionalID string        `mapstructure:"transactional_id"` // empty = idempotent only
+	CBMaxFailures   int           `mapstructure:"cb_max_failures"`
+	CBResetTimeout  time.Duration `mapstructure:"cb_reset_timeout"`
+	RateLimit       float64       `mapstructure:"rate_limit"`
+	RateLimitBurst  int           `mapstructure:"rate_limit_burst"`
 }
 
 type S3Config struct {

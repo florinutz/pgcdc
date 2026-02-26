@@ -247,3 +247,81 @@ func TestTumblingWindow_FlushResets(t *testing.T) {
 		t.Errorf("expected 0 events for second flush, got %d", len(events))
 	}
 }
+
+func TestTumblingWindow_LateEvent(t *testing.T) {
+	def, err := Parse("late_test",
+		"SELECT COUNT(*) as n, payload.region FROM pgcdc_events GROUP BY payload.region ALLOWED LATENESS 5s TUMBLING WINDOW 1m",
+		EmitRow, 0)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	w := NewTumblingWindow(def, nil)
+
+	// Add events and flush the first window.
+	w.Add(EventMeta{}, map[string]any{"region": "us-east"})
+	w.Add(EventMeta{}, map[string]any{"region": "us-east"})
+
+	events := w.Flush()
+	if len(events) != 1 {
+		t.Fatalf("first flush: expected 1 event, got %d", len(events))
+	}
+
+	var p map[string]any
+	_ = json.Unmarshal(events[0].Payload, &p)
+	if int64(p["n"].(float64)) != 2 {
+		t.Errorf("first flush n = %v, want 2", p["n"])
+	}
+
+	// Now add a late event for the same group key.
+	w.Add(EventMeta{}, map[string]any{"region": "us-east"})
+
+	// Flush again: the late event should cause a re-emit of the corrected window.
+	events = w.Flush()
+
+	// Look for the corrected result.
+	var foundCorrected bool
+	for _, ev := range events {
+		_ = json.Unmarshal(ev.Payload, &p)
+		if p["region"] == "us-east" && int64(p["n"].(float64)) == 3 {
+			foundCorrected = true
+		}
+	}
+	if !foundCorrected {
+		t.Error("expected corrected re-emit with n=3 for us-east after late event")
+	}
+}
+
+func TestTumblingWindow_LateEventExpiry(t *testing.T) {
+	def, err := Parse("expiry_test",
+		"SELECT COUNT(*) as n, payload.region FROM pgcdc_events GROUP BY payload.region ALLOWED LATENESS 50ms TUMBLING WINDOW 1m",
+		EmitRow, 0)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	w := NewTumblingWindow(def, nil)
+
+	// Add events and flush.
+	w.Add(EventMeta{}, map[string]any{"region": "us-east"})
+	w.Flush()
+
+	// Wait for the allowed lateness to expire.
+	time.Sleep(60 * time.Millisecond)
+
+	// Add a late event — it should NOT be added to the expired closed window.
+	w.Add(EventMeta{}, map[string]any{"region": "us-east"})
+
+	// Flush: the late event should be in the current window (not re-emitted from closed).
+	events := w.Flush()
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+
+	var p map[string]any
+	_ = json.Unmarshal(events[0].Payload, &p)
+	// Should be count=1 (current window only, not the expired closed window).
+	if int64(p["n"].(float64)) != 1 {
+		t.Errorf("n = %v, want 1 (closed window should have expired)", p["n"])
+	}
+}

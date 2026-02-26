@@ -524,6 +524,46 @@ var (
 		Help: "Total number of failed config reload attempts.",
 	})
 
+	// Panic recovery metrics.
+
+	PanicsRecovered = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "pgcdc_panics_recovered_total",
+		Help: "Total number of panics recovered by safe goroutine wrapper.",
+	}, []string{"component"})
+
+	// Circuit breaker metrics.
+
+	CircuitBreakerState = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "pgcdc_circuit_breaker_state",
+		Help: "Current circuit breaker state: 0=closed, 1=open, 2=half_open.",
+	}, []string{"adapter"})
+
+	CircuitBreakerTrips = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "pgcdc_circuit_breaker_trips_total",
+		Help: "Total number of circuit breaker trips to open state.",
+	}, []string{"adapter"})
+
+	// Rate limiter metrics.
+
+	RateLimitWaits = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "pgcdc_rate_limit_waits_total",
+		Help: "Total number of rate limit waits.",
+	}, []string{"adapter"})
+
+	RateLimitWaitDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "pgcdc_rate_limit_wait_duration_seconds",
+		Help:    "Duration of rate limit waits.",
+		Buckets: []float64{0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1},
+	}, []string{"adapter"})
+
+	// Validation metrics.
+
+	ValidationDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "pgcdc_validation_duration_seconds",
+		Help:    "Duration of adapter startup validation.",
+		Buckets: prometheus.DefBuckets,
+	}, []string{"adapter"})
+
 	// TOAST cache metrics.
 
 	ToastCacheHits = promauto.NewCounter(prometheus.CounterOpts{

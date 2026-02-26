@@ -106,6 +106,32 @@ func New(
 
 func (a *Adapter) Name() string { return "search" }
 
+// Validate checks search engine health endpoint connectivity.
+func (a *Adapter) Validate(ctx context.Context) error {
+	healthURL := strings.TrimRight(a.url, "/") + "/health"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, healthURL, nil)
+	if err != nil {
+		return fmt.Errorf("create health request: %w", err)
+	}
+	if a.apiKey != "" {
+		if a.engine == "typesense" {
+			req.Header.Set("X-TYPESENSE-API-KEY", a.apiKey)
+		} else {
+			req.Header.Set("Authorization", "Bearer "+a.apiKey)
+		}
+	}
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("search health check: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("search health check returned %d", resp.StatusCode)
+	}
+	return nil
+}
+
 // Start consumes events, batches upserts, and flushes to the search engine.
 func (a *Adapter) Start(ctx context.Context, events <-chan event.Event) error {
 	a.logger.Info("search adapter started", "engine", a.engine, "index", a.index)

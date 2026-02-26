@@ -91,6 +91,20 @@ func (a *Adapter) Name() string {
 	return adapterName
 }
 
+// Validate checks NATS connectivity by connecting and immediately closing.
+func (a *Adapter) Validate(ctx context.Context) error {
+	var opts []natsclient.Option
+	if a.credFile != "" {
+		opts = append(opts, natsclient.UserCredentials(a.credFile))
+	}
+	nc, err := natsclient.Connect(a.url, opts...)
+	if err != nil {
+		return fmt.Errorf("nats connect: %w", err)
+	}
+	nc.Close()
+	return nil
+}
+
 // Start connects to NATS and publishes events from the channel. It blocks until
 // ctx is cancelled. On NATS disconnection, it reconnects with exponential backoff.
 func (a *Adapter) Start(ctx context.Context, events <-chan event.Event) error {

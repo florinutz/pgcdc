@@ -1,6 +1,6 @@
 # pgcdc
 
-PostgreSQL, MySQL, and MongoDB change data capture (LISTEN/NOTIFY, WAL logical replication, outbox pattern, MySQL binlog, or MongoDB Change Streams) streaming to webhooks, SSE, stdout, files, exec processes, PG tables, WebSockets, pgvector embeddings, NATS JetStream, Kafka, Typesense/Meilisearch, Redis, gRPC, S3-compatible object storage, a built-in Kafka protocol server (speak Kafka wire protocol directly — no Kafka cluster needed), and streaming SQL views (tumbling window aggregation over CDC events).
+PostgreSQL, MySQL, and MongoDB change data capture (LISTEN/NOTIFY, WAL logical replication, outbox pattern, MySQL binlog, or MongoDB Change Streams) streaming to webhooks, SSE, stdout, files, exec processes, PG tables, WebSockets, pgvector embeddings, NATS JetStream, Kafka, Typesense/Meilisearch, Redis, gRPC, S3-compatible object storage, a built-in Kafka protocol server (speak Kafka wire protocol directly — no Kafka cluster needed), and streaming SQL views (tumbling, sliding, and session window aggregation over CDC events).
 
 ## Quick Start
 
@@ -44,7 +44,7 @@ Context ──> Pipeline (pgcdc.go orchestrates everything)
                               Prometheus Metrics (/metrics)
 ```
 
-- **Concurrency**: `errgroup` manages all goroutines. One context cancellation tears everything down.
+- **Concurrency**: `errgroup` manages all goroutines via `safeGo` (panic-recovering wrapper). One context cancellation tears everything down. Panics in any goroutine are recovered, logged with stack trace, and counted via `pgcdc_panics_recovered_total{component}`.
 - **Backpressure**: `--bus-mode fast` (default) drops events on full subscriber channels. `--bus-mode reliable` blocks the detector instead of dropping — loss-free at the cost of throughput.
 - **All-tables zero-config**: `--all-tables` auto-creates a `FOR ALL TABLES` publication and switches to WAL detector. Zero setup — no `pgcdc init`, no manual SQL, no `--publication` needed. Idempotent: reuses existing publication on restart. Default publication name: `all` (override with `--publication`).
 - **Transaction metadata**: WAL detector optionally enriches events with `transaction.xid`, `transaction.commit_time`, `transaction.seq` when `--tx-metadata` is enabled. `--tx-markers` adds synthetic BEGIN/COMMIT events on channel `pgcdc:_txn` (implies `--tx-metadata`). LISTEN/NOTIFY events omit this field (protocol has no tx info).
@@ -62,14 +62,18 @@ Context ──> Pipeline (pgcdc.go orchestrates everything)
 - **gRPC adapter**: `--adapter grpc` starts a gRPC streaming server. Clients call `Subscribe(SubscribeRequest)` with optional channel filter. Proto at `adapter/grpc/proto/pgcdc.proto`.
 - **S3 adapter**: `--adapter s3` buffers events and periodically flushes partitioned objects (Hive-style `channel=.../year=.../month=.../day=.../`) to any S3-compatible store (AWS S3, MinIO, R2, etc.). JSON Lines (default) or Parquet format. Time+size flush triggers, atomic buffer swap, all-or-nothing upload per flush. `--s3-bucket`, `--s3-prefix`, `--s3-endpoint`, `--s3-region`, `--s3-access-key-id`, `--s3-secret-access-key`, `--s3-format`, `--s3-flush-interval`, `--s3-flush-size`, `--s3-drain-timeout`.
 - **Kafka protocol server**: `--adapter kafkaserver` starts a TCP server on `:9092` (configurable) that speaks the Kafka wire protocol. Any Kafka consumer library (librdkafka, franz-go, sarama, Java client, confluent-kafka-python) connects directly to pgcdc — no Kafka cluster needed. pgcdc channels become Kafka topics (`pgcdc:orders` → `pgcdc.orders`), events hash across N partitions (FNV-1a on key column or event ID), consumer groups with partition assignment and heartbeat session reaping. Supports all 11 API keys: ApiVersions, Metadata, FindCoordinator, JoinGroup, SyncGroup, Heartbeat, LeaveGroup, ListOffsets, Fetch (RecordBatch v2 with headers), OffsetCommit, OffsetFetch. Flexible encoding for ApiVersions v3+ (compact arrays, tagged fields). Offset persistence via `checkpoint.Store` with keys `kafka:{group}:{topic}:{partition}`. Long-poll Fetch with per-partition waiters. `--kafkaserver-addr` (default `:9092`), `--kafkaserver-partitions` (default 8), `--kafkaserver-buffer-size` (default 10000 records/partition), `--kafkaserver-session-timeout` (default 30s), `--kafkaserver-key-column` (default `id`), `--kafkaserver-checkpoint-db`.
-- **View adapter**: `--adapter view` (or auto-created from `views:` YAML config) runs streaming SQL analytics over CDC events. SQL-like queries against virtual `pgcdc_events` table with `TUMBLING WINDOW <duration>` clauses. Supports `COUNT`, `SUM`, `AVG`, `MIN`, `MAX` with `GROUP BY` and `HAVING`. Results emitted as `VIEW_RESULT` events on `pgcdc:_view:<name>` channels, re-injected into the bus. Emit modes: `row` (one event per group) or `batch` (single event with rows array). `max_groups` caps cardinality. Loop prevention: events from `pgcdc:_view:` channels are skipped. SQL parsing via TiDB parser. `--view-query` not yet implemented; views configured via `views:` YAML section.
+- **View adapter**: `--adapter view` (or auto-created from `views:` YAML config or `--view-query 'name:query'` CLI flag) runs streaming SQL analytics over CDC events. SQL-like queries against virtual `pgcdc_events` table with three window types: `TUMBLING WINDOW <duration>`, `SLIDING WINDOW <duration> SLIDE <duration>`, `SESSION WINDOW <gap>`. Optional `ALLOWED LATENESS <duration>` for late event handling in tumbling windows. Supports `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, `COUNT(DISTINCT ...)`, `STDDEV`/`STDDEV_POP` with `GROUP BY` and `HAVING`. Results emitted as `VIEW_RESULT` events on `pgcdc:_view:<name>` channels, re-injected into the bus. Emit modes: `row` (one event per group) or `batch` (single event with rows array). `max_groups` caps cardinality. Loop prevention: events from `pgcdc:_view:` channels are skipped. SQL parsing via TiDB parser. `--view-query 'name:SELECT ...'` for inline view definitions (repeatable, merged with YAML `views:` — CLI wins on name conflict).
 - **Dead letter queue**: `--dlq stderr|pg_table|none`. Failed events captured to stderr (JSON lines) or `pgcdc_dead_letters` table. Adapters with DLQ support: webhook, embedding, kafka. (kafkaserver has no DLQ — in-memory ring buffer; consumers that fall behind get OFFSET_OUT_OF_RANGE.)
 - **Kafka adapter**: `--adapter kafka` publishes events to Kafka topics with per-event key (`event.ID`), headers (`pgcdc-channel`, `pgcdc-operation`, `pgcdc-event-id`), and `RequireAll` acks. Channel-to-topic mapping: `pgcdc:orders` → `pgcdc.orders`. `--kafka-topic` overrides with a fixed topic. SASL (plain, SCRAM-SHA-256/512) and TLS supported. Terminal Kafka errors (non-retriable) go to DLQ; connection errors trigger reconnect with backoff. `--kafka-transactional-id` enables exactly-once delivery via Kafka transactions (each event produced in its own transaction).
 - **Event routing**: `--route adapter=channel1,channel2`. Bus-level filtering before fan-out. Adapters without routes receive all events.
 - **Outbox detector**: `--detector outbox` polls a transactional outbox table using `SELECT ... FOR UPDATE SKIP LOCKED` for concurrency-safe processing. Configurable DELETE or `processed_at` update cleanup.
 - **MySQL binlog detector**: `--detector mysql` connects to MySQL as a replication slave using `go-mysql-org/go-mysql` `BinlogSyncer`. Captures INSERT/UPDATE/DELETE from MySQL binlog (ROW format required). `--mysql-addr`, `--mysql-user`, `--mysql-password`, `--mysql-server-id` (required, > 0), `--mysql-tables` (schema.table filter), `--mysql-gtid` (GTID mode), `--mysql-flavor` (mysql/mariadb). Events emitted on `pgcdc:<schema>.<table>` channels. Column names resolved from TableMapEvent metadata (MySQL 8.0.1+), `information_schema` fallback, or `col_N` fallback. Position encoded as `(file_seq << 32) | offset` for checkpoint compatibility.
 - **MongoDB Change Streams detector**: `--detector mongodb` uses MongoDB's native Change Streams API (requires replica set or sharded cluster). Captures insert/update/replace/delete operations. `--mongodb-uri` (required), `--mongodb-database` (required unless cluster scope), `--mongodb-collections` (collection filter), `--mongodb-scope collection|database|cluster`, `--mongodb-full-document updateLookup|default`. Events emitted on `pgcdc:<database>.<collection>` channels. System events (drop/rename/invalidate) on `pgcdc:_mongo`. Resume tokens persisted to MongoDB metadata collection (`pgcdc_resume_tokens`) for crash-resumable streaming. `--mongodb-metadata-db`, `--mongodb-metadata-coll`. No cooperative checkpoint or backpressure support (no WAL LSN equivalent). Metrics: `pgcdc_mongodb_events_received_total`, `pgcdc_mongodb_errors_total`, `pgcdc_mongodb_resume_token_saves_total`.
-- **Shutdown**: Signal cancels root context. Bus closes subscriber channels. HTTP server gets `shutdown_timeout` (default 5s) `context.WithTimeout` for graceful drain.
+- **Adapter validation**: Adapters optionally implement `adapter.Validator` (`Validate(ctx) error`) for pre-flight checks (DNS resolution, bucket existence, DB connectivity, API reachability). `Pipeline.Validate()` runs all validators before starting; failures abort startup unless `--skip-validation`. Metrics: `pgcdc_validation_duration_seconds{adapter}`.
+- **Shutdown + drain**: Signal cancels root context. Bus closes subscriber channels. Adapters optionally implement `adapter.Drainer` (`Drain(ctx) error`) to flush in-flight work (e.g., webhook WaitGroup, S3 buffer flush) bounded by `shutdown_timeout` (default 5s).
+- **Schema migrations**: `internal/migrate` runs embedded SQL migrations (`internal/migrate/sql/`) at startup, tracking versions in `pgcdc_migrations` table. Idempotent, skip with `--skip-migrations`. Initial migration creates `pgcdc_checkpoints`, `pgcdc_dead_letters`, `pgcdc_heartbeat` tables.
+- **Circuit breaker**: `internal/circuitbreaker` provides three-state (closed/open/half-open) circuit breaker with configurable max failures and reset timeout. Per-adapter config: `--webhook-cb-failures`, `--webhook-cb-reset`, `--embedding-cb-failures`, `--embedding-cb-reset`. Not yet wired into adapter delivery loops.
+- **Rate limiter**: `internal/ratelimit` provides token-bucket rate limiter wrapping `golang.org/x/time/rate` with Prometheus metrics. Per-adapter config: `--webhook-rate-limit`, `--webhook-rate-burst`, `--embedding-rate-limit`, `--embedding-rate-burst`. Not yet wired into adapter delivery loops.
 - **SIGHUP config reload**: `kill -HUP <pid>` re-reads the YAML config file and atomically swaps `transforms:` and `routes:` sections for all running adapters with zero event loss. CLI flags, plugin transforms, adapters, detectors, and bus mode remain immutable. Implementation: `sync/atomic.Pointer[wrapperConfig]` per adapter; the wrapper goroutine loads from this pointer on every event. `Pipeline.Reload(ReloadConfig)` rebuilds and stores atomically. Metrics: `pgcdc_config_reloads_total`, `pgcdc_config_reload_errors_total`. YAML `routes:` section maps adapter names to channel lists (CLI `--route` wins for same adapter name).
 - **Wiring**: `pgcdc.go` provides the reusable `Pipeline` type (detector + bus + adapters). `cmd/listen.go` adds CLI-specific HTTP servers on top.
 - **Observability**: Prometheus metrics exposed at `/metrics`. Rich health check at `/healthz` returns per-component status (200 when all up, 503 when any down). Standalone metrics server via `--metrics-addr`.
@@ -82,7 +86,7 @@ Context ──> Pipeline (pgcdc.go orchestrates everything)
 - **OpenTelemetry tracing**: `--otel-exporter none|stdout|otlp`, `--otel-endpoint`, `--otel-sample-ratio`. OTLP gRPC exporter for distributed tracing across the pipeline. `tracing/` package: setup, shutdown, span creation. `tracing/carrier.go`: Kafka header carrier for trace context propagation.
 - **DLQ management CLI**: `pgcdc dlq list|replay|purge` commands for inspecting, replaying, and purging dead letter queue records. Filter by adapter, time range, ID. Replay supports `--dry-run` and adapter-specific overrides (`--webhook-url`, `--kafka-brokers`). `cmd/dlq.go` + `cmd/dlq_replay_kafka.go`.
 - **TRUNCATE support**: WAL detector emits `TRUNCATE` operation type alongside INSERT/UPDATE/DELETE.
-- **Error types**: `pgcdcerr/` provides typed errors (`ErrBusClosed`, `WebhookDeliveryError`, `DetectorDisconnectedError`, `ExecProcessError`, `EmbeddingDeliveryError`, `NatsPublishError`, `OutboxProcessError`, `IcebergFlushError`, `S3UploadError`, `IncrementalSnapshotError`, `PluginError`, `MongoDBChangeStreamError`, `MySQLReplicationError`, `SchemaRegistryError`, `KafkaServerError`, `ViewError`) for `errors.Is`/`errors.As` matching.
+- **Error types**: `pgcdcerr/` provides typed errors (`ErrBusClosed`, `WebhookDeliveryError`, `DetectorDisconnectedError`, `ExecProcessError`, `EmbeddingDeliveryError`, `NatsPublishError`, `OutboxProcessError`, `IcebergFlushError`, `S3UploadError`, `IncrementalSnapshotError`, `PluginError`, `MongoDBChangeStreamError`, `MySQLReplicationError`, `SchemaRegistryError`, `KafkaServerError`, `ViewError`, `ValidationError`, `CircuitBreakerOpenError`, `RateLimitExceededError`) for `errors.Is`/`errors.As` matching.
 
 ## Code Conventions
 
@@ -102,12 +106,14 @@ Context ──> Pipeline (pgcdc.go orchestrates everything)
 
 1. Implement `adapter.Adapter` interface (`Start(ctx, <-chan event.Event) error`, `Name() string`)
 2. Optionally implement `adapter.Acknowledger` (`SetAckFunc(fn AckFunc)`) for cooperative checkpointing support — ack after fully handling each event (success, DLQ, or intentional skip)
-3. Create `adapter/<name>/` package
-4. Add switch case in `cmd/listen.go` adapter loop
-5. Add config struct in `internal/config/config.go`
-6. Add CLI flags in `cmd/listen.go` `init()`
-7. Add metrics instrumentation (`metrics.EventsDelivered.WithLabelValues("<name>").Inc()`)
-8. Add scenario test, register in SCENARIOS.md
+3. Optionally implement `adapter.Validator` (`Validate(ctx) error`) for startup pre-flight checks (DNS, connectivity, bucket existence)
+4. Optionally implement `adapter.Drainer` (`Drain(ctx) error`) for graceful shutdown flush (bounded by `shutdown_timeout`)
+5. Create `adapter/<name>/` package
+6. Add switch case in `cmd/listen.go` adapter loop
+7. Add config struct in `internal/config/config.go`
+8. Add CLI flags in `cmd/listen.go` `init()`
+9. Add metrics instrumentation (`metrics.EventsDelivered.WithLabelValues("<name>").Inc()`)
+10. Add scenario test, register in SCENARIOS.md
 
 ### New detector
 
@@ -203,7 +209,7 @@ Each scenario file follows this pattern:
 
 ### Max scenario count
 
-Target: keep scenarios focused and non-overlapping. Currently 40 scenarios — consolidate related ones before adding new ones.
+Target: keep scenarios focused and non-overlapping. Currently 41 scenarios — consolidate related ones before adding new ones.
 
 ## Code Organization
 
@@ -229,7 +235,7 @@ adapter/        Output adapter interface + implementations
   iceberg/      Apache Iceberg table writes (Hadoop catalog, Parquet)
   kafkaserver/  Kafka wire protocol server (no Kafka cluster needed)
   view/         Streaming SQL view engine adapter
-view/           Streaming SQL engine (parser, evaluator, tumbling window, aggregators)
+view/           Streaming SQL engine (parser, evaluator, tumbling/sliding/session windows, aggregators)
 ack/            Cooperative checkpoint LSN tracker
 backpressure/   Source-aware WAL lag backpressure (throttle/pause/shed)
 bus/            Event fan-out (fast or reliable mode)
@@ -257,6 +263,10 @@ pgcdcerr/      Typed error types
 internal/       CLI-specific internals (not importable)
   config/       Viper-based configuration structs
   server/       HTTP server for SSE + WS + metrics + health
+  circuitbreaker/ Three-state circuit breaker (closed/open/half-open)
+  ratelimit/    Token-bucket rate limiter with Prometheus metrics
+  migrate/      Embedded SQL migration system with version tracking
+  safegoroutine/ Panic recovery wrapper for errgroup
 scenarios/      Integration/scenario tests (testcontainers)
 testutil/       Test utilities
 ```
@@ -268,7 +278,7 @@ testutil/       Test utilities
 - `cmd/reload.go` — SIGHUP reload helpers (CLI/YAML transform extraction, route merging, specToTransform)
 - `cmd/snapshot.go` — Snapshot CLI subcommand
 - `snapshot/snapshot.go` — Table snapshot using REPEATABLE READ + SELECT *
-- `adapter/adapter.go` — Adapter interface
+- `adapter/adapter.go` — Adapter interface + optional Validator, Drainer, Acknowledger, DLQAware, Reinjector, Traceable interfaces
 - `detector/detector.go` — Detector interface
 - `bus/bus.go` — Fan-out with configurable fast (drop) or reliable (block) mode
 - `ack/tracker.go` — Cooperative checkpoint LSN tracker (min across all adapters)
@@ -278,12 +288,15 @@ testutil/       Test utilities
 - `event/event.go` — Event model (UUIDv7, JSON payload, LSN for WAL events)
 - `health/health.go` — Component health checker
 - `metrics/metrics.go` — Prometheus metric definitions
-- `pgcdcerr/errors.go` — Typed errors (ErrBusClosed, WebhookDeliveryError, DetectorDisconnectedError, ExecProcessError, EmbeddingDeliveryError, NatsPublishError, OutboxProcessError, IcebergFlushError, IncrementalSnapshotError, MongoDBChangeStreamError, MySQLReplicationError, SchemaRegistryError, KafkaServerError, ViewError)
+- `pgcdcerr/errors.go` — Typed errors (ErrBusClosed, WebhookDeliveryError, DetectorDisconnectedError, ExecProcessError, EmbeddingDeliveryError, NatsPublishError, OutboxProcessError, IcebergFlushError, IncrementalSnapshotError, MongoDBChangeStreamError, MySQLReplicationError, SchemaRegistryError, KafkaServerError, ViewError, ValidationError, CircuitBreakerOpenError, RateLimitExceededError)
 - `adapter/view/view.go` — View adapter: wraps view.Engine, implements adapter.Reinjector for bus re-injection
-- `view/engine.go` — View engine: manages tumbling windows, processes events, flushes results
-- `view/parser.go` — SQL parser: TiDB-based parsing of streaming SQL with TUMBLING WINDOW extension
-- `view/window.go` — Tumbling window: time-based aggregation with group-by and HAVING
-- `view/aggregate.go` — Aggregator implementations: COUNT, SUM, AVG, MIN, MAX
+- `view/engine.go` — View engine: manages windows (tumbling/sliding/session), processes events, flushes results
+- `view/parser.go` — SQL parser: TiDB-based parsing of streaming SQL with TUMBLING/SLIDING/SESSION WINDOW extensions
+- `view/ast.go` — ViewDef AST: WindowType enum, AggFunc enum, SelectField, parsed view definition
+- `view/window.go` — Tumbling window: time-based aggregation with group-by, HAVING, and late event handling (AllowedLateness)
+- `view/sliding_window.go` — Sliding window: overlapping sub-windows with cross-window merge (Welford's for STDDEV)
+- `view/session_window.go` — Session window: gap-based windows that close after inactivity timeout
+- `view/aggregate.go` — Aggregator implementations: COUNT, SUM, AVG, MIN, MAX, COUNT_DISTINCT, STDDEV
 - `adapter/embedding/embedding.go` — Embedding adapter: OpenAI-compatible API + pgvector UPSERT/DELETE
 - `adapter/nats/nats.go` — NATS JetStream adapter: publish with dedup + auto-stream creation
 - `adapter/kafka/kafka.go` — Kafka adapter: publish with RequireAll acks, SASL/TLS, DLQ for terminal errors
@@ -322,5 +335,11 @@ testutil/       Test utilities
 - `plugin/wasm/checkpoint.go` — WasmCheckpointStore → checkpoint.Store
 - `plugin/wasm/host.go` — Host functions: pgcdc_log, pgcdc_metric_inc, pgcdc_http_request
 - `plugin/proto/event.proto` — Protobuf event definition for high-throughput plugins
+- `internal/circuitbreaker/circuitbreaker.go` — Three-state circuit breaker (closed/open/half-open) with configurable max failures and reset timeout
+- `internal/ratelimit/ratelimit.go` — Token-bucket rate limiter wrapping `golang.org/x/time/rate` with Prometheus metrics
+- `internal/migrate/migrate.go` — Embedded SQL migration system with version tracking (`pgcdc_migrations` table)
+- `internal/safegoroutine/safe.go` — Panic recovery wrapper for errgroup goroutines
 - `internal/server/server.go` — HTTP server with SSE, WS, metrics, and health endpoints (CLI-only)
+- `cmd/validate.go` — `pgcdc validate` command: pre-flight configuration validation without starting the pipeline
+- `cmd/playground.go` — `pgcdc playground` command: Docker-based demo environment with auto-generated data
 - `scenarios/helpers_test.go` — Shared test infrastructure (PG container, pipeline wiring)

@@ -67,6 +67,20 @@ func New(url, mode, keyPrefix, idColumn string, backoffBase, backoffCap time.Dur
 
 func (a *Adapter) Name() string { return "redis" }
 
+// Validate checks Redis connectivity via PING.
+func (a *Adapter) Validate(ctx context.Context) error {
+	opts, err := goredis.ParseURL(a.url)
+	if err != nil {
+		return fmt.Errorf("parse redis url: %w", err)
+	}
+	client := goredis.NewClient(opts)
+	defer func() { _ = client.Close() }()
+	if err := client.Ping(ctx).Err(); err != nil {
+		return fmt.Errorf("redis ping: %w", err)
+	}
+	return nil
+}
+
 // Start connects to Redis and processes events. It reconnects with backoff on
 // connection loss.
 func (a *Adapter) Start(ctx context.Context, events <-chan event.Event) error {

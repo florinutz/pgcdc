@@ -10,7 +10,10 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
+	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -47,6 +50,7 @@ type Adapter struct {
 	dlq         dlq.DLQ
 	ackFn       adapter.AckFunc
 	tracer      trace.Tracer
+	inflight    sync.WaitGroup
 }
 
 // SetTracer implements adapter.Traceable.
@@ -130,6 +134,7 @@ func (a *Adapter) Start(ctx context.Context, events <-chan event.Event) error {
 				deliverCtx, span = a.tracer.Start(deliverCtx, "pgcdc.adapter.deliver", opts...)
 			}
 
+			a.inflight.Add(1)
 			if err := a.deliver(deliverCtx, ev); err != nil {
 				if span != nil {
 					span.RecordError(err)
@@ -149,6 +154,7 @@ func (a *Adapter) Start(ctx context.Context, events <-chan event.Event) error {
 			if span != nil {
 				span.End()
 			}
+			a.inflight.Done()
 			// Ack after terminal outcome (delivery, DLQ record, or non-retryable skip).
 			if a.ackFn != nil && ev.LSN > 0 {
 				a.ackFn(ev.LSN)
@@ -160,6 +166,42 @@ func (a *Adapter) Start(ctx context.Context, events <-chan event.Event) error {
 // Name returns the adapter name.
 func (a *Adapter) Name() string {
 	return "webhook"
+}
+
+// Validate checks that the webhook URL host can be DNS-resolved.
+func (a *Adapter) Validate(ctx context.Context) error {
+	u, err := url.Parse(a.url)
+	if err != nil {
+		return fmt.Errorf("parse url: %w", err)
+	}
+	host := u.Hostname()
+	if host == "" {
+		return fmt.Errorf("empty hostname in url %q", a.url)
+	}
+	resolver := &net.Resolver{}
+	addrs, err := resolver.LookupHost(ctx, host)
+	if err != nil {
+		return fmt.Errorf("dns resolve %q: %w", host, err)
+	}
+	if len(addrs) == 0 {
+		return fmt.Errorf("dns resolve %q: no addresses", host)
+	}
+	return nil
+}
+
+// Drain waits for all in-flight deliveries to complete.
+func (a *Adapter) Drain(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() {
+		a.inflight.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // deliver marshals the event to JSON and sends it as an HTTP POST, retrying on

@@ -145,3 +145,87 @@ func TestSumNilSkipped(t *testing.T) {
 		t.Error("Sum should skip nil values")
 	}
 }
+
+func TestCountDistinct_NoDuplicates(t *testing.T) {
+	a := NewAggregator(AggCountDistinct)
+	a.Add("a")
+	a.Add("b")
+	a.Add("c")
+
+	got := a.Result().(int64)
+	if got != 3 {
+		t.Errorf("CountDistinct = %d, want 3", got)
+	}
+}
+
+func TestCountDistinct_WithDuplicates(t *testing.T) {
+	a := NewAggregator(AggCountDistinct)
+	a.Add("a")
+	a.Add("b")
+	a.Add("a")
+	a.Add("c")
+	a.Add("b")
+
+	got := a.Result().(int64)
+	if got != 3 {
+		t.Errorf("CountDistinct = %d, want 3", got)
+	}
+
+	a.Reset()
+	if a.Result().(int64) != 0 {
+		t.Error("CountDistinct after reset should be 0")
+	}
+}
+
+func TestCountDistinct_NilValues(t *testing.T) {
+	a := NewAggregator(AggCountDistinct)
+	ok := a.Add(nil)
+	if ok {
+		t.Error("CountDistinct should skip nil values")
+	}
+	a.Add("a")
+	a.Add(nil)
+	a.Add("b")
+
+	got := a.Result().(int64)
+	if got != 2 {
+		t.Errorf("CountDistinct = %d, want 2", got)
+	}
+}
+
+func TestStddev_KnownValues(t *testing.T) {
+	a := NewAggregator(AggStddev)
+	// Population stddev of [2,4,4,4,5,5,7,9] = 2.0
+	values := []float64{2, 4, 4, 4, 5, 5, 7, 9}
+	for _, v := range values {
+		a.Add(v)
+	}
+
+	got := a.Result().(float64)
+	if math.Abs(got-2.0) > 0.001 {
+		t.Errorf("Stddev = %f, want 2.0", got)
+	}
+
+	a.Reset()
+	if a.Result().(float64) != 0 {
+		t.Error("Stddev after reset should be 0")
+	}
+}
+
+func TestStddev_SingleValue(t *testing.T) {
+	a := NewAggregator(AggStddev)
+	a.Add(float64(42))
+
+	got := a.Result().(float64)
+	if got != 0 {
+		t.Errorf("Stddev of single value = %f, want 0", got)
+	}
+}
+
+func TestStddev_Empty(t *testing.T) {
+	a := NewAggregator(AggStddev)
+	got := a.Result().(float64)
+	if got != 0 {
+		t.Errorf("Stddev of empty = %f, want 0", got)
+	}
+}

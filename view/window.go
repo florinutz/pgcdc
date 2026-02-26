@@ -19,6 +19,15 @@ type groupState struct {
 	aggregators []Aggregator   // one per SELECT aggregate item
 }
 
+// closedWindow holds a recently closed window's state for late event handling.
+type closedWindow struct {
+	groups   map[string]*groupState
+	start    time.Time
+	end      time.Time
+	closedAt time.Time
+	reEmit   bool // true if a late event updated this window
+}
+
 // TumblingWindow manages a single tumbling window for one ViewDef.
 type TumblingWindow struct {
 	def    *ViewDef
@@ -31,6 +40,10 @@ type TumblingWindow struct {
 	// aggItemIndices maps SELECT item index to aggregate index.
 	// Only items with Aggregate != nil are tracked.
 	aggItemIndices []int // len == len(def.SelectItems), -1 for non-aggregate items
+
+	// closedWindows holds recently closed windows for late event handling.
+	// Only populated when AllowedLateness > 0.
+	closedWindows []*closedWindow
 }
 
 // NewTumblingWindow creates a new tumbling window for the given view definition.
@@ -79,6 +92,24 @@ func (tw *TumblingWindow) Add(meta EventMeta, payload map[string]any) {
 	// Build group key.
 	groupKey, keyValues := tw.buildGroupKey(meta, payload)
 
+	// Check if this event belongs to a closed window (late event handling).
+	if tw.def.AllowedLateness > 0 {
+		now := time.Now().UTC()
+		for _, cw := range tw.closedWindows {
+			// Skip expired closed windows.
+			if now.Sub(cw.closedAt) >= tw.def.AllowedLateness {
+				continue
+			}
+			if gs, ok := cw.groups[groupKey]; ok {
+				// Late event for a known group in a closed window — update it.
+				tw.addToGroupState(gs, meta, payload)
+				cw.reEmit = true
+				metrics.ViewEventsProcessed.WithLabelValues(tw.def.Name).Inc()
+				return
+			}
+		}
+	}
+
 	gs, ok := tw.groups[groupKey]
 	if !ok {
 		if len(tw.groups) >= tw.def.MaxGroups {
@@ -107,7 +138,12 @@ func (tw *TumblingWindow) Add(meta EventMeta, payload map[string]any) {
 		tw.groups[groupKey] = gs
 	}
 
-	// Update aggregators.
+	tw.addToGroupState(gs, meta, payload)
+	metrics.ViewEventsProcessed.WithLabelValues(tw.def.Name).Inc()
+}
+
+// addToGroupState updates a group's aggregators with one event's values.
+func (tw *TumblingWindow) addToGroupState(gs *groupState, meta EventMeta, payload map[string]any) {
 	aggIdx := 0
 	for _, si := range tw.def.SelectItems {
 		if si.Aggregate == nil {
@@ -125,8 +161,6 @@ func (tw *TumblingWindow) Add(meta EventMeta, payload map[string]any) {
 		}
 		aggIdx++
 	}
-
-	metrics.ViewEventsProcessed.WithLabelValues(tw.def.Name).Inc()
 }
 
 // Flush closes the current window, applies HAVING, emits results, and resets.
@@ -140,14 +174,74 @@ func (tw *TumblingWindow) Flush() []event.Event {
 	// Reset for next window.
 	tw.groups = make(map[string]*groupState)
 	tw.windowStart = windowEnd
-	tw.mu.Unlock()
 
-	if len(groups) == 0 {
-		return nil
+	// Handle late event support: save closed window state.
+	if tw.def.AllowedLateness > 0 && len(groups) > 0 {
+		tw.closedWindows = append(tw.closedWindows, &closedWindow{
+			groups:   groups,
+			start:    windowStart,
+			end:      windowEnd,
+			closedAt: windowEnd,
+		})
 	}
 
-	metrics.ViewGroups.WithLabelValues(tw.def.Name).Set(float64(len(groups)))
+	// Expire old closed windows.
+	if tw.def.AllowedLateness > 0 {
+		tw.expireClosedWindows(windowEnd)
+	}
 
+	// Collect re-emit events from updated closed windows.
+	var lateEvents []event.Event
+	if tw.def.AllowedLateness > 0 {
+		lateEvents = tw.flushLateUpdates()
+	}
+
+	tw.mu.Unlock()
+
+	var events []event.Event
+
+	if len(groups) > 0 {
+		metrics.ViewGroups.WithLabelValues(tw.def.Name).Set(float64(len(groups)))
+		events = tw.emitGroups(groups, windowStart, windowEnd)
+	}
+
+	events = append(events, lateEvents...)
+
+	if len(events) > 0 {
+		metrics.ViewWindowsEmitted.WithLabelValues(tw.def.Name).Add(float64(len(events)))
+	}
+
+	return events
+}
+
+// expireClosedWindows removes closed windows past the allowed lateness. Must be called with mu held.
+func (tw *TumblingWindow) expireClosedWindows(now time.Time) {
+	n := 0
+	for _, cw := range tw.closedWindows {
+		if now.Sub(cw.closedAt) < tw.def.AllowedLateness {
+			tw.closedWindows[n] = cw
+			n++
+		}
+	}
+	tw.closedWindows = tw.closedWindows[:n]
+}
+
+// flushLateUpdates emits corrected results for closed windows that were updated by late events.
+// Must be called with mu held.
+func (tw *TumblingWindow) flushLateUpdates() []event.Event {
+	var events []event.Event
+	for _, cw := range tw.closedWindows {
+		if !cw.reEmit {
+			continue
+		}
+		cw.reEmit = false
+		events = append(events, tw.emitGroups(cw.groups, cw.start, cw.end)...)
+	}
+	return events
+}
+
+// emitGroups builds and returns events for the given groups.
+func (tw *TumblingWindow) emitGroups(groups map[string]*groupState, windowStart, windowEnd time.Time) []event.Event {
 	// Build result rows.
 	var rows []map[string]any
 	for _, gs := range groups {
@@ -203,7 +297,6 @@ func (tw *TumblingWindow) Flush() []event.Event {
 		}
 	}
 
-	metrics.ViewWindowsEmitted.WithLabelValues(tw.def.Name).Add(float64(len(events)))
 	return events
 }
 

@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"sync/atomic"
+	"time"
 
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
@@ -20,6 +22,7 @@ import (
 	"github.com/florinutz/pgcdc/event"
 	"github.com/florinutz/pgcdc/health"
 	"github.com/florinutz/pgcdc/metrics"
+	"github.com/florinutz/pgcdc/pgcdcerr"
 	"github.com/florinutz/pgcdc/snapshot"
 	"github.com/florinutz/pgcdc/transform"
 	"golang.org/x/sync/errgroup"
@@ -94,6 +97,12 @@ type Pipeline struct {
 
 	// OpenTelemetry tracer provider (noop when not configured).
 	tracerProvider trace.TracerProvider
+
+	// Startup validation: skip Validate() calls on adapters.
+	skipValidation bool
+
+	// Shutdown timeout for graceful drain.
+	shutdownTimeout time.Duration
 }
 
 // Option configures a Pipeline.
@@ -209,6 +218,21 @@ func WithTracerProvider(tp trace.TracerProvider) Option {
 	}
 }
 
+// WithSkipValidation disables adapter startup validation.
+func WithSkipValidation(skip bool) Option {
+	return func(p *Pipeline) {
+		p.skipValidation = skip
+	}
+}
+
+// WithShutdownTimeout sets the timeout for graceful adapter drain on shutdown.
+// Defaults to 5s.
+func WithShutdownTimeout(d time.Duration) Option {
+	return func(p *Pipeline) {
+		p.shutdownTimeout = d
+	}
+}
+
 // DLQAware is implemented by adapters that can record failed events to a DLQ.
 type DLQAware interface {
 	SetDLQ(d dlq.DLQ)
@@ -218,7 +242,8 @@ type DLQAware interface {
 // Call Run to start the pipeline.
 func NewPipeline(det detector.Detector, opts ...Option) *Pipeline {
 	p := &Pipeline{
-		detector: det,
+		detector:        det,
+		shutdownTimeout: 5 * time.Second,
 	}
 	for _, o := range opts {
 		o(p)
@@ -284,12 +309,86 @@ func NewPipeline(det detector.Detector, opts ...Option) *Pipeline {
 	return p
 }
 
+// Validate runs startup validation on all adapters that implement the Validator
+// interface. Returns the first error encountered, or nil if all pass. Skipped
+// when WithSkipValidation(true) is set.
+func (p *Pipeline) Validate(ctx context.Context) error {
+	if p.skipValidation {
+		p.logger.Info("adapter validation skipped")
+		return nil
+	}
+	for _, a := range p.adapters {
+		v, ok := a.(adapter.Validator)
+		if !ok {
+			continue
+		}
+		start := time.Now()
+		if err := v.Validate(ctx); err != nil {
+			metrics.ValidationDuration.WithLabelValues(a.Name()).Observe(time.Since(start).Seconds())
+			return &pgcdcerr.ValidationError{Adapter: a.Name(), Err: err}
+		}
+		metrics.ValidationDuration.WithLabelValues(a.Name()).Observe(time.Since(start).Seconds())
+		p.logger.Info("adapter validated", "adapter", a.Name(), "duration", time.Since(start))
+	}
+	return nil
+}
+
+// safeGo wraps errgroup.Go with panic recovery. If the function panics,
+// the panic is recovered, logged, and returned as an error.
+func (p *Pipeline) safeGo(g *errgroup.Group, name string, fn func() error) {
+	g.Go(func() (err error) {
+		defer func() {
+			if r := recover(); r != nil {
+				metrics.PanicsRecovered.WithLabelValues(name).Inc()
+				p.logger.Error("panic recovered",
+					"component", name,
+					"panic", r,
+					"stack", string(debug.Stack()),
+				)
+				err = fmt.Errorf("panic in %s: %v", name, r)
+			}
+		}()
+		return fn()
+	})
+}
+
+// drainAdapters calls Drain() on adapters that implement the Drainer interface.
+func (p *Pipeline) drainAdapters() {
+	ctx, cancel := context.WithTimeout(context.Background(), p.shutdownTimeout)
+	defer cancel()
+
+	for _, a := range p.adapters {
+		d, ok := a.(adapter.Drainer)
+		if !ok {
+			continue
+		}
+		start := time.Now()
+		if err := d.Drain(ctx); err != nil {
+			p.logger.Error("adapter drain failed",
+				"adapter", a.Name(),
+				"error", err,
+				"duration", time.Since(start),
+			)
+		} else {
+			p.logger.Info("adapter drained",
+				"adapter", a.Name(),
+				"duration", time.Since(start),
+			)
+		}
+	}
+}
+
 // Run starts the pipeline and blocks until ctx is cancelled or a fatal error
 // occurs. Context cancellation triggers graceful shutdown. The returned error
 // is nil on clean shutdown (context.Canceled).
 func (p *Pipeline) Run(ctx context.Context) error {
 	if p.checkpointStore != nil {
 		defer func() { _ = p.checkpointStore.Close() }()
+	}
+
+	// Run startup validation.
+	if err := p.Validate(ctx); err != nil {
+		return fmt.Errorf("startup validation: %w", err)
 	}
 
 	// Wire cooperative checkpointing into the detector if supported.
@@ -316,13 +415,13 @@ func (p *Pipeline) Run(ctx context.Context) error {
 
 	// Start backpressure controller if configured.
 	if p.backpressureCtrl != nil {
-		g.Go(func() error {
+		p.safeGo(g, "backpressure", func() error {
 			return p.backpressureCtrl.Run(gCtx)
 		})
 	}
 
 	// Start the bus.
-	g.Go(func() error {
+	p.safeGo(g, "bus", func() error {
 		p.logger.Info("bus started", "buffer_size", p.busBuffer)
 		p.health.SetStatus("bus", health.StatusUp)
 		defer p.health.SetStatus("bus", health.StatusDown)
@@ -330,7 +429,7 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	})
 
 	// Start the detector.
-	g.Go(func() error {
+	p.safeGo(g, p.detector.Name(), func() error {
 		p.logger.Info("detector started", "detector", p.detector.Name())
 		p.health.SetStatus("detector", health.StatusUp)
 		defer p.health.SetStatus("detector", health.StatusDown)
@@ -350,7 +449,7 @@ func (p *Pipeline) Run(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("subscribe adapter %s: %w", a.Name(), err)
 		}
-		g.Go(func() error {
+		p.safeGo(g, a.Name(), func() error {
 			p.logger.Info("adapter started", "adapter", a.Name())
 			p.health.SetStatus(a.Name(), health.StatusUp)
 			defer p.health.SetStatus(a.Name(), health.StatusDown)
@@ -359,6 +458,9 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	}
 
 	err := g.Wait()
+
+	// Drain adapters with in-flight work.
+	p.drainAdapters()
 
 	// context.Canceled is expected on clean shutdown.
 	if err != nil && gCtx.Err() != nil {

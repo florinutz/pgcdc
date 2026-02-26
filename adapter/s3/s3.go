@@ -134,6 +134,25 @@ func (a *Adapter) SetAckFunc(fn adapter.AckFunc) {
 	a.ackFn = fn
 }
 
+// Validate checks S3 bucket accessibility via HeadBucket.
+func (a *Adapter) Validate(ctx context.Context) error {
+	if err := a.initClient(ctx); err != nil {
+		return fmt.Errorf("init s3 client: %w", err)
+	}
+	_, err := a.client.HeadBucket(ctx, &s3.HeadBucketInput{
+		Bucket: &a.bucket,
+	})
+	if err != nil {
+		return fmt.Errorf("head bucket %q: %w", a.bucket, err)
+	}
+	return nil
+}
+
+// Drain flushes remaining buffered events with the drain timeout.
+func (a *Adapter) Drain(ctx context.Context) error {
+	return a.flush(ctx)
+}
+
 // Start blocks, consuming events from the channel and flushing batches to S3.
 func (a *Adapter) Start(ctx context.Context, events <-chan event.Event) error {
 	a.logger.Info("s3 adapter started",

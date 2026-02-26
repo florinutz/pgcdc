@@ -12,22 +12,47 @@ import (
 	_ "github.com/pingcap/tidb/pkg/parser/test_driver" // required for TiDB parser value expressions
 )
 
-var windowRe = regexp.MustCompile(`(?i)\s+TUMBLING\s+WINDOW\s+(\S+)\s*$`)
+var (
+	tumblingRe = regexp.MustCompile(`(?i)\s+TUMBLING\s+WINDOW\s+(\S+)\s*$`)
+	slidingRe  = regexp.MustCompile(`(?i)\s+SLIDING\s+WINDOW\s+(\S+)\s+SLIDE\s+(\S+)\s*$`)
+	sessionRe  = regexp.MustCompile(`(?i)\s+SESSION\s+WINDOW\s+(\S+)\s*$`)
+	latenessRe = regexp.MustCompile(`(?i)\s+ALLOWED\s+LATENESS\s+(\S+)`)
+)
 
 // Parse parses a streaming SQL view query into a ViewDef.
-// The query must SELECT from pgcdc_events and end with TUMBLING WINDOW <duration>.
+// The query must SELECT from pgcdc_events and end with a window clause:
+//   - TUMBLING WINDOW <duration>
+//   - SLIDING WINDOW <duration> SLIDE <duration>
+//   - SESSION WINDOW <duration>
+//
+// Optionally, ALLOWED LATENESS <duration> can appear before the window clause.
 func Parse(name, query string, emit EmitMode, maxGroups int) (*ViewDef, error) {
 	if maxGroups <= 0 {
 		maxGroups = 100000
 	}
 
-	// 1. Extract TUMBLING WINDOW clause (not standard SQL).
-	windowDur, stripped, err := extractWindow(query)
+	// 1. Extract ALLOWED LATENESS clause (before window clause).
+	var allowedLateness time.Duration
+	remaining := query
+	if m := latenessRe.FindStringSubmatch(remaining); m != nil {
+		dur, err := time.ParseDuration(m[1])
+		if err != nil {
+			return nil, fmt.Errorf("invalid allowed lateness duration %q: %w", m[1], err)
+		}
+		if dur < 0 {
+			return nil, fmt.Errorf("allowed lateness must be non-negative, got %v", dur)
+		}
+		allowedLateness = dur
+		remaining = latenessRe.ReplaceAllString(remaining, "")
+	}
+
+	// 2. Extract window clause (not standard SQL).
+	winType, windowSize, slideSize, sessionGap, stripped, err := extractWindowClause(remaining)
 	if err != nil {
 		return nil, err
 	}
 
-	// 2. Parse remaining SQL with TiDB parser.
+	// 3. Parse remaining SQL with TiDB parser.
 	p := parser.New()
 	stmts, _, err := p.Parse(stripped, "", "")
 	if err != nil {
@@ -43,11 +68,15 @@ func Parse(name, query string, emit EmitMode, maxGroups int) (*ViewDef, error) {
 	}
 
 	vd := &ViewDef{
-		Name:       name,
-		Query:      query,
-		Emit:       emit,
-		MaxGroups:  maxGroups,
-		WindowSize: windowDur,
+		Name:            name,
+		Query:           query,
+		Emit:            emit,
+		MaxGroups:       maxGroups,
+		WindowSize:      windowSize,
+		WindowType:      winType,
+		SlideSize:       slideSize,
+		SessionGap:      sessionGap,
+		AllowedLateness: allowedLateness,
 	}
 
 	// 3. Validate FROM.
@@ -110,22 +139,58 @@ func Parse(name, query string, emit EmitMode, maxGroups int) (*ViewDef, error) {
 	return vd, nil
 }
 
-// extractWindow strips the TUMBLING WINDOW suffix and returns the duration.
-func extractWindow(query string) (time.Duration, string, error) {
-	matches := windowRe.FindStringSubmatch(query)
-	if matches == nil {
-		return 0, "", fmt.Errorf("missing TUMBLING WINDOW clause")
+// extractWindowClause strips the window clause suffix and returns the window parameters.
+func extractWindowClause(query string) (WindowType, time.Duration, time.Duration, time.Duration, string, error) {
+	// Try sliding first (more specific pattern matches first to avoid ambiguity).
+	if m := slidingRe.FindStringSubmatch(query); m != nil {
+		windowSize, err := time.ParseDuration(m[1])
+		if err != nil {
+			return 0, 0, 0, 0, "", fmt.Errorf("invalid sliding window size %q: %w", m[1], err)
+		}
+		slideSize, err := time.ParseDuration(m[2])
+		if err != nil {
+			return 0, 0, 0, 0, "", fmt.Errorf("invalid slide size %q: %w", m[2], err)
+		}
+		if windowSize <= 0 {
+			return 0, 0, 0, 0, "", fmt.Errorf("window size must be positive, got %v", windowSize)
+		}
+		if slideSize <= 0 {
+			return 0, 0, 0, 0, "", fmt.Errorf("slide size must be positive, got %v", slideSize)
+		}
+		if slideSize > windowSize {
+			return 0, 0, 0, 0, "", fmt.Errorf("slide size (%v) must not exceed window size (%v)", slideSize, windowSize)
+		}
+		stripped := slidingRe.ReplaceAllString(query, "")
+		return WindowSliding, windowSize, slideSize, 0, stripped, nil
 	}
-	durStr := matches[1]
-	dur, err := time.ParseDuration(durStr)
-	if err != nil {
-		return 0, "", fmt.Errorf("invalid window duration %q: %w", durStr, err)
+
+	// Try session.
+	if m := sessionRe.FindStringSubmatch(query); m != nil {
+		gap, err := time.ParseDuration(m[1])
+		if err != nil {
+			return 0, 0, 0, 0, "", fmt.Errorf("invalid session gap %q: %w", m[1], err)
+		}
+		if gap <= 0 {
+			return 0, 0, 0, 0, "", fmt.Errorf("session gap must be positive, got %v", gap)
+		}
+		stripped := sessionRe.ReplaceAllString(query, "")
+		return WindowSession, 0, 0, gap, stripped, nil
 	}
-	if dur <= 0 {
-		return 0, "", fmt.Errorf("window duration must be positive, got %v", dur)
+
+	// Try tumbling.
+	if m := tumblingRe.FindStringSubmatch(query); m != nil {
+		dur, err := time.ParseDuration(m[1])
+		if err != nil {
+			return 0, 0, 0, 0, "", fmt.Errorf("invalid window duration %q: %w", m[1], err)
+		}
+		if dur <= 0 {
+			return 0, 0, 0, 0, "", fmt.Errorf("window duration must be positive, got %v", dur)
+		}
+		stripped := tumblingRe.ReplaceAllString(query, "")
+		return WindowTumbling, dur, 0, 0, stripped, nil
 	}
-	stripped := windowRe.ReplaceAllString(query, "")
-	return dur, stripped, nil
+
+	return 0, 0, 0, 0, "", fmt.Errorf("missing window clause (TUMBLING WINDOW, SLIDING WINDOW, or SESSION WINDOW)")
 }
 
 // extractTableName walks a TableRefsClause to find the table name.
@@ -178,13 +243,22 @@ func parseSelectField(field *ast.SelectField, groupBy []string) (SelectItem, err
 			return SelectItem{}, err
 		}
 
+		// Handle COUNT(DISTINCT x).
+		if aggFunc == AggCount && funcCall.Distinct {
+			aggFunc = AggCountDistinct
+		}
+
 		innerField := ""
 		if len(funcCall.Args) > 0 {
 			innerField = exprToFieldName(funcCall.Args[0])
 		}
 
 		if alias == "" {
-			alias = strings.ToLower(funcCall.F)
+			if aggFunc == AggCountDistinct {
+				alias = "count_distinct"
+			} else {
+				alias = strings.ToLower(funcCall.F)
+			}
 			if innerField != "" {
 				alias += "_" + strings.ReplaceAll(innerField, ".", "_")
 			}
@@ -237,6 +311,8 @@ func parseAggFunc(name string) (AggFunc, error) {
 		return AggMin, nil
 	case "MAX":
 		return AggMax, nil
+	case "STDDEV", "STDDEV_POP":
+		return AggStddev, nil
 	default:
 		return 0, fmt.Errorf("unsupported aggregate function: %s", name)
 	}
@@ -290,6 +366,10 @@ func autoAggAlias(fn AggFunc, field string) string {
 		name = "min"
 	case AggMax:
 		name = "max"
+	case AggCountDistinct:
+		name = "count_distinct"
+	case AggStddev:
+		name = "stddev"
 	}
 	if field != "" {
 		name += "_" + strings.ReplaceAll(field, ".", "_")
@@ -309,6 +389,8 @@ func aggFuncFromName(name string) AggFunc {
 		return AggMin
 	case "MAX":
 		return AggMax
+	case "STDDEV", "STDDEV_POP":
+		return AggStddev
 	default:
 		return AggCount
 	}

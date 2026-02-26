@@ -231,3 +231,34 @@ func (e *PluginError) Error() string {
 }
 
 func (e *PluginError) Unwrap() error { return e.Err }
+
+// CircuitBreakerOpenError indicates that a delivery was skipped because the
+// circuit breaker is in open state.
+type CircuitBreakerOpenError struct {
+	Adapter string
+}
+
+func (e *CircuitBreakerOpenError) Error() string {
+	return fmt.Sprintf("circuit breaker open for adapter %s", e.Adapter)
+}
+
+// ValidationError indicates that an adapter's startup validation failed.
+type ValidationError struct {
+	Adapter string
+	Err     error
+}
+
+func (e *ValidationError) Error() string {
+	return fmt.Sprintf("validation failed for adapter %s: %v", e.Adapter, e.Err)
+}
+
+func (e *ValidationError) Unwrap() error { return e.Err }
+
+// RateLimitExceededError indicates that a rate limiter wait was cancelled.
+type RateLimitExceededError struct {
+	Adapter string
+}
+
+func (e *RateLimitExceededError) Error() string {
+	return fmt.Sprintf("rate limit exceeded for adapter %s", e.Adapter)
+}

@@ -139,34 +139,143 @@ func TestParse_SelectAliases(t *testing.T) {
 	}
 }
 
-func TestExtractWindow(t *testing.T) {
+func TestExtractWindowClause(t *testing.T) {
 	tests := []struct {
-		input   string
-		wantDur time.Duration
-		wantErr bool
+		input     string
+		wantType  WindowType
+		wantSize  time.Duration
+		wantSlide time.Duration
+		wantGap   time.Duration
+		wantErr   bool
 	}{
-		{"SELECT * FROM t TUMBLING WINDOW 1m", time.Minute, false},
-		{"SELECT * FROM t TUMBLING WINDOW 30s", 30 * time.Second, false},
-		{"SELECT * FROM t TUMBLING WINDOW 5m", 5 * time.Minute, false},
-		{"SELECT * FROM t tumbling window 1h", time.Hour, false},
-		{"SELECT * FROM t", 0, true},
-		{"SELECT * FROM t TUMBLING WINDOW -1s", 0, true},
+		{"SELECT * FROM t TUMBLING WINDOW 1m", WindowTumbling, time.Minute, 0, 0, false},
+		{"SELECT * FROM t TUMBLING WINDOW 30s", WindowTumbling, 30 * time.Second, 0, 0, false},
+		{"SELECT * FROM t TUMBLING WINDOW 5m", WindowTumbling, 5 * time.Minute, 0, 0, false},
+		{"SELECT * FROM t tumbling window 1h", WindowTumbling, time.Hour, 0, 0, false},
+		{"SELECT * FROM t", 0, 0, 0, 0, true},
+		{"SELECT * FROM t TUMBLING WINDOW -1s", 0, 0, 0, 0, true},
+		{"SELECT * FROM t SLIDING WINDOW 5m SLIDE 1m", WindowSliding, 5 * time.Minute, time.Minute, 0, false},
+		{"SELECT * FROM t SESSION WINDOW 30s", WindowSession, 0, 0, 30 * time.Second, false},
 	}
 
 	for _, tt := range tests {
-		dur, _, err := extractWindow(tt.input)
+		winType, size, slide, gap, _, err := extractWindowClause(tt.input)
 		if tt.wantErr {
 			if err == nil {
-				t.Errorf("extractWindow(%q): expected error", tt.input)
+				t.Errorf("extractWindowClause(%q): expected error", tt.input)
 			}
 			continue
 		}
 		if err != nil {
-			t.Errorf("extractWindow(%q): %v", tt.input, err)
+			t.Errorf("extractWindowClause(%q): %v", tt.input, err)
 			continue
 		}
-		if dur != tt.wantDur {
-			t.Errorf("extractWindow(%q) = %v, want %v", tt.input, dur, tt.wantDur)
+		if winType != tt.wantType {
+			t.Errorf("extractWindowClause(%q) type = %v, want %v", tt.input, winType, tt.wantType)
 		}
+		if size != tt.wantSize {
+			t.Errorf("extractWindowClause(%q) size = %v, want %v", tt.input, size, tt.wantSize)
+		}
+		if slide != tt.wantSlide {
+			t.Errorf("extractWindowClause(%q) slide = %v, want %v", tt.input, slide, tt.wantSlide)
+		}
+		if gap != tt.wantGap {
+			t.Errorf("extractWindowClause(%q) gap = %v, want %v", tt.input, gap, tt.wantGap)
+		}
+	}
+}
+
+func TestParse_SlidingWindow(t *testing.T) {
+	def, err := Parse("test", "SELECT COUNT(*) as n FROM pgcdc_events SLIDING WINDOW 5m SLIDE 1m", EmitRow, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if def.WindowType != WindowSliding {
+		t.Errorf("window type = %v, want WindowSliding", def.WindowType)
+	}
+	if def.WindowSize != 5*time.Minute {
+		t.Errorf("window size = %v, want 5m", def.WindowSize)
+	}
+	if def.SlideSize != time.Minute {
+		t.Errorf("slide size = %v, want 1m", def.SlideSize)
+	}
+}
+
+func TestParse_SessionWindow(t *testing.T) {
+	def, err := Parse("test", "SELECT COUNT(*) as n FROM pgcdc_events SESSION WINDOW 30s", EmitRow, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if def.WindowType != WindowSession {
+		t.Errorf("window type = %v, want WindowSession", def.WindowType)
+	}
+	if def.SessionGap != 30*time.Second {
+		t.Errorf("session gap = %v, want 30s", def.SessionGap)
+	}
+}
+
+func TestParse_AllowedLateness(t *testing.T) {
+	def, err := Parse("test", "SELECT COUNT(*) as n FROM pgcdc_events ALLOWED LATENESS 10s TUMBLING WINDOW 1m", EmitRow, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if def.AllowedLateness != 10*time.Second {
+		t.Errorf("allowed lateness = %v, want 10s", def.AllowedLateness)
+	}
+	if def.WindowType != WindowTumbling {
+		t.Errorf("window type = %v, want WindowTumbling", def.WindowType)
+	}
+	if def.WindowSize != time.Minute {
+		t.Errorf("window size = %v, want 1m", def.WindowSize)
+	}
+}
+
+func TestParse_CountDistinct(t *testing.T) {
+	def, err := Parse("test", "SELECT COUNT(DISTINCT payload.user_id) as unique_users FROM pgcdc_events TUMBLING WINDOW 1m", EmitRow, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(def.SelectItems) != 1 {
+		t.Fatalf("select items = %d, want 1", len(def.SelectItems))
+	}
+
+	si := def.SelectItems[0]
+	if si.Aggregate == nil {
+		t.Fatal("expected aggregate, got nil")
+	}
+	if *si.Aggregate != AggCountDistinct {
+		t.Errorf("aggregate = %v, want AggCountDistinct", *si.Aggregate)
+	}
+	if si.Alias != "unique_users" {
+		t.Errorf("alias = %q, want unique_users", si.Alias)
+	}
+	if si.Field != "payload.user_id" {
+		t.Errorf("field = %q, want payload.user_id", si.Field)
+	}
+}
+
+func TestParse_Stddev(t *testing.T) {
+	def, err := Parse("test", "SELECT STDDEV(payload.amount) as amount_stddev FROM pgcdc_events TUMBLING WINDOW 1m", EmitRow, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(def.SelectItems) != 1 {
+		t.Fatalf("select items = %d, want 1", len(def.SelectItems))
+	}
+
+	si := def.SelectItems[0]
+	if si.Aggregate == nil {
+		t.Fatal("expected aggregate, got nil")
+	}
+	if *si.Aggregate != AggStddev {
+		t.Errorf("aggregate = %v, want AggStddev", *si.Aggregate)
+	}
+	if si.Alias != "amount_stddev" {
+		t.Errorf("alias = %q, want amount_stddev", si.Alias)
 	}
 }

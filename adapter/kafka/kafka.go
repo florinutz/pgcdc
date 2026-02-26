@@ -59,6 +59,27 @@ func (a *Adapter) SetAckFunc(fn adapter.AckFunc) { a.ackFn = fn }
 // Name returns the adapter name.
 func (a *Adapter) Name() string { return adapterName }
 
+// Validate checks Kafka broker connectivity by creating a temporary client
+// and calling Metadata.
+func (a *Adapter) Validate(ctx context.Context) error {
+	client, err := kgo.NewClient(a.opts...)
+	if err != nil {
+		return fmt.Errorf("create kafka client: %w", err)
+	}
+	defer client.Close()
+	if err := client.Ping(ctx); err != nil {
+		return fmt.Errorf("kafka ping: %w", err)
+	}
+	return nil
+}
+
+// Drain flushes any buffered Kafka records.
+func (a *Adapter) Drain(ctx context.Context) error {
+	// franz-go client is per-run; nothing to drain at pipeline level.
+	// The run loop handles its own flushing on context cancel.
+	return nil
+}
+
 // New creates a Kafka adapter. Duration parameters default to sensible values
 // when zero. If encoder is nil, events are sent as raw JSON (current behavior).
 // When transactionalID is non-empty, each event is produced inside its own

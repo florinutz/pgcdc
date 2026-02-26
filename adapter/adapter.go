@@ -31,6 +31,21 @@ type Traceable interface {
 	SetTracer(t trace.Tracer)
 }
 
+// Validator is implemented by adapters that can verify their external
+// dependencies (e.g. DNS resolution, connectivity, bucket existence) before
+// the pipeline starts. Pipeline calls Validate() after construction; failures
+// abort startup unless --skip-validation is set.
+type Validator interface {
+	Validate(ctx context.Context) error
+}
+
+// Drainer is implemented by adapters that need to flush in-flight work during
+// graceful shutdown. Pipeline calls Drain() after the errgroup returns, with a
+// context bounded by shutdown_timeout.
+type Drainer interface {
+	Drain(ctx context.Context) error
+}
+
 // Reinjector is implemented by adapters that produce events back into the bus
 // (e.g. the view adapter emits VIEW_RESULT events). The pipeline injects the
 // bus ingest channel before starting adapters.

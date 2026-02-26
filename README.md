@@ -124,7 +124,7 @@ pgcdc listen --detector mongodb \
 | **s3** | `-a s3 --s3-bucket <name>` | Flush to S3-compatible storage (JSON Lines/Parquet). |
 | **iceberg** | `-a iceberg --iceberg-warehouse <path>` | Apache Iceberg table writes. |
 | **kafkaserver** | `-a kafkaserver --kafkaserver-addr :9092` | Kafka wire protocol server. Any Kafka consumer connects directly — no Kafka cluster needed. Channels become topics, N partitions, consumer groups. |
-| **view** | `-a view` (or `views:` YAML) | Streaming SQL over CDC events. Tumbling windows, GROUP BY, COUNT/SUM/AVG/MIN/MAX with HAVING. Results re-injected as `VIEW_RESULT` events. |
+| **view** | `-a view` (or `views:` YAML / `--view-query`) | Streaming SQL over CDC events. Tumbling, sliding, and session windows. GROUP BY, COUNT/SUM/AVG/MIN/MAX/COUNT(DISTINCT)/STDDEV with HAVING. Results re-injected as `VIEW_RESULT` events. |
 
 Use multiple adapters: `-a stdout -a webhook -a redis`
 
@@ -423,6 +423,86 @@ On cache miss (cold start, evicted entry, no PK), the event includes null for th
 ```
 
 **Adapter-aware handling**: the search and redis adapters understand this metadata. The search adapter strips unchanged columns and uses a partial update (PATCH for Typesense, merge for Meilisearch). The redis sync adapter does `GET` → merge → `SET` to avoid overwriting stored data with null.
+
+## Streaming SQL Views
+
+Run real-time analytics over CDC events with SQL-like queries:
+
+```bash
+# Tumbling window: fixed 10-second buckets
+pgcdc listen --all-tables -a stdout \
+  --view-query 'order_counts:SELECT channel, COUNT(*) as cnt FROM pgcdc_events TUMBLING WINDOW 10s GROUP BY channel' \
+  --db postgres://...
+
+# Sliding window: 60-second window, slide every 10 seconds
+pgcdc listen --all-tables -a stdout \
+  --view-query 'smooth_avg:SELECT channel, AVG(CAST(payload.amount AS DECIMAL)) as avg_amount FROM pgcdc_events SLIDING WINDOW 60s SLIDE 10s GROUP BY channel' \
+  --db postgres://...
+
+# Session window: group events with 30-second inactivity gap
+pgcdc listen --all-tables -a stdout \
+  --view-query 'sessions:SELECT channel, COUNT(*) as cnt FROM pgcdc_events SESSION WINDOW 30s GROUP BY channel' \
+  --db postgres://...
+```
+
+Three window types:
+- **Tumbling**: Fixed-size non-overlapping time buckets. Optional `ALLOWED LATENESS <duration>` for late events.
+- **Sliding**: Overlapping windows of size W with slide interval S. Smooth metric curves.
+- **Session**: Gap-based windows that close after inactivity timeout. Ideal for user behavior analysis.
+
+Aggregates: `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, `COUNT(DISTINCT ...)`, `STDDEV`/`STDDEV_POP`.
+
+Results are emitted as `VIEW_RESULT` events on `pgcdc:_view:<name>` channels, re-injected into the bus for downstream adapters.
+
+Views can also be configured via YAML:
+
+```yaml
+views:
+  order_counts:
+    query: "SELECT channel, COUNT(*) as cnt FROM pgcdc_events TUMBLING WINDOW 10s GROUP BY channel"
+    emit: row        # or batch
+    max_groups: 1000
+```
+
+## Validate and Playground
+
+```bash
+# Validate configuration without starting the pipeline
+pgcdc validate --db postgres://...
+
+# Start a self-contained demo environment (requires Docker)
+pgcdc playground
+```
+
+`pgcdc validate` checks database connectivity and adapter configurations, reporting pass/fail status per component.
+
+`pgcdc playground` spins up a PostgreSQL container, creates demo tables with triggers, and streams changes through pgcdc with auto-generated data.
+
+## Startup Options
+
+```bash
+# Skip adapter pre-flight validation (e.g., for read-only DB users)
+pgcdc listen --all-tables --skip-validation --db postgres://...
+
+# Skip automatic schema migrations
+pgcdc listen --all-tables --skip-migrations --db postgres://...
+```
+
+## Slim Binary
+
+pgcdc ships a slim build variant that excludes heavy adapters for minimal deployments:
+
+```bash
+# Build slim binary (~60% smaller)
+make build-slim
+
+# Or with specific build tags
+go build -tags "no_kafka,no_grpc,no_nats,no_redis,no_plugins,no_kafkaserver,no_views" ./cmd/pgcdc
+```
+
+Available build tags: `no_kafka`, `no_grpc`, `no_iceberg`, `no_nats`, `no_redis`, `no_plugins`, `no_kafkaserver`, `no_views`.
+
+Homebrew: `brew install florinutz/tap/pgcdc` (full) or `brew install florinutz/tap/pgcdc-slim` (slim).
 
 ## Development
 
