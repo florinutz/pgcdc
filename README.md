@@ -32,8 +32,8 @@ pgcdc is the only single-binary CDC tool combining multi-source capture, a built
 |--|-------|----------|--------|---------|
 | Single binary | Yes | No (JVM+Kafka) | No (managed) | Yes |
 | Memory (idle) | **15 MB** | 288 MB | N/A | ~50 MB |
-| Throughput | **195K events/sec** | 2.5K events/sec | N/A | N/A |
-| Latency (p50) | **2.4 ms** | 654 ms | N/A | N/A |
+| Throughput | **166K events/sec** | 2.2K events/sec | N/A | N/A |
+| Latency (p50) | **2.3 ms** | 548 ms | N/A | N/A |
 | PG/MySQL/MongoDB | Yes | Generic | Yes | Generic |
 | Built-in pgvector sync | Yes | No | No | No |
 | Smart embedding skip | Yes | No | No | No |
@@ -50,21 +50,24 @@ pgcdc is the only single-binary CDC tool combining multi-source capture, a built
 
 ### Benchmarks (pgcdc vs Debezium Server)
 
-Automated, reproducible benchmarks running both tools against the same PostgreSQL 16 instance with testcontainers. pgcdc runs in-process (Go); Debezium Server 2.5 runs in a JVM container with HTTP sink. Apple M2 Max, 16 GB RAM.
+Automated, reproducible benchmarks running both tools against the same PostgreSQL 16 instance with testcontainers. Debezium Server 2.5 runs in a JVM container with HTTP sink. Apple M2 Max, 16 GB RAM.
 
-| Metric | pgcdc | Debezium Server | Factor |
-|--------|------:|----------------:|-------:|
-| **Startup to first event** | 2.1 s | 2.9 s | 1.4x faster |
-| **Memory at idle** | 15 MB | 288 MB | **19x less** |
-| **Throughput** (10K rows) | 195,008 events/sec | 2,502 events/sec | **78x faster** |
-| **Latency p50** | 2.4 ms | 654 ms | **273x lower** |
-| **Latency p99** | 4.7 ms | 941 ms | **200x lower** |
+| Metric | pgcdc (channel) | pgcdc (HTTP sink) | Debezium Server |
+|--------|----------------:|------------------:|----------------:|
+| **Startup to first event** | 2.1 s | — | 3.2 s |
+| **Memory at idle** | **15 MB** | **15 MB** | 321 MB |
+| **Throughput** (10K rows) | 165,615 events/sec | **18,061 events/sec** | 2,221 events/sec |
+| **Latency p50** | 2.3 ms | **2.7 ms** | 548 ms |
+| **Latency p99** | 5.2 ms | **6.7 ms** | 842 ms |
+
+_pgcdc (channel)_ uses an in-process Go channel — zero network overhead, pgcdc's native fastest path.
+_pgcdc (HTTP sink)_ uses the webhook adapter (HTTP POST to localhost) — the same delivery mechanism as Debezium's HTTP sink. **Even with HTTP overhead, pgcdc delivers 8× more throughput and 200× lower p50 latency.**
 
 <details>
 <summary>Reproduce these results</summary>
 
 ```bash
-make bench-debezium  # requires Docker, ~1-2 min
+make bench-debezium  # requires Docker, ~2 min
 ```
 
 Or run pgcdc-only benchmarks (no Debezium container):

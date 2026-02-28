@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/florinutz/pgcdc/adapter"
+	"github.com/florinutz/pgcdc/adapter/webhook"
 	"github.com/florinutz/pgcdc/bus"
 	"github.com/florinutz/pgcdc/detector/walreplication"
 	"github.com/florinutz/pgcdc/event"
@@ -599,6 +600,12 @@ func BenchmarkComparison_Throughput(b *testing.B) {
 		}
 	})
 
+	b.Run("pgcdc_webhook", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			benchThroughputPgcdcWebhook(b, table, pubName, rows)
+		}
+	})
+
 	b.Run("debezium", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
 			benchThroughputDebezium(b, table, rows)
@@ -669,6 +676,89 @@ func benchThroughputPgcdc(b *testing.B, table, pubName string, rows int) {
 	b.ReportMetric(eventsPerSec, "events/sec")
 	b.ReportMetric(duration.Seconds(), "total_sec")
 	b.Logf("pgcdc throughput: %.0f events/sec (%d events in %v)", eventsPerSec, rows, duration)
+
+	cancel()
+	g.Wait()
+
+	// Cleanup.
+	cleanCtx := context.Background()
+	cleanConn, _ := pgx.Connect(cleanCtx, dbzConnStr)
+	cleanConn.Exec(cleanCtx, fmt.Sprintf("TRUNCATE %s", pgx.Identifier{table}.Sanitize()))
+	cleanConn.Close(cleanCtx)
+}
+
+func benchThroughputPgcdcWebhook(b *testing.B, table, pubName string, rows int) {
+	b.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	counter, err := newHTTPEventCounter()
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer counter.close()
+
+	_, sinkPort, _ := net.SplitHostPort(counter.addr)
+	sinkURL := fmt.Sprintf("http://127.0.0.1:%s/", sinkPort)
+
+	wh := webhook.New(sinkURL, nil, "", 3, 30*time.Second, 100*time.Millisecond, 5*time.Second, logger)
+	det := walreplication.New(dbzConnStr, pubName, 0, 0, false, false, logger)
+	b2 := bus.New(65536, logger)
+
+	g, gCtx := errgroup.WithContext(ctx)
+	g.Go(func() error { return b2.Start(gCtx) })
+	g.Go(func() error { return det.Start(gCtx, b2.Ingest()) })
+
+	sub, err := b2.Subscribe(wh.Name())
+	if err != nil {
+		b.Fatal(err)
+	}
+	g.Go(func() error { return wh.Start(gCtx, sub) })
+
+	// Wait for detector to be ready.
+	time.Sleep(2 * time.Second)
+
+	// Bulk insert.
+	conn, err := pgx.Connect(ctx, dbzConnStr)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer conn.Close(ctx)
+
+	safeTable := pgx.Identifier{table}.Sanitize()
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		b.Fatal(err)
+	}
+	for j := 0; j < rows; j++ {
+		data, _ := json.Marshal(map[string]interface{}{"i": j, "name": fmt.Sprintf("row-%d", j)})
+		tx.Exec(ctx, fmt.Sprintf("INSERT INTO %s (data) VALUES ($1)", safeTable), data)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		b.Fatal(err)
+	}
+
+	// Wait for all events.
+	deadline := time.After(3 * time.Minute)
+	for counter.count.Load() < int64(rows) {
+		select {
+		case <-deadline:
+			b.Fatalf("timeout: only received %d/%d events", counter.count.Load(), rows)
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+
+	firstNano := counter.firstAt.Load()
+	lastNano := counter.lastAt.Load()
+	duration := time.Duration(lastNano - firstNano)
+	eventsPerSec := float64(rows) / duration.Seconds()
+
+	b.ReportMetric(eventsPerSec, "events/sec")
+	b.ReportMetric(duration.Seconds(), "total_sec")
+	b.Logf("pgcdc_webhook throughput: %.0f events/sec (%d events in %v)", eventsPerSec, rows, duration)
 
 	cancel()
 	g.Wait()
@@ -770,6 +860,12 @@ func BenchmarkComparison_Latency(b *testing.B) {
 		}
 	})
 
+	b.Run("pgcdc_webhook", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			benchLatencyPgcdcWebhook(b, table, pubName)
+		}
+	})
+
 	b.Run("debezium", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
 			benchLatencyDebezium(b, table)
@@ -862,6 +958,100 @@ func benchLatencyPgcdc(b *testing.B, table, pubName string) {
 	b.ReportMetric(float64(p50.Microseconds()), "p50_us")
 	b.ReportMetric(float64(p99.Microseconds()), "p99_us")
 	b.Logf("pgcdc latency p50=%v p99=%v (n=%d)", p50, p99, len(latencies))
+
+	// Cleanup.
+	cleanCtx := context.Background()
+	cleanConn, _ := pgx.Connect(cleanCtx, dbzConnStr)
+	cleanConn.Exec(cleanCtx, fmt.Sprintf("TRUNCATE %s", pgx.Identifier{table}.Sanitize()))
+	cleanConn.Close(cleanCtx)
+}
+
+func benchLatencyPgcdcWebhook(b *testing.B, table, pubName string) {
+	b.Helper()
+	const samples = 200
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	counter, err := newHTTPEventCounter()
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer counter.close()
+
+	_, sinkPort, _ := net.SplitHostPort(counter.addr)
+	sinkURL := fmt.Sprintf("http://127.0.0.1:%s/", sinkPort)
+
+	wh := webhook.New(sinkURL, nil, "", 3, 30*time.Second, 100*time.Millisecond, 5*time.Second, logger)
+	det := walreplication.New(dbzConnStr, pubName, 0, 0, false, false, logger)
+	b2 := bus.New(65536, logger)
+
+	g, gCtx := errgroup.WithContext(ctx)
+	g.Go(func() error { return b2.Start(gCtx) })
+	g.Go(func() error { return det.Start(gCtx, b2.Ingest()) })
+
+	sub, err := b2.Subscribe(wh.Name())
+	if err != nil {
+		b.Fatal(err)
+	}
+	g.Go(func() error { return wh.Start(gCtx, sub) })
+
+	time.Sleep(2 * time.Second)
+
+	// Insert one at a time, recording send times.
+	conn, err := pgx.Connect(ctx, dbzConnStr)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	safeTable := pgx.Identifier{table}.Sanitize()
+	sendTimes := make([]time.Time, samples)
+	for i := 0; i < samples; i++ {
+		data, _ := json.Marshal(map[string]interface{}{"i": i})
+		sendTimes[i] = time.Now()
+		conn.Exec(ctx, fmt.Sprintf("INSERT INTO %s (data) VALUES ($1)", safeTable), data)
+		time.Sleep(10 * time.Millisecond)
+	}
+	conn.Close(ctx)
+
+	// Wait for all events.
+	deadline := time.After(30 * time.Second)
+	for counter.count.Load() < int64(samples) {
+		select {
+		case <-deadline:
+			b.Fatalf("timeout: only received %d/%d events", counter.count.Load(), samples)
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+
+	cancel()
+	g.Wait()
+
+	// Calculate latencies.
+	counter.mu.Lock()
+	defer counter.mu.Unlock()
+
+	latencies := make([]time.Duration, 0, samples)
+	for i := 0; i < samples && i < len(counter.times); i++ {
+		d := counter.times[i].Sub(sendTimes[i])
+		if d > 0 {
+			latencies = append(latencies, d)
+		}
+	}
+	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
+
+	if len(latencies) == 0 {
+		b.Fatal("no valid latency samples")
+	}
+
+	p50 := latencies[len(latencies)*50/100]
+	p99 := latencies[len(latencies)*99/100]
+
+	b.ReportMetric(float64(p50.Microseconds()), "p50_us")
+	b.ReportMetric(float64(p99.Microseconds()), "p99_us")
+	b.Logf("pgcdc_webhook latency p50=%v p99=%v (n=%d)", p50, p99, len(latencies))
 
 	// Cleanup.
 	cleanCtx := context.Background()
