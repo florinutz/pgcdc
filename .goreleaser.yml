@@ -59,7 +59,7 @@ brews:
       name: homebrew-tap
     homepage: "https://github.com/florinutz/pgcdc"
     description: "Stream database changes to webhooks, SSE, Kafka, and more"
-    license: "MIT"
+    license: "Apache-2.0"
     install: |
       bin.install "pgcdc"
     test: |

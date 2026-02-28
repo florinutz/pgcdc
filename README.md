@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/florinutz/pgcdc/actions/workflows/ci.yml/badge.svg)](https://github.com/florinutz/pgcdc/actions/workflows/ci.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/florinutz/pgcdc)](https://goreportcard.com/report/github.com/florinutz/pgcdc)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Go Reference](https://pkg.go.dev/badge/github.com/florinutz/pgcdc.svg)](https://pkg.go.dev/github.com/florinutz/pgcdc)
 
 ```bash
@@ -353,4 +353,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the full development guide.
 
 ## License
 
-MIT
+Apache 2.0
