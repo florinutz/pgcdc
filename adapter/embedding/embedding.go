@@ -397,6 +397,63 @@ type payload struct {
 // concatenated text content, whether this is a DELETE operation, and the
 // parsed payload (for change detection).
 func (a *Adapter) extractPayload(ev event.Event) (sourceID, sourceTable, content string, isDel bool, p payload) {
+	// Structured record path: zero JSON parsing.
+	if rec := ev.Record(); rec != nil && rec.Operation != 0 &&
+		(rec.Change.After != nil || rec.Change.Before != nil) {
+		isDel = rec.Operation == event.OperationDelete
+		sourceTable = rec.Metadata[event.MetaTable]
+
+		var row map[string]any
+		var old map[string]any
+		if rec.Change.After != nil {
+			row = rec.Change.After.ToMap()
+		}
+		if rec.Change.Before != nil {
+			old = rec.Change.Before.ToMap()
+		}
+
+		// For DELETE, row data is in Before.
+		if isDel && row == nil {
+			row = old
+			old = nil
+		}
+
+		if row == nil {
+			return "", sourceTable, "", isDel, p
+		}
+
+		// Extract source ID.
+		if v, ok := row[a.idColumn]; ok && v != nil {
+			if s, ok := v.(string); ok {
+				sourceID = s
+			} else {
+				sourceID = fmt.Sprintf("%v", v)
+			}
+		}
+
+		// Concatenate text columns.
+		var parts []string
+		for _, col := range a.columns {
+			if v, ok := row[col]; ok && v != nil {
+				if s, ok := v.(string); ok {
+					parts = append(parts, s)
+				} else {
+					parts = append(parts, fmt.Sprintf("%v", v))
+				}
+			}
+		}
+		content = strings.Join(parts, " ")
+
+		// Populate p for embeddingColumnsChanged compatibility.
+		p.Op = rec.Operation.String()
+		p.Table = sourceTable
+		p.Row = row
+		p.Old = old
+
+		return sourceID, sourceTable, content, isDel, p
+	}
+
+	// Legacy path: parse payload JSON.
 	if err := json.Unmarshal(ev.Payload, &p); err != nil {
 		a.logger.Warn("failed to parse event payload", "event_id", ev.ID, "error", err)
 		return "", "", "", false, p

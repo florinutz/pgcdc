@@ -3,7 +3,6 @@ package mysql
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -281,27 +280,30 @@ func (d *Detector) emitSingleEvent(
 	row, old map[string]any,
 	encodedLSN uint64,
 ) error {
-	payload := map[string]any{
-		"op":     op,
-		"table":  table,
-		"schema": schema,
-		"row":    row,
-		"old":    old,
+	rec := &event.Record{
+		Position:  event.NewPosition(encodedLSN),
+		Operation: event.ParseOperation(op),
+		Metadata: event.Metadata{
+			event.MetaTable:  table,
+			event.MetaSchema: schema,
+		},
 	}
 
-	payloadJSON, err := json.Marshal(payload)
-	if err != nil {
-		d.logger.Error("marshal payload failed", "error", err)
-		return nil
+	switch op {
+	case "DELETE":
+		rec.Change.Before = event.NewStructuredDataFromMap(row)
+	case "UPDATE":
+		rec.Change.After = event.NewStructuredDataFromMap(row)
+		rec.Change.Before = event.NewStructuredDataFromMap(old)
+	default:
+		rec.Change.After = event.NewStructuredDataFromMap(row)
 	}
 
-	ev, err := event.New(channel, op, payloadJSON, sourceName)
+	ev, err := event.NewFromRecord(channel, rec, sourceName)
 	if err != nil {
 		d.logger.Error("create event failed", "error", err)
 		return nil
 	}
-
-	ev.LSN = encodedLSN
 
 	if d.tracer != nil {
 		_, span := d.tracer.Start(ctx, "pgcdc.detect",

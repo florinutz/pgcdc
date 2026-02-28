@@ -43,6 +43,10 @@ type Config struct {
 	KafkaServer         KafkaServerConfig           `mapstructure:"kafkaserver"`
 	Views               []ViewConfig                `mapstructure:"views"`
 	Middleware          map[string]MiddlewareConfig `mapstructure:"middleware"` // adapter name -> middleware config
+	Inspector           InspectorConfig             `mapstructure:"inspector"`
+	Schema              SchemaConfig                `mapstructure:"schema"`
+	DetectorMode        string                      `mapstructure:"detector_mode"` // sequential, parallel, or failover (for multi-detector)
+	PipelineName        string                      `mapstructure:"pipeline_name"` // per-pipeline metric label
 }
 
 type OTelConfig struct {
@@ -57,9 +61,21 @@ type BusConfig struct {
 }
 
 type DLQConfig struct {
-	Type  string `mapstructure:"type"`
-	Table string `mapstructure:"table"`
-	DBURL string `mapstructure:"db_url"`
+	Type            string `mapstructure:"type"`
+	Table           string `mapstructure:"table"`
+	DBURL           string `mapstructure:"db_url"`
+	WindowSize      int    `mapstructure:"window_size"`      // nack window size (default 100)
+	WindowThreshold int    `mapstructure:"window_threshold"` // nack count to trigger pause (default window_size/2)
+}
+
+type InspectorConfig struct {
+	BufferSize int `mapstructure:"buffer_size"` // ring buffer size per tap point (default 100)
+}
+
+type SchemaConfig struct {
+	Enabled bool   `mapstructure:"enabled"` // enable schema versioning
+	Store   string `mapstructure:"store"`   // "memory" or "pg" (default "memory")
+	DBURL   string `mapstructure:"db_url"`  // PostgreSQL URL for pg store (default: same as --db)
 }
 
 type TransformConfig struct {
@@ -68,13 +84,14 @@ type TransformConfig struct {
 }
 
 type TransformSpec struct {
-	Type        string            `mapstructure:"type"`        // drop_columns, rename_fields, mask, filter, debezium, cloudevents
+	Type        string            `mapstructure:"type"`        // drop_columns, rename_fields, mask, filter, debezium, cloudevents, cel_filter
 	Columns     []string          `mapstructure:"columns"`     // for drop_columns
 	Mapping     map[string]string `mapstructure:"mapping"`     // for rename_fields
 	Fields      []MaskFieldSpec   `mapstructure:"fields"`      // for mask
 	Filter      FilterSpec        `mapstructure:"filter"`      // for filter
 	Debezium    DebeziumSpec      `mapstructure:"debezium"`    // for debezium
 	CloudEvents CloudEventsSpec   `mapstructure:"cloudevents"` // for cloudevents
+	Expression  string            `mapstructure:"expression"`  // for cel_filter
 }
 
 type CloudEventsSpec struct {
@@ -252,6 +269,12 @@ func Default() Config {
 			BufferSize:     10000,
 			SessionTimeout: 30 * time.Second,
 			KeyColumn:      "id",
+		},
+		Inspector: InspectorConfig{
+			BufferSize: 100,
+		},
+		Schema: SchemaConfig{
+			Store: "memory",
 		},
 		Embedding: EmbeddingConfig{
 			Model:       "text-embedding-3-small",

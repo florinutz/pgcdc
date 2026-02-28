@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/florinutz/pgcdc/dlq"
@@ -207,6 +208,41 @@ type payload struct {
 }
 
 func (a *Adapter) extractPayload(ev event.Event) (id string, row map[string]interface{}, isDel bool, unchangedToast []string) {
+	// Structured record path: zero JSON parsing.
+	if rec := ev.Record(); rec != nil && rec.Operation != 0 &&
+		(rec.Change.After != nil || rec.Change.Before != nil) {
+		isDel = rec.Operation == event.OperationDelete
+
+		if isDel {
+			if rec.Change.Before != nil {
+				row = rec.Change.Before.ToMap()
+			}
+		} else {
+			if rec.Change.After != nil {
+				row = rec.Change.After.ToMap()
+			}
+		}
+
+		if row == nil {
+			return "", nil, isDel, nil
+		}
+		if v, ok := row[a.idColumn]; ok && v != nil {
+			if s, ok := v.(string); ok {
+				id = s
+			} else {
+				id = fmt.Sprintf("%v", v)
+			}
+		}
+
+		// Unchanged TOAST columns from metadata.
+		if toastCSV, ok := rec.Metadata[event.MetaUnchangedToastCols]; ok && toastCSV != "" {
+			unchangedToast = strings.Split(toastCSV, ",")
+		}
+
+		return id, row, isDel, unchangedToast
+	}
+
+	// Legacy path: parse payload JSON.
 	var p payload
 	if err := json.Unmarshal(ev.Payload, &p); err != nil {
 		return "", nil, false, nil

@@ -31,6 +31,32 @@ func init() {
 			{"redis-key-prefix", "redis.key_prefix"},
 			{"redis-id-column", "redis.id_column"},
 		},
+		Spec: []registry.ParamSpec{
+			{
+				Name:        "redis-url",
+				Type:        "string",
+				Required:    true,
+				Description: "Redis URL (e.g. redis://localhost:6379)",
+			},
+			{
+				Name:        "redis-mode",
+				Type:        "string",
+				Default:     "invalidate",
+				Description: "Redis mode",
+				Validations: []string{"oneof:invalidate,sync"},
+			},
+			{
+				Name:        "redis-key-prefix",
+				Type:        "string",
+				Description: "Redis key prefix (e.g. orders:)",
+			},
+			{
+				Name:        "redis-id-column",
+				Type:        "string",
+				Default:     "id",
+				Description: "Row ID column for Redis keys",
+			},
+		},
 	})
 
 	// Redis adapter flags.

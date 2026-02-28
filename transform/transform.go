@@ -191,3 +191,37 @@ func readPayload(ev event.Event) (map[string]any, bool) {
 	}
 	return m, true
 }
+
+// withRecordData applies a mutator to both Before and After StructuredData
+// in an event's Record. If the event has a structured Record, the mutator
+// operates directly on the StructuredData (zero JSON parsing). Falls back
+// to withPayload for legacy events. The mutator is called once per non-nil
+// side (Before/After).
+func withRecordData(ev event.Event, mutate func(sd *event.StructuredData)) (event.Event, error) {
+	rec := ev.Record()
+	if rec == nil {
+		return ev, nil
+	}
+	if rec.Change.Before != nil {
+		mutate(rec.Change.Before)
+	}
+	if rec.Change.After != nil {
+		mutate(rec.Change.After)
+	}
+	ev.InvalidatePayload()
+	return ev, nil
+}
+
+// readRecordData returns the "primary" StructuredData from an event's Record.
+// For most operations: After. For DELETE: Before. Returns nil if no Record
+// or no data available.
+func readRecordData(ev event.Event) *event.StructuredData {
+	rec := ev.Record()
+	if rec == nil {
+		return nil
+	}
+	if rec.Change.After != nil {
+		return rec.Change.After
+	}
+	return rec.Change.Before
+}

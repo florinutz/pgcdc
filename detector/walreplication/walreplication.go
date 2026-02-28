@@ -29,6 +29,7 @@ import (
 	"github.com/florinutz/pgcdc/internal/reconnect"
 	"github.com/florinutz/pgcdc/metrics"
 	"github.com/florinutz/pgcdc/pgcdcerr"
+	"github.com/florinutz/pgcdc/schema"
 	"github.com/florinutz/pgcdc/snapshot"
 )
 
@@ -115,6 +116,9 @@ type Detector struct {
 	// The cache stores recent full rows keyed by (RelationID, PK) to backfill
 	// unchanged TOAST columns on UPDATE events without REPLICA IDENTITY FULL.
 	toastCacheMaxEntries int
+
+	// schemaStore, when set, registers schema versions from RelationMessages.
+	schemaStore schema.Store
 }
 
 // txState tracks the current transaction when txMetadata is enabled.
@@ -235,6 +239,14 @@ func (d *Detector) SetTracer(t trace.Tracer) {
 // TOAST columns from previous INSERT/UPDATE events.
 func (d *Detector) SetToastCache(maxEntries int) {
 	d.toastCacheMaxEntries = maxEntries
+}
+
+// SetSchemaStore sets the schema store for auto-registering schema versions
+// from RelationMessages. When set, every new or changed RelationMessage
+// triggers a schema registration, and events include schema subject/version
+// metadata.
+func (d *Detector) SetSchemaStore(store schema.Store) {
+	d.schemaStore = store
 }
 
 // SetBackpressureController sets the backpressure controller that will
@@ -642,21 +654,58 @@ func (d *Detector) emitEvent(
 		return nil
 	}
 
-	var row map[string]any
+	var newRow map[string]any
 	var unchangedCols []string
 	if newTuple != nil {
-		row, unchangedCols = tupleToMap(rel, newTuple)
+		newRow, unchangedCols = tupleToMap(rel, newTuple)
 	}
-	var old map[string]any
+	var oldRow map[string]any
 	if oldTuple != nil {
-		old, _ = tupleToMap(rel, oldTuple)
+		oldRow, _ = tupleToMap(rel, oldTuple)
 	}
 
-	// For DELETE, "row" is the old row (matches LISTEN/NOTIFY trigger format).
-	if op == "DELETE" && row == nil && old != nil {
-		row = old
-		old = nil
-		unchangedCols = nil // DELETE uses old row; no TOAST concern.
+	// Build structured Record with proper Before/After semantics.
+	rec := &event.Record{
+		Position:  event.NewPosition(uint64(currentLSN)),
+		Operation: event.ParseOperation(op),
+		Metadata:  event.Metadata{event.MetaTable: rel.RelationName},
+	}
+
+	// Map WAL tuples to Change.Before/After based on operation.
+	switch op {
+	case "DELETE":
+		// DELETE: old tuple is the deleted row. No new tuple.
+		if oldRow != nil {
+			rec.Change.Before = event.NewStructuredDataFromMap(oldRow)
+		} else if newRow != nil {
+			// Fallback: some configs may not have old tuple.
+			rec.Change.Before = event.NewStructuredDataFromMap(newRow)
+		}
+	case "UPDATE":
+		if newRow != nil {
+			rec.Change.After = event.NewStructuredDataFromMap(newRow)
+		}
+		if oldRow != nil {
+			rec.Change.Before = event.NewStructuredDataFromMap(oldRow)
+		}
+	default:
+		// INSERT, TRUNCATE
+		if newRow != nil {
+			rec.Change.After = event.NewStructuredDataFromMap(newRow)
+		}
+	}
+
+	// For TOAST cache operations, we need the "row" map (the primary data map).
+	// For DELETE, "row" is the old data; for others, "row" is the new data.
+	var row map[string]any
+	if op == "DELETE" {
+		if oldRow != nil {
+			row = oldRow
+		} else {
+			row = newRow
+		}
+	} else {
+		row = newRow
 	}
 
 	// TOAST cache: backfill unchanged columns from cache, then update cache.
@@ -665,26 +714,25 @@ func (d *Detector) emitEvent(
 
 		switch op {
 		case "INSERT":
-			// INSERT always has full row; populate cache.
 			if pk != "" {
 				tc.Put(relationID, pk, copyMap(row))
 			}
-			unchangedCols = nil // INSERT never has unchanged TOAST.
+			unchangedCols = nil
 
 		case "UPDATE":
 			if len(unchangedCols) > 0 && pk != "" {
 				if cached, ok := tc.Get(relationID, pk); ok {
-					// Backfill unchanged columns from cache.
 					for _, col := range unchangedCols {
 						row[col] = cached[col]
 					}
+					// Update the Record's After with backfilled data.
+					rec.Change.After = event.NewStructuredDataFromMap(row)
 					unchangedCols = nil
 					metrics.ToastCacheHits.Inc()
 				} else {
 					metrics.ToastCacheMisses.Inc()
 				}
 			}
-			// Update cache with the (possibly merged) row.
 			if pk != "" {
 				tc.Put(relationID, pk, copyMap(row))
 			}
@@ -696,37 +744,59 @@ func (d *Detector) emitEvent(
 		}
 	}
 
-	payload := map[string]any{
-		"op":    op,
-		"table": rel.RelationName,
-		"row":   row,
-		"old":   old,
-	}
-
+	// Store unchanged TOAST columns in metadata.
 	if len(unchangedCols) > 0 {
-		payload["_unchanged_toast_columns"] = unchangedCols
+		data, _ := json.Marshal(unchangedCols)
+		rec.Metadata[event.MetaUnchangedToastCols] = string(data)
 	}
 
+	// Schema info.
 	if d.includeSchema {
-		payload["schema"] = rel.Namespace
-		columns := make([]ColumnSchema, 0, len(rel.Columns))
+		rec.Metadata[event.MetaSchema] = rel.Namespace
+		columns := make([]event.ColumnInfo, 0, len(rel.Columns))
 		for _, col := range rel.Columns {
-			columns = append(columns, ColumnSchema{
+			columns = append(columns, event.ColumnInfo{
 				Name:     col.Name,
 				TypeOID:  col.DataType,
 				TypeName: TypeNameForOID(col.DataType),
 			})
 		}
-		payload["columns"] = columns
+		rec.Schema = &event.SchemaInfo{Columns: columns}
 	}
 
-	payloadJSON, err := json.Marshal(payload)
-	if err != nil {
-		d.logger.Error("marshal payload failed", "error", err)
-		return nil
+	// Schema registry: auto-register schema versions from RelationMessages.
+	if d.schemaStore != nil {
+		schemaName := rel.Namespace
+		if schemaName == "" {
+			schemaName = "public"
+		}
+		subject := schema.SubjectName(schemaName, rel.RelationName)
+		cols := make([]schema.ColumnDef, len(rel.Columns))
+		for i, col := range rel.Columns {
+			cols[i] = schema.ColumnDef{
+				Name:     col.Name,
+				TypeOID:  col.DataType,
+				TypeName: TypeNameForOID(col.DataType),
+			}
+		}
+		if s, created, err := d.schemaStore.Register(ctx, subject, cols); err != nil {
+			d.logger.Warn("schema registration failed",
+				"subject", subject,
+				"error", err,
+			)
+		} else {
+			rec.Metadata[event.MetaSchemaSubject] = s.Subject
+			rec.Metadata[event.MetaSchemaVersion] = fmt.Sprintf("%d", s.Version)
+			if created {
+				d.logger.Info("schema registered",
+					"subject", s.Subject,
+					"version", s.Version,
+				)
+			}
+		}
 	}
 
-	ev, err := event.New(channel, op, payloadJSON, source)
+	ev, err := event.NewFromRecord(channel, rec, source)
 	if err != nil {
 		d.logger.Error("create event failed", "error", err)
 		return nil
@@ -739,8 +809,6 @@ func (d *Detector) emitEvent(
 			Seq:        tx.seq,
 		}
 	}
-
-	ev.LSN = uint64(currentLSN)
 
 	if d.tracer != nil {
 		_, span := d.tracer.Start(ctx, "pgcdc.detect",

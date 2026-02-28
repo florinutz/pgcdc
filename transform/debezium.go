@@ -41,15 +41,76 @@ func Debezium(opts ...DebeziumOption) TransformFunc {
 	return func(ev event.Event) (event.Event, error) {
 		var before, after any
 
-		// Parse existing payload.
+		// Structured record path: use Record directly without JSON parsing.
+		rec := ev.Record()
+		if rec != nil && rec.Operation != 0 {
+			if rec.Change.Before != nil {
+				before = rec.Change.Before.ToMap()
+			}
+			if rec.Change.After != nil {
+				after = rec.Change.After.ToMap()
+			}
+
+			// Determine timestamp.
+			tsMs := ev.CreatedAt.UnixMilli()
+			if ev.Transaction != nil && !ev.Transaction.CommitTime.IsZero() {
+				tsMs = ev.Transaction.CommitTime.UnixMilli()
+			}
+
+			schemaName := "public"
+			if s, ok := rec.Metadata[event.MetaSchema]; ok && s != "" {
+				schemaName = s
+			}
+			tableName := rec.Metadata[event.MetaTable]
+
+			var txID uint32
+			if ev.Transaction != nil {
+				txID = ev.Transaction.Xid
+			}
+
+			source := map[string]any{
+				"version":   "pgcdc",
+				"connector": "pgcdc",
+				"name":      cfg.connectorName,
+				"ts_ms":     tsMs,
+				"snapshot":  ev.Operation == event.OpSnapshot,
+				"db":        cfg.database,
+				"schema":    schemaName,
+				"table":     tableName,
+				"txId":      txID,
+				"lsn":       ev.LSN,
+			}
+
+			envelope := map[string]any{
+				"before": before,
+				"after":  after,
+				"op":     debeziumOp(ev.Operation),
+				"source": source,
+			}
+
+			if ev.Transaction != nil {
+				envelope["transaction"] = map[string]any{
+					"id":                    fmt.Sprintf("%d:%d", ev.Transaction.Xid, ev.LSN),
+					"total_order":           ev.Transaction.Seq,
+					"data_collection_order": ev.Transaction.Seq,
+				}
+			}
+
+			raw, err := json.Marshal(envelope)
+			if err != nil {
+				return ev, fmt.Errorf("marshal debezium envelope: %w", err)
+			}
+			ev.Payload = raw
+			return ev, nil
+		}
+
+		// Legacy path: parse payload JSON.
 		var payload map[string]any
 		var rawPayload any
 		hasStructuredPayload := false
 
 		if len(ev.Payload) > 0 {
 			if err := json.Unmarshal(ev.Payload, &payload); err != nil {
-				// Non-object payload (e.g. LISTEN/NOTIFY string) — treat raw
-				// value as the "after" data.
 				if err2 := json.Unmarshal(ev.Payload, &rawPayload); err2 != nil {
 					rawPayload = string(ev.Payload)
 				}
@@ -73,7 +134,6 @@ func Debezium(opts ...DebeziumOption) TransformFunc {
 				after = rawPayload
 			}
 		case "DELETE":
-			// pgcdc swaps old→row for DELETEs, so row is the old data.
 			if hasStructuredPayload {
 				before = payload["row"]
 			} else {
@@ -86,7 +146,6 @@ func Debezium(opts ...DebeziumOption) TransformFunc {
 				after = rawPayload
 			}
 		default:
-			// Unstructured (e.g. NOTIFY) — entire payload becomes after.
 			if hasStructuredPayload {
 				after = payload
 			} else {
@@ -94,13 +153,11 @@ func Debezium(opts ...DebeziumOption) TransformFunc {
 			}
 		}
 
-		// Determine timestamp.
 		tsMs := ev.CreatedAt.UnixMilli()
 		if ev.Transaction != nil && !ev.Transaction.CommitTime.IsZero() {
 			tsMs = ev.Transaction.CommitTime.UnixMilli()
 		}
 
-		// Build source block.
 		schemaName := "public"
 		tableName := ""
 		if hasStructuredPayload {
@@ -137,7 +194,6 @@ func Debezium(opts ...DebeziumOption) TransformFunc {
 			"source": source,
 		}
 
-		// Transaction block — only when transaction metadata is present.
 		if ev.Transaction != nil {
 			envelope["transaction"] = map[string]any{
 				"id":                    fmt.Sprintf("%d:%d", ev.Transaction.Xid, ev.LSN),

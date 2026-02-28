@@ -27,11 +27,13 @@ import (
 	"github.com/florinutz/pgcdc/encoding"
 	encregistry "github.com/florinutz/pgcdc/encoding/registry"
 	"github.com/florinutz/pgcdc/health"
+	"github.com/florinutz/pgcdc/inspect"
 	"github.com/florinutz/pgcdc/internal/config"
 	"github.com/florinutz/pgcdc/internal/migrate"
 	"github.com/florinutz/pgcdc/internal/server"
 	"github.com/florinutz/pgcdc/metrics"
 	"github.com/florinutz/pgcdc/registry"
+	"github.com/florinutz/pgcdc/schema"
 	"github.com/florinutz/pgcdc/tracing"
 	"github.com/florinutz/pgcdc/transform"
 	"github.com/spf13/cobra"
@@ -180,6 +182,24 @@ func init() {
 	f.String("otel-exporter", "none", "OTel trace exporter: none, stdout, or otlp")
 	f.String("otel-endpoint", "", "OTLP gRPC endpoint (overrides OTEL_EXPORTER_OTLP_ENDPOINT)")
 	f.Float64("otel-sample-ratio", 1.0, "trace sampling ratio (0.0-1.0)")
+
+	// Inspector flags.
+	f.Int("inspect-buffer", 100, "inspector ring buffer size per tap point (0 to disable)")
+
+	// Schema store flags.
+	f.Bool("schema-store", false, "enable schema versioning (track column changes)")
+	f.String("schema-store-type", "memory", "schema store backend: memory or pg")
+	f.String("schema-db", "", "PostgreSQL URL for schema store (default: same as --db)")
+
+	// Nack window flags.
+	f.Int("dlq-window-size", 0, "nack window size for adaptive DLQ (0 to disable)")
+	f.Int("dlq-window-threshold", 0, "nack count to trigger adapter pause (default: window_size/2)")
+
+	// Multi-detector flags.
+	f.String("detector-mode", "sequential", "multi-detector mode: sequential, parallel, or failover")
+
+	// CEL filter CLI shortcut.
+	f.String("filter-cel", "", "global CEL filter expression (e.g. 'operation == \"INSERT\"')")
 }
 
 // bindListenFlags binds all listen command flags to viper keys. Called in PreRunE
@@ -272,6 +292,21 @@ func bindListenFlags(cmd *cobra.Command, _ []string) error {
 		{"otel-exporter", "otel.exporter"},
 		{"otel-endpoint", "otel.endpoint"},
 		{"otel-sample-ratio", "otel.sample_ratio"},
+
+		// Inspector.
+		{"inspect-buffer", "inspector.buffer_size"},
+
+		// Schema store.
+		{"schema-store", "schema.enabled"},
+		{"schema-store-type", "schema.store"},
+		{"schema-db", "schema.db_url"},
+
+		// Nack window.
+		{"dlq-window-size", "dlq.window_size"},
+		{"dlq-window-threshold", "dlq.window_threshold"},
+
+		// Multi-detector.
+		{"detector-mode", "detector_mode"},
 	}); err != nil {
 		return err
 	}
@@ -431,6 +466,49 @@ func runListen(cmd *cobra.Command, args []string) error {
 	defer tfxCleanup()
 	opts = append(opts, tfxOpts...)
 
+	// CEL filter CLI shortcut.
+	if celExpr, _ := cmd.Flags().GetString("filter-cel"); celExpr != "" {
+		celFn, celErr := transform.FilterCEL(celExpr)
+		if celErr != nil {
+			return fmt.Errorf("compile --filter-cel expression: %w", celErr)
+		}
+		opts = append(opts, pgcdc.WithTransform(celFn))
+		// Include in immutable CLI transforms for SIGHUP reload.
+		immutableCLI = append(immutableCLI, celFn)
+	}
+
+	// Inspector.
+	var insp *inspect.Inspector
+	if cfg.Inspector.BufferSize > 0 {
+		insp = inspect.New(cfg.Inspector.BufferSize)
+		opts = append(opts, pgcdc.WithInspector(insp))
+	}
+
+	// Schema store.
+	if cfg.Schema.Enabled {
+		var schemaStore schema.Store
+		switch cfg.Schema.Store {
+		case "pg":
+			dbURL := cfg.Schema.DBURL
+			if dbURL == "" {
+				dbURL = cfg.DatabaseURL
+			}
+			pgStore := schema.NewPGStore(dbURL, logger)
+			if err := pgStore.Init(ctx); err != nil {
+				return fmt.Errorf("init schema store: %w", err)
+			}
+			schemaStore = pgStore
+		default:
+			schemaStore = schema.NewMemoryStore()
+		}
+		opts = append(opts, pgcdc.WithSchemaStore(schemaStore))
+	}
+
+	// Nack window.
+	if cfg.DLQ.WindowSize > 0 {
+		opts = append(opts, pgcdc.WithNackWindow(cfg.DLQ.WindowSize, cfg.DLQ.WindowThreshold))
+	}
+
 	// Run schema migrations (unless --skip-migrations).
 	if !cfg.SkipMigrations && cfg.DatabaseURL != "" {
 		if err := migrate.Run(ctx, cfg.DatabaseURL, logger); err != nil {
@@ -458,7 +536,7 @@ func runListen(cmd *cobra.Command, args []string) error {
 	startSIGHUPHandler(g, gCtx, p, immutableCLI, plugTfx, cliRoutes, logger)
 
 	// HTTP servers: SSE/WS combined and standalone metrics.
-	startHTTPServers(g, gCtx, cfg, sseBroker, wsBroker, p.Health(), readiness, logger)
+	startHTTPServers(g, gCtx, cfg, sseBroker, wsBroker, p.Health(), readiness, insp, logger)
 
 	// Wait for errgroup to finish (happens when context is cancelled).
 	err := g.Wait()
@@ -862,9 +940,13 @@ func startSIGHUPHandler(g *errgroup.Group, gCtx context.Context, p *pgcdc.Pipeli
 
 // startHTTPServers registers goroutines in g for the SSE/WS HTTP server (when either broker is active)
 // and the standalone metrics server (when --metrics-addr is set).
-func startHTTPServers(g *errgroup.Group, gCtx context.Context, cfg config.Config, sseBroker *sse.Broker, wsBroker *ws.Broker, checker *health.Checker, readiness *health.ReadinessChecker, logger *slog.Logger) {
-	if sseBroker != nil || wsBroker != nil {
-		httpServer := server.New(sseBroker, wsBroker, cfg.SSE.CORSOrigins, cfg.SSE.ReadTimeout, cfg.SSE.IdleTimeout, checker, readiness)
+func startHTTPServers(g *errgroup.Group, gCtx context.Context, cfg config.Config, sseBroker *sse.Broker, wsBroker *ws.Broker, checker *health.Checker, readiness *health.ReadinessChecker, insp *inspect.Inspector, logger *slog.Logger) {
+	if sseBroker != nil || wsBroker != nil || insp != nil {
+		var serverOpts []server.ServerOption
+		if insp != nil {
+			serverOpts = append(serverOpts, server.WithInspector(insp))
+		}
+		httpServer := server.New(sseBroker, wsBroker, cfg.SSE.CORSOrigins, cfg.SSE.ReadTimeout, cfg.SSE.IdleTimeout, checker, readiness, serverOpts...)
 		httpServer.Addr = cfg.SSE.Addr
 
 		g.Go(func() error {

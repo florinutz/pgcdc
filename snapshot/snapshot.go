@@ -2,7 +2,6 @@ package snapshot
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"regexp"
@@ -123,20 +122,15 @@ func (s *Snapshot) Run(ctx context.Context, events chan<- event.Event) error {
 			row[fd.Name] = values[i]
 		}
 
-		payload := map[string]any{
-			"op":    event.OpSnapshot,
-			"table": s.table,
-			"row":   row,
-			"old":   nil,
+		rec := &event.Record{
+			Operation: event.OperationSnapshot,
+			Metadata:  event.Metadata{event.MetaTable: s.table},
+			Change: event.Change{
+				After: event.NewStructuredDataFromMap(row),
+			},
 		}
 
-		payloadJSON, err := json.Marshal(payload)
-		if err != nil {
-			s.logger.Error("marshal payload failed", "error", err)
-			continue
-		}
-
-		ev, err := event.New(channel, event.OpSnapshot, payloadJSON, source)
+		ev, err := event.NewFromRecord(channel, rec, source)
 		if err != nil {
 			s.logger.Error("create event failed", "error", err)
 			continue

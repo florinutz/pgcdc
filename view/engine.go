@@ -69,9 +69,16 @@ func (e *Engine) Process(ev event.Event) {
 		return
 	}
 
-	// Parse payload once for all views.
+	// Parse payload once for all views. Prefer structured record (zero JSON parsing).
 	var payload map[string]any
-	if len(ev.Payload) > 0 {
+	if rec := ev.Record(); rec != nil && rec.Operation != 0 &&
+		(rec.Change.After != nil || rec.Change.Before != nil) {
+		if rec.Change.After != nil {
+			payload = rec.Change.After.ToMap()
+		} else {
+			payload = rec.Change.Before.ToMap()
+		}
+	} else if len(ev.Payload) > 0 {
 		if err := json.Unmarshal(ev.Payload, &payload); err != nil {
 			e.logger.Debug("view engine: unmarshal payload", "error", err, "event_id", ev.ID)
 			return

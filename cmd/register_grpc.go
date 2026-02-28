@@ -20,6 +20,14 @@ func init() {
 		ViperKeys: [][2]string{
 			{"grpc-addr", "grpc.addr"},
 		},
+		Spec: []registry.ParamSpec{
+			{
+				Name:        "grpc-addr",
+				Type:        "string",
+				Default:     ":9090",
+				Description: "gRPC server listen address",
+			},
+		},
 	})
 
 	// gRPC adapter flags.

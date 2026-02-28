@@ -79,7 +79,14 @@ Context ──> Pipeline (pgcdc.go orchestrates everything)
 - **Observability**: Prometheus metrics exposed at `/metrics`. Rich health check at `/healthz` returns per-component status (200 when all up, 503 when any down). Standalone metrics server via `--metrics-addr`.
 - **Embedding adapter**: `--adapter embedding` with `--embedding-api-url`, `--embedding-columns`, `--embedding-api-key`. Calls any OpenAI-compatible endpoint, UPSERTs vector into pgvector table. INSERT/UPDATE → embed+upsert, DELETE → delete vector. Zero new deps — vectors stored as strings with `::vector` cast.
 - **Incremental snapshots**: `--incremental-snapshot` enables chunk-based `SELECT ... WHERE pk > ? LIMIT N` snapshots running alongside live WAL streaming. Signal-table triggered (`pgcdc_signals`), progress persisted to `pgcdc_snapshot_progress`, crash-resumable. Emits `SNAPSHOT_STARTED`, `SNAPSHOT` (row), and `SNAPSHOT_COMPLETED` events on `pgcdc:_snapshot`. `--snapshot-chunk-size`, `--snapshot-chunk-delay`, `--snapshot-progress-db`.
-- **Transform pipeline**: `--drop-columns col1,col2` and `--filter-operations INSERT,UPDATE,TRUNCATE` as CLI shortcuts. Full config via `transforms.global` and `transforms.adapter.<name>` in YAML. Built-in types: `drop_columns`, `rename_fields`, `mask` (zero/hash/redact modes), `filter` (by field value or operation), `debezium` (rewrites payload into Debezium envelope with before/after/op/source/transaction blocks — `--debezium-envelope`, `--debezium-connector-name`, `--debezium-database`), `cloudevents` (rewrites payload into CloudEvents v1.0 structured-mode JSON with pgcdc extension attributes — configurable `source` and `type_prefix` via YAML). Applied per-adapter or globally; dropped events increment `pgcdc_transform_dropped_total`, errors increment `pgcdc_transform_errors_total`.
+- **Transform pipeline**: `--drop-columns col1,col2` and `--filter-operations INSERT,UPDATE,TRUNCATE` as CLI shortcuts. Full config via `transforms.global` and `transforms.adapter.<name>` in YAML. Built-in types: `drop_columns`, `rename_fields`, `mask` (zero/hash/redact modes), `filter` (by field value or operation), `debezium` (rewrites payload into Debezium envelope with before/after/op/source/transaction blocks — `--debezium-envelope`, `--debezium-connector-name`, `--debezium-database`), `cloudevents` (rewrites payload into CloudEvents v1.0 structured-mode JSON with pgcdc extension attributes — configurable `source` and `type_prefix` via YAML), `cel_filter` (expression-based event filtering using CEL — `--filter-cel 'operation == "INSERT"'`). Applied per-adapter or globally; dropped events increment `pgcdc_transform_dropped_total`, errors increment `pgcdc_transform_errors_total`.
+- **Inspector**: `--inspect-buffer N` (default 100) enables ring-buffer event sampling at three tap points (post-detector, post-transform, pre-adapter). HTTP endpoints `/inspect` (JSON snapshot with `?point=&limit=` query params) and `/inspect/stream` (SSE live stream). Wired into Pipeline via `WithInspector()`.
+- **Chain adapter**: `adapter/chain` provides link-based event preprocessing before terminal adapter delivery. Each `chain.Link` implements `Process(ctx, event) (event, error)`. Built-in links: compress (gzip), encrypt (AES-GCM). Chain wraps any `adapter.Adapter` and runs links in sequence before delegating to the inner adapter.
+- **Multi-detector**: `detector/multi` composes multiple detectors with three modes: `sequential` (run one after another), `parallel` (run all concurrently, merge events), `failover` (try each in order, switch on error). Parallel mode supports optional `DedupWindow` to filter duplicate events across detectors. `--detector-mode sequential|parallel|failover`.
+- **Schema store**: `schema/` provides versioned schema tracking. `Store` interface with `Register`, `Get`, `Latest`, `List` methods. Memory and PostgreSQL implementations. Wired into Pipeline via `WithSchemaStore()`; detectors implementing `SchemaStoreAware` receive the store. `--schema-store`, `--schema-store-type memory|pg`, `--schema-db`.
+- **Nack window**: `dlq/window.go` provides a sliding window tracking delivery ack/nack outcomes per adapter. When nack count exceeds threshold, events are skipped (adaptive DLQ). Wired into Pipeline's `wrapSubscription`. `--dlq-window-size` (default 100), `--dlq-window-threshold` (default 50). Metrics: `pgcdc_nack_window_exceeded_total{adapter}`.
+- **Multi-pipeline server**: `pgcdc serve --config pipelines.yaml` runs N independent pipelines from a YAML config file. REST API for runtime management: `GET /api/v1/pipelines`, `GET /api/v1/pipelines/:id`, `POST /api/v1/pipelines` (create), `DELETE /api/v1/pipelines/:id` (remove stopped), `POST .../start`, `POST .../stop`, `POST .../pause`, `POST .../resume`. Shared HTTP server with metrics, health checks, and API. Pipeline builder uses the component registry.
+- **Connector introspection**: `pgcdc describe <connector>` shows typed parameter specs for any registered adapter or detector. `registry.ParamSpec` on all adapter and detector entries. `registry.GetConnectorSpec()` looks up by name.
 - **Cooperative checkpointing**: `--cooperative-checkpoint` (requires `--persistent-slot` + `--detector wal`). Adapters call `AckFunc` after delivery; checkpoint only advances to `min(all adapter ack positions)`. Non-`Acknowledger` adapters are auto-acked on channel send. Metrics: `pgcdc_ack_position{adapter}`, `pgcdc_cooperative_checkpoint_lsn`.
 - **Wasm plugin system**: Extism-based (pure Go, no CGo) plugin system for 4 extension points: transforms, adapters, DLQ backends, checkpoint stores. Plugins compiled to `.wasm` from any Extism PDK language (Rust, Go, Python, TypeScript). Zero overhead when no plugins configured. JSON serialization (protobuf opt-in). Host functions: `pgcdc_log`, `pgcdc_metric_inc`, `pgcdc_http_request`. Config via `plugins:` YAML block or `--plugin-transform`, `--plugin-adapter`, `--dlq plugin`, `--checkpoint-plugin` CLI flags. Metrics: `pgcdc_plugin_calls_total`, `pgcdc_plugin_duration_seconds`, `pgcdc_plugin_errors_total`.
 - **Encoding + Schema Registry**: `--kafka-encoding avro|protobuf|json` and `--nats-encoding avro|protobuf|json` with optional Confluent Schema Registry (`--schema-registry-url`, `--schema-registry-username`, `--schema-registry-password`). `encoding/` package: Avro (hamba/avro), Protobuf, JSON encoders. `encoding/registry/` package: Schema Registry HTTP client with wire format (magic byte + schema ID prefix).
@@ -237,13 +244,17 @@ adapter/        Output adapter interface + implementations
   kafkaserver/  Kafka wire protocol server (no Kafka cluster needed)
   view/         Streaming SQL view engine adapter
   middleware/   Middleware chain for Deliverer adapters (metrics, tracing, CB, rate-limit, retry, DLQ, ack)
+  chain/        Link-based event preprocessing chain (compress, encrypt links)
 view/           Streaming SQL engine (parser, evaluator, tumbling/sliding/session windows, aggregators)
-registry/       Self-registering component registry (adapters, detectors, transforms)
+registry/       Self-registering component registry (adapters, detectors, transforms, connector specs)
 ack/            Cooperative checkpoint LSN tracker
 backpressure/   Source-aware WAL lag backpressure (throttle/pause/shed)
 bus/            Event fan-out (fast or reliable mode)
-transform/      Event transform pipeline (drop, rename, mask, filter, debezium, cloudevents)
+cel/            CEL expression compiler/evaluator for event filtering
+transform/      Event transform pipeline (drop, rename, mask, filter, debezium, cloudevents, cel_filter)
 snapshot/       Table snapshot (COPY-based row export + incremental chunk-based)
+inspect/        Ring-buffer event sampling at tap points (post-detector, post-transform, pre-adapter)
+schema/         Versioned schema store (Store interface, MemoryStore, PGStore)
 detector/       Change detection interface + implementations
   listennotify/ PostgreSQL LISTEN/NOTIFY
   walreplication/ PostgreSQL WAL logical replication
@@ -251,11 +262,13 @@ detector/       Change detection interface + implementations
   outbox/       Transactional outbox table polling
   mysql/        MySQL binlog replication
   mongodb/      MongoDB Change Streams
+  multi/        Multi-detector composition (sequential, parallel, failover modes)
 checkpoint/     LSN checkpoint storage
 event/          Event model
 health/         Component health checker
 metrics/        Prometheus metrics definitions
-dlq/            Dead letter queue (stderr + PG table backends)
+dlq/            Dead letter queue (stderr + PG table backends + nack window)
+server/         Multi-pipeline manager + REST API for pgcdc serve command
 encoding/       Event encoding (Avro, Protobuf, JSON) + Schema Registry client
   registry/     Confluent Schema Registry HTTP client + wire format
 tracing/        OpenTelemetry tracing setup + Kafka carrier
@@ -286,7 +299,7 @@ testutil/       Test utilities
 - `bus/bus.go` — Fan-out with configurable fast (drop) or reliable (block) mode
 - `ack/tracker.go` — Cooperative checkpoint LSN tracker (min across all adapters)
 - `backpressure/backpressure.go` — Source-aware backpressure controller: zone transitions (green/yellow/red), proportional throttle, pause/resume, adapter shedding by priority
-- `transform/transform.go` — TransformFunc interface, Chain, ErrDropEvent; `drop_columns.go`, `rename_fields.go`, `mask.go`, `filter.go`, `debezium.go`, `cloudevents.go` for built-in transforms
+- `transform/transform.go` — TransformFunc interface, Chain, ErrDropEvent; `drop_columns.go`, `rename_fields.go`, `mask.go`, `filter.go`, `debezium.go`, `cloudevents.go`, `cel_filter.go` for built-in transforms
 - `internal/config/config.go` — Core Config struct, shared types (Bus, OTel, DLQ, Transform, Backpressure), Default() (CLI-only)
 - `internal/config/adapter_config.go` — Adapter-specific config structs
 - `internal/config/detector_config.go` — Detector-specific config structs
@@ -349,7 +362,21 @@ testutil/       Test utilities
 - `internal/safegoroutine/safe.go` — Panic recovery wrapper for errgroup goroutines
 - `internal/server/server.go` — HTTP server with SSE, WS, metrics, and health endpoints (CLI-only)
 - `registry/registry.go` — Component registry: AdapterEntry, DetectorEntry, TransformEntry with Create factories, DetectorContext/DetectorResult, BindFlags helpers
+- `registry/spec.go` — ParamSpec, ConnectorSpec, GetConnectorSpec for connector introspection
 - `adapter/middleware/middleware.go` — Middleware chain for Deliverer adapters: metrics, tracing, CB, rate-limit, retry, DLQ, ack
+- `adapter/chain/chain.go` — Chain adapter: Link interface, wraps inner adapter with preprocessing links
+- `adapter/chain/encrypt.go` — AES-GCM encrypt link for chain adapter
+- `inspect/inspector.go` — Ring-buffer event sampling at tap points with HTTP handlers
+- `schema/schema.go` — Schema store interface (Register, Get, Latest, List) + MemoryStore
+- `schema/pg_store.go` — PostgreSQL-backed schema store implementation
+- `cel/cel.go` — CEL expression compiler/evaluator (Compile, Eval with event variables)
+- `transform/cel_filter.go` — CEL-based event filter transform (FilterCEL function)
+- `detector/multi/multi.go` — Multi-detector composition (Sequential, Parallel, Failover modes + DedupWindow)
+- `dlq/window.go` — Sliding nack window for adaptive DLQ (NewNackWindow, RecordAck, RecordNack, Exceeded)
+- `server/manager.go` — Multi-pipeline manager: Add, Remove, Start, Stop, Pause, Resume, List, Get
+- `server/api.go` — REST API handler for pipeline management (APIHandler)
+- `cmd/serve.go` — `pgcdc serve` command: multi-pipeline server with registry-based pipeline builder
+- `cmd/describe.go` — `pgcdc describe` command: connector parameter introspection
 - `cmd/validate.go` — `pgcdc validate` command: pre-flight configuration validation without starting the pipeline
 - `cmd/playground.go` — `pgcdc playground` command: Docker-based demo environment with auto-generated data
 - `scenarios/helpers_test.go` — Shared test infrastructure (PG container, pipeline wiring)

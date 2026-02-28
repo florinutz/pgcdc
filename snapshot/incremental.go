@@ -292,25 +292,23 @@ func (s *IncrementalSnapshot) readChunk(ctx context.Context, pkCols []string, af
 		}
 		lastPK = pk
 
-		payload := map[string]any{
-			"op":          event.OpSnapshot,
-			"table":       s.table,
-			"row":         row,
-			"old":         nil,
-			"snapshot_id": s.snapshotID,
+		rec := &event.Record{
+			Operation: event.OperationSnapshot,
+			Metadata: event.Metadata{
+				event.MetaTable:      s.table,
+				event.MetaSnapshotID: s.snapshotID,
+			},
+			Change: event.Change{
+				After: event.NewStructuredDataFromMap(row),
+			},
 		}
 
-		payloadJSON, err := json.Marshal(payload)
-		if err != nil {
-			s.logger.Error("marshal payload failed", "error", err)
-			continue
-		}
-
-		ev, err := event.New(channel, event.OpSnapshot, payloadJSON, incrementalSource)
+		ev, err := event.New(channel, event.OpSnapshot, rec.MarshalCompatPayload(), incrementalSource)
 		if err != nil {
 			s.logger.Error("create event failed", "error", err)
 			continue
 		}
+		ev.SetRecord(rec)
 
 		select {
 		case events <- ev:

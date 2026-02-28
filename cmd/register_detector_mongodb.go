@@ -11,6 +11,49 @@ func init() {
 	registry.RegisterDetector(registry.DetectorEntry{
 		Name:        "mongodb",
 		Description: "MongoDB Change Streams",
+		Spec: []registry.ParamSpec{
+			{
+				Name:        "mongodb-uri",
+				Type:        "string",
+				Required:    true,
+				Description: "MongoDB connection URI",
+			},
+			{
+				Name:        "mongodb-database",
+				Type:        "string",
+				Description: "MongoDB database name (required unless --mongodb-scope=cluster)",
+			},
+			{
+				Name:        "mongodb-collections",
+				Type:        "[]string",
+				Description: "MongoDB collections to watch (repeatable)",
+			},
+			{
+				Name:        "mongodb-scope",
+				Type:        "string",
+				Default:     "collection",
+				Description: "MongoDB watch scope: collection, database, or cluster",
+				Validations: []string{"oneof:collection,database,cluster"},
+			},
+			{
+				Name:        "mongodb-full-document",
+				Type:        "string",
+				Default:     "updateLookup",
+				Description: "MongoDB fullDocument option: updateLookup, default, whenAvailable, required",
+				Validations: []string{"oneof:updateLookup,default,whenAvailable,required"},
+			},
+			{
+				Name:        "mongodb-metadata-db",
+				Type:        "string",
+				Description: "MongoDB database for resume token storage (default: same as --mongodb-database)",
+			},
+			{
+				Name:        "mongodb-metadata-coll",
+				Type:        "string",
+				Default:     "pgcdc_resume_tokens",
+				Description: "MongoDB collection for resume token storage",
+			},
+		},
 		Create: func(ctx registry.DetectorContext) (registry.DetectorResult, error) {
 			cfg := ctx.Cfg
 			if cfg.MongoDB.URI == "" {

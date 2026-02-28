@@ -8,6 +8,7 @@ import (
 	"github.com/florinutz/pgcdc/adapter/sse"
 	"github.com/florinutz/pgcdc/adapter/ws"
 	"github.com/florinutz/pgcdc/health"
+	"github.com/florinutz/pgcdc/inspect"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -19,7 +20,7 @@ import (
 // readTimeout and idleTimeout configure the corresponding http.Server fields;
 // zero values leave them unset.
 // If checker is nil, /healthz is not registered. Metrics are mounted at /metrics.
-func New(sseBroker *sse.Broker, wsBroker *ws.Broker, corsOrigins []string, readTimeout, idleTimeout time.Duration, checker *health.Checker, readiness *health.ReadinessChecker) *http.Server {
+func New(sseBroker *sse.Broker, wsBroker *ws.Broker, corsOrigins []string, readTimeout, idleTimeout time.Duration, checker *health.Checker, readiness *health.ReadinessChecker, opts ...ServerOption) *http.Server {
 	r := chi.NewRouter()
 
 	r.Use(middleware.Recoverer)
@@ -70,6 +71,11 @@ func New(sseBroker *sse.Broker, wsBroker *ws.Broker, corsOrigins []string, readT
 		})
 	}
 
+	// Apply optional server options (e.g., inspector routes).
+	for _, opt := range opts {
+		opt(r)
+	}
+
 	return &http.Server{
 		Handler:      r,
 		ReadTimeout:  readTimeout,
@@ -109,6 +115,20 @@ func NewMetricsServer(checker *health.Checker, readiness *health.ReadinessChecke
 		ReadTimeout:  5 * time.Second,
 		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  60 * time.Second,
+	}
+}
+
+// ServerOption configures optional features on the HTTP server.
+type ServerOption func(r chi.Router)
+
+// WithInspector mounts inspector HTTP endpoints on the server.
+func WithInspector(insp *inspect.Inspector) ServerOption {
+	return func(r chi.Router) {
+		if insp == nil {
+			return
+		}
+		r.Get("/inspect", inspect.Handler(insp))
+		r.Get("/inspect/stream", inspect.SSEHandler(insp))
 	}
 }
 

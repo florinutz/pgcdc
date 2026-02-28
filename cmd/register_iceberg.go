@@ -43,6 +43,70 @@ func init() {
 			{"iceberg-flush-interval", "iceberg.flush_interval"},
 			{"iceberg-flush-size", "iceberg.flush_size"},
 		},
+		Spec: []registry.ParamSpec{
+			{
+				Name:        "iceberg-catalog",
+				Type:        "string",
+				Default:     "hadoop",
+				Description: "Iceberg catalog type: hadoop, rest, sql",
+				Validations: []string{"oneof:hadoop,rest,sql"},
+			},
+			{
+				Name:        "iceberg-catalog-uri",
+				Type:        "string",
+				Description: "REST catalog URL",
+			},
+			{
+				Name:        "iceberg-warehouse",
+				Type:        "string",
+				Required:    true,
+				Description: "Iceberg warehouse path (s3://... or local path)",
+			},
+			{
+				Name:        "iceberg-namespace",
+				Type:        "string",
+				Default:     "pgcdc",
+				Description: "Iceberg namespace (dot-separated)",
+			},
+			{
+				Name:        "iceberg-table",
+				Type:        "string",
+				Required:    true,
+				Description: "Iceberg table name",
+			},
+			{
+				Name:        "iceberg-mode",
+				Type:        "string",
+				Default:     "append",
+				Description: "Iceberg write mode: append or upsert",
+				Validations: []string{"oneof:append,upsert"},
+			},
+			{
+				Name:        "iceberg-schema",
+				Type:        "string",
+				Default:     "raw",
+				Description: "Iceberg schema mode: auto or raw",
+				Validations: []string{"oneof:auto,raw"},
+			},
+			{
+				Name:        "iceberg-pk",
+				Type:        "[]string",
+				Description: "Primary key columns for upsert mode (repeatable)",
+			},
+			{
+				Name:        "iceberg-flush-interval",
+				Type:        "duration",
+				Default:     "1m",
+				Description: "Iceberg flush interval (default 1m)",
+			},
+			{
+				Name:        "iceberg-flush-size",
+				Type:        "int",
+				Default:     10000,
+				Description: "Iceberg flush size in events",
+				Validations: []string{"min:1"},
+			},
+		},
 	})
 
 	// Iceberg adapter flags.

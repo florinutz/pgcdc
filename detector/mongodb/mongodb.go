@@ -291,43 +291,43 @@ func (d *Detector) emitChangeEvent(ctx context.Context, events chan<- event.Even
 
 	channel := channelName(change.NS.DB, change.NS.Coll)
 
-	payload := map[string]any{
-		"op":         op,
-		"database":   change.NS.DB,
-		"collection": change.NS.Coll,
+	rec := &event.Record{
+		Operation: event.ParseOperation(op),
+		Metadata: event.Metadata{
+			event.MetaDatabase:   change.NS.DB,
+			event.MetaCollection: change.NS.Coll,
+		},
 	}
 
 	if change.FullDocument != nil {
 		var doc map[string]interface{}
 		if err := bson.Unmarshal(change.FullDocument, &doc); err == nil {
-			payload["row"] = doc
+			switch op {
+			case "DELETE":
+				rec.Change.Before = event.NewStructuredDataFromMap(doc)
+			default:
+				rec.Change.After = event.NewStructuredDataFromMap(doc)
+			}
 		}
 	}
 
 	if change.DocumentKey != nil {
-		payload["document_key"] = change.DocumentKey
+		rec.Key = event.NewStructuredDataFromMap(change.DocumentKey)
+		rec.SetExtra("document_key", change.DocumentKey)
 	}
 
 	if change.UpdateDesc != nil {
-		payload["update_description"] = map[string]any{
+		rec.SetExtra("update_description", map[string]any{
 			"updated_fields": change.UpdateDesc.UpdatedFields,
 			"removed_fields": change.UpdateDesc.RemovedFields,
-		}
+		})
 	}
 
-	payloadJSON, err := json.Marshal(payload)
-	if err != nil {
-		d.logger.Error("marshal payload failed", "error", err)
-		return nil
-	}
-
-	ev, err := event.New(channel, op, payloadJSON, sourceName)
+	ev, err := event.NewFromRecord(channel, rec, sourceName)
 	if err != nil {
 		d.logger.Error("create event failed", "error", err)
 		return nil
 	}
-
-	// No WAL LSN concept — leave ev.LSN = 0.
 
 	if d.tracer != nil {
 		_, span := d.tracer.Start(ctx, "pgcdc.detect",

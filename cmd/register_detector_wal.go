@@ -13,6 +13,38 @@ func init() {
 	registry.RegisterDetector(registry.DetectorEntry{
 		Name:        "wal",
 		Description: "PostgreSQL WAL logical replication",
+		Spec: []registry.ParamSpec{
+			{
+				Name:        "publication",
+				Type:        "string",
+				Default:     "pgcdc_pub",
+				Required:    true,
+				Description: "PostgreSQL publication name to subscribe to",
+			},
+			{
+				Name:        "persistent-slot",
+				Type:        "bool",
+				Default:     false,
+				Description: "Create a named, non-temporary replication slot with LSN checkpointing",
+			},
+			{
+				Name:        "slot-name",
+				Type:        "string",
+				Description: "Replication slot name (default: pgcdc_<publication>)",
+			},
+			{
+				Name:        "tx-metadata",
+				Type:        "bool",
+				Default:     false,
+				Description: "Enrich events with transaction.xid, transaction.commit_time, transaction.seq",
+			},
+			{
+				Name:        "include-schema",
+				Type:        "bool",
+				Default:     false,
+				Description: "Add column type metadata (name, type_oid, type_name) to WAL events",
+			},
+		},
 		Create: func(ctx registry.DetectorContext) (registry.DetectorResult, error) {
 			cfg := ctx.Cfg
 			det := walreplication.New(

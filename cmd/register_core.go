@@ -25,6 +25,14 @@ func init() {
 				Adapter: stdout.New(nil, ctx.Logger),
 			}, nil
 		},
+		Spec: []registry.ParamSpec{
+			{
+				Name:        "adapter",
+				Type:        "string",
+				Default:     "stdout",
+				Description: "Adapter name (stdout requires no additional configuration)",
+			},
+		},
 	})
 
 	registry.RegisterAdapter(registry.AdapterEntry{
@@ -56,6 +64,40 @@ func init() {
 			{"webhook-cb-reset", "webhook.cb_reset_timeout"},
 			{"webhook-rate-limit", "webhook.rate_limit"},
 			{"webhook-rate-burst", "webhook.rate_limit_burst"},
+		},
+		Spec: []registry.ParamSpec{
+			{
+				Name:        "url",
+				Type:        "string",
+				Required:    true,
+				Description: "Webhook destination URL",
+			},
+			{
+				Name:        "retries",
+				Type:        "int",
+				Default:     5,
+				Description: "Maximum number of delivery retries",
+				Validations: []string{"min:0", "max:50"},
+			},
+			{
+				Name:        "signing-key",
+				Type:        "string",
+				Description: "HMAC-SHA256 signing key for X-PGCDC-Signature header",
+			},
+			{
+				Name:        "webhook-cb-failures",
+				Type:        "int",
+				Default:     0,
+				Description: "Circuit breaker max failures before open (0 = disabled)",
+				Validations: []string{"min:0"},
+			},
+			{
+				Name:        "webhook-rate-limit",
+				Type:        "float64",
+				Default:     0,
+				Description: "Rate limit in events/second (0 = unlimited)",
+				Validations: []string{"min:0"},
+			},
 		},
 	})
 

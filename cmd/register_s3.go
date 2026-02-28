@@ -43,6 +43,66 @@ func init() {
 			{"s3-flush-size", "s3.flush_size"},
 			{"s3-drain-timeout", "s3.drain_timeout"},
 		},
+		Spec: []registry.ParamSpec{
+			{
+				Name:        "s3-bucket",
+				Type:        "string",
+				Required:    true,
+				Description: "S3 bucket name",
+			},
+			{
+				Name:        "s3-prefix",
+				Type:        "string",
+				Description: "S3 object key prefix",
+			},
+			{
+				Name:        "s3-endpoint",
+				Type:        "string",
+				Description: "S3-compatible endpoint URL (e.g. MinIO, R2)",
+			},
+			{
+				Name:        "s3-region",
+				Type:        "string",
+				Default:     "us-east-1",
+				Description: "S3 region",
+			},
+			{
+				Name:        "s3-access-key-id",
+				Type:        "string",
+				Description: "S3 access key ID (default: AWS default chain)",
+			},
+			{
+				Name:        "s3-secret-access-key",
+				Type:        "string",
+				Description: "S3 secret access key (default: AWS default chain)",
+			},
+			{
+				Name:        "s3-format",
+				Type:        "string",
+				Default:     "jsonl",
+				Description: "S3 output format",
+				Validations: []string{"oneof:jsonl,parquet"},
+			},
+			{
+				Name:        "s3-flush-interval",
+				Type:        "duration",
+				Default:     "1m",
+				Description: "S3 flush interval",
+			},
+			{
+				Name:        "s3-flush-size",
+				Type:        "int",
+				Default:     10000,
+				Description: "S3 flush size in events",
+				Validations: []string{"min:1"},
+			},
+			{
+				Name:        "s3-drain-timeout",
+				Type:        "duration",
+				Default:     "30s",
+				Description: "S3 shutdown drain timeout",
+			},
+		},
 	})
 
 	// S3 adapter flags.

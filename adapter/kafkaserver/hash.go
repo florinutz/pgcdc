@@ -3,7 +3,42 @@ package kafkaserver
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+
+	"github.com/florinutz/pgcdc/event"
 )
+
+// extractKeyFromRecord extracts a partition key from a structured Record.
+// Checks Key first, then After, then Before. Falls back to fallback if
+// the key column is not found.
+func extractKeyFromRecord(rec *event.Record, keyColumn, fallback string) string {
+	if rec == nil {
+		return fallback
+	}
+
+	// Try Key first.
+	if rec.Key != nil {
+		if v, ok := rec.Key.Get(keyColumn); ok && v != nil {
+			return fmt.Sprintf("%v", v)
+		}
+	}
+
+	// Try After (INSERT/UPDATE).
+	if rec.Change.After != nil {
+		if v, ok := rec.Change.After.Get(keyColumn); ok && v != nil {
+			return fmt.Sprintf("%v", v)
+		}
+	}
+
+	// Try Before (DELETE).
+	if rec.Change.Before != nil {
+		if v, ok := rec.Change.Before.Get(keyColumn); ok && v != nil {
+			return fmt.Sprintf("%v", v)
+		}
+	}
+
+	return fallback
+}
 
 // extractKey extracts a partition key from the event payload JSON.
 // It looks for the configured key column in the payload. If the key column

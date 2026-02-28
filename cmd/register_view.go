@@ -16,6 +16,13 @@ func init() {
 	registry.RegisterAdapter(registry.AdapterEntry{
 		Name:        "view",
 		Description: "Streaming SQL view engine (tumbling/sliding/session windows)",
+		Spec: []registry.ParamSpec{
+			{
+				Name:        "view-query",
+				Type:        "[]string",
+				Description: "Streaming SQL view query: name:query (repeatable, e.g. --view-query 'counts:SELECT COUNT(*) FROM pgcdc_events GROUP BY channel TUMBLING WINDOW 1m')",
+			},
+		},
 		Create: func(ctx registry.AdapterContext) (registry.AdapterResult, error) {
 			defs, err := parseViewConfigs(ctx.Cfg.Views)
 			if err != nil {

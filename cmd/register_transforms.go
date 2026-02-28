@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"log/slog"
+
 	"github.com/florinutz/pgcdc/internal/config"
 	"github.com/florinutz/pgcdc/registry"
 	"github.com/florinutz/pgcdc/transform"
@@ -95,6 +97,22 @@ func init() {
 				copts = append(copts, transform.WithTypePrefix(spec.CloudEvents.TypePrefix))
 			}
 			return transform.CloudEvents(copts...)
+		},
+	})
+
+	registry.RegisterTransform(registry.TransformEntry{
+		Name:        "cel_filter",
+		Description: "Filter events using a CEL expression",
+		Create: func(spec config.TransformSpec) transform.TransformFunc {
+			if spec.Expression == "" {
+				return nil
+			}
+			fn, err := transform.FilterCEL(spec.Expression)
+			if err != nil {
+				slog.Warn("invalid cel_filter expression, skipping", "error", err)
+				return nil
+			}
+			return fn
 		},
 	})
 }

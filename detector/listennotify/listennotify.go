@@ -126,6 +126,10 @@ func (d *Detector) run(ctx context.Context, events chan<- event.Event) error {
 			continue
 		}
 
+		// Attempt to parse as structured record (lazy — Record() call by
+		// consumers will parse on demand). We don't force-parse here to
+		// avoid overhead for events that may not need structured access.
+
 		if d.tracer != nil {
 			_, span := d.tracer.Start(ctx, "pgcdc.detect",
 				trace.WithSpanKind(trace.SpanKindProducer),

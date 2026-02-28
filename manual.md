@@ -15,6 +15,7 @@
   - [2.4 MySQL Binlog](#24-mysql-binlog)
   - [2.5 MongoDB Change Streams](#25-mongodb-change-streams)
   - [2.6 Feature Availability by Detector](#26-feature-availability-by-detector)
+  - [2.7 Multi-Detector Composition](#27-multi-detector-composition)
 - [Chapter 3: The Bus — Fan-Out and Backpressure](#chapter-3-the-bus--fan-out-and-backpressure)
   - [3.1 Fan-Out](#31-fan-out)
   - [3.2 Fast vs Reliable Mode](#32-fast-vs-reliable-mode)
@@ -23,6 +24,7 @@
   - [4.1 TransformFunc and Chain](#41-transformfunc-and-chain)
   - [4.2 Built-in Transforms](#42-built-in-transforms)
   - [4.3 Hot Reload](#43-hot-reload)
+  - [4.4 CEL Filter](#44-cel-filter)
 - [Chapter 5: Simple Adapters — stdout, file, exec, pg_table](#chapter-5-simple-adapters--stdout-file-exec-pg_table)
   - [5.1 stdout — The Canonical Adapter](#51-stdout--the-canonical-adapter)
   - [5.2 file — Size-Based Rotation](#52-file--size-based-rotation)
@@ -57,6 +59,7 @@
   - [11.1 Typed Errors](#111-typed-errors)
   - [11.2 DLQ Interface](#112-dlq-interface)
   - [11.3 DLQ Management CLI](#113-dlq-management-cli)
+  - [11.4 Nack Window — Adaptive DLQ](#114-nack-window--adaptive-dlq)
 - [Chapter 12: Encoding, Schema Evolution, and TOAST](#chapter-12-encoding-schema-evolution-and-toast)
   - [12.1 Encoding](#121-encoding)
   - [12.2 Schema Evolution](#122-schema-evolution)
@@ -65,10 +68,12 @@
   - [13.1 Prometheus Metrics](#131-prometheus-metrics)
   - [13.2 Health Checks](#132-health-checks)
   - [13.3 OpenTelemetry Tracing](#133-opentelemetry-tracing)
+  - [13.4 Event Inspector](#134-event-inspector)
 - [Chapter 14: The Plugin System — Wasm Extensions](#chapter-14-the-plugin-system--wasm-extensions)
   - [14.1 Why Wasm?](#141-why-wasm)
   - [14.2 Four Extension Points](#142-four-extension-points)
   - [14.3 The LSN Boundary](#143-the-lsn-boundary)
+- [Chapter 14c: Connector Specs and Introspection](#chapter-14c-connector-specs-and-introspection)
 - [Chapter 15: The Pipeline — How It All Fits Together](#chapter-15-the-pipeline--how-it-all-fits-together)
   - [15.1 Construction](#151-construction)
   - [15.2 The Run Method](#152-the-run-method)
@@ -86,6 +91,8 @@
   - [17.4 Changing Transforms Without Restart](#174-changing-transforms-without-restart)
   - [17.5 Debugging Event Flow](#175-debugging-event-flow)
   - [17.6 Upgrading pgcdc](#176-upgrading-pgcdc)
+- [Chapter 18: Multi-Pipeline Server](#chapter-18-multi-pipeline-server)
+  - [18.1 Multi-Pipeline Server](#181-multi-pipeline-server)
 - [Epilogue: The Shape of the System](#epilogue-the-shape-of-the-system)
 
 ---
@@ -843,6 +850,126 @@ Not every detector supports every feature. The WAL detector is the only one that
 
 If you need the full feature stack (cooperative checkpointing, backpressure, snapshots, heartbeat), you need WAL. The other detectors are simpler — fewer flags, less infrastructure — but lack the WAL-aware features that enable production-grade exactly-once delivery and disk-safety guarantees.
 
+### 2.7 Multi-Detector Composition
+
+**File: `detector/multi/multi.go`**
+
+Sometimes one detector isn't enough. You want a snapshot followed by live streaming. Or you want a primary and standby database, failing over automatically. Or you want two detectors running in parallel, merging their event streams. The multi-detector composes multiple detectors into a single `detector.Detector`, dispatching to one of three modes.
+
+```go
+type Detector struct {
+    detectors   []ChildDetector
+    mode        Mode
+    logger      *slog.Logger
+    DedupWindow time.Duration // when > 0 in parallel mode, dedup events by ID within this window
+}
+
+type ChildDetector struct {
+    Name     string
+    Detector detector.Detector
+}
+
+type Mode string
+
+const (
+    Sequential Mode = "sequential"
+    Parallel   Mode = "parallel"
+    Failover   Mode = "failover"
+)
+```
+
+The `Start` method dispatches based on mode:
+
+```go
+func (d *Detector) Start(ctx context.Context, events chan<- event.Event) error {
+    if len(d.detectors) == 0 {
+        return fmt.Errorf("multi-detector: no child detectors configured")
+    }
+    switch d.mode {
+    case Parallel:
+        return d.startParallel(ctx, events)
+    case Failover:
+        return d.startFailover(ctx, events)
+    default:
+        return d.startSequential(ctx, events)
+    }
+}
+```
+
+**Sequential mode** (default) runs detectors one after another. The first detector runs until its `Start` method returns, then the second starts. If a detector returns an error (and the context isn't cancelled), the error propagates immediately — no fallthrough. This is the natural fit for "snapshot first, then live streaming": the snapshot detector runs, exports all rows, returns nil, and the WAL detector takes over from the slot's consistent point.
+
+```go
+func (d *Detector) startSequential(ctx context.Context, events chan<- event.Event) error {
+    for i, child := range d.detectors {
+        if err := child.Detector.Start(ctx, events); err != nil {
+            if ctx.Err() != nil {
+                return ctx.Err()
+            }
+            return fmt.Errorf("detector %s: %w", child.Detector.Name(), err)
+        }
+    }
+    return nil
+}
+```
+
+**Parallel mode** runs all detectors concurrently via goroutines. All events merge into the same channel — the ordering between detectors is interleaved, but ordering within each detector is preserved. If any detector fails, the entire group is cancelled.
+
+The interesting part is deduplication. When `DedupWindow` is set (e.g., `5s`), a `dedupTracker` goroutine sits between the detectors and the real events channel. It maintains a time-expiring map of event IDs:
+
+```go
+type dedupTracker struct {
+    mu     sync.Mutex
+    seen   map[string]time.Time
+    window time.Duration
+    stopCh chan struct{}
+}
+
+func (dt *dedupTracker) isDuplicate(id string) bool {
+    dt.mu.Lock()
+    defer dt.mu.Unlock()
+    if _, exists := dt.seen[id]; exists {
+        return true
+    }
+    dt.seen[id] = time.Now()
+    return false
+}
+```
+
+A reap goroutine periodically cleans expired entries (every `window/2`), so the map doesn't grow unbounded. The proxy channel pattern is clean: detectors write to a proxy channel, the dedup forwarder reads from the proxy, checks `isDuplicate`, and forwards only unseen events to the real events channel. Duplicate events are logged at debug level and silently dropped.
+
+Why would parallel detectors produce duplicates? Consider two WAL detectors pointed at a primary and a read replica with streaming replication — the same change appears in both WAL streams. The dedup window handles this: as long as the replica lag is shorter than the window duration, duplicates are caught.
+
+**Failover mode** tries detectors in order. Each runs until it errors. On error, the current detector's context is cancelled and the next one starts:
+
+```go
+func (d *Detector) startFailover(ctx context.Context, events chan<- event.Event) error {
+    var lastErr error
+    for i, child := range d.detectors {
+        if ctx.Err() != nil {
+            return ctx.Err()
+        }
+        childCtx, childCancel := context.WithCancel(ctx)
+        err := child.Detector.Start(childCtx, events)
+        childCancel()
+
+        if err == nil {
+            return nil
+        }
+        if ctx.Err() != nil {
+            return ctx.Err()
+        }
+        lastErr = fmt.Errorf("detector %s: %w", child.Detector.Name(), err)
+    }
+    return fmt.Errorf("all failover detectors exhausted: %w", lastErr)
+}
+```
+
+If a detector returns nil (meaning it completed successfully without error), failover returns immediately — there's nothing to fail over from. If all detectors fail, the error message wraps the last error: `"all failover detectors exhausted: detector wal: connect: ..."`. This is useful for primary/standby database configurations where you want automatic failover without external tooling.
+
+Each child detector gets its own cancellable context (`childCtx`). When a detector fails, `childCancel()` ensures it cleans up before the next detector starts. If the parent context is cancelled (e.g., SIGTERM), the failover exits immediately without trying the remaining detectors.
+
+CLI: `--detector-mode sequential|parallel|failover` (default `sequential`). The mode is wired in `cmd/listen.go` when multiple detector configurations are present.
+
 ---
 
 ## Chapter 3: The Bus — Fan-Out and Backpressure
@@ -1087,7 +1214,7 @@ The `ErrDropEvent` sentinel is the filter mechanism. A transform that wants to s
 
 ### 4.2 Built-in Transforms
 
-pgcdc ships six built-in transforms:
+pgcdc ships seven built-in transforms:
 
 **drop_columns** removes specified columns from the payload's `row` and `old` fields. Used via `--drop-columns password,ssn` or YAML config.
 
@@ -1125,6 +1252,76 @@ func Debezium(opts ...DebeziumOption) TransformFunc {
 ```
 
 **cloudevents** rewrites the payload into CloudEvents v1.0 structured-mode JSON. CloudEvents is a CNCF specification for describing event data in a common format. Like Debezium, this is about interoperability — systems that consume CloudEvents can process pgcdc events without custom parsing.
+
+**cel_filter** evaluates a CEL (Common Expression Language) expression against each event. Events where the expression evaluates to `false` are dropped via `ErrDropEvent`. Events that cause evaluation errors pass through unchanged — a deliberate choice: a broken expression shouldn't silently drop your data. Configured via `--filter-cel 'expression'` CLI flag or `type: cel_filter` with `expression:` in YAML config.
+
+The CEL environment exposes seven variables derived from the event: `channel` (string), `operation` (string), `source` (string), `id` (string), `has_record` (bool), `table` (string, from record metadata), and `schema_name` (string, from record metadata). The environment is compiled once at startup and the resulting `Program` is reused for every event — no per-event compilation overhead:
+
+```go
+// File: cel/cel.go
+func Compile(expr string) (*Program, error) {
+    env, err := cel.NewEnv(
+        cel.Variable("channel", cel.StringType),
+        cel.Variable("operation", cel.StringType),
+        cel.Variable("source", cel.StringType),
+        cel.Variable("id", cel.StringType),
+        cel.Variable("has_record", cel.BoolType),
+        cel.Variable("table", cel.StringType),
+        cel.Variable("schema_name", cel.StringType),
+    )
+    // ... compile, verify output type is bool, build Program
+}
+
+func (p *Program) Eval(ev event.Event) (bool, error) {
+    vars := map[string]any{
+        "channel":     ev.Channel,
+        "operation":   ev.Operation,
+        "source":      ev.Source,
+        "id":          ev.ID,
+        "has_record":  ev.HasRecord(),
+        "table":       "",
+        "schema_name": "",
+    }
+    // Extract table/schema from Record metadata if available
+    out, _, err := p.program.Eval(vars)
+    // ... return bool result
+}
+```
+
+The transform wrapper (`transform/cel_filter.go`) is minimal — it calls `Compile` once, then `Eval` per event:
+
+```go
+func FilterCEL(expr string) (TransformFunc, error) {
+    prg, err := pgcel.Compile(expr)
+    if err != nil {
+        return nil, fmt.Errorf("compile filter expression: %w", err)
+    }
+    return func(ev event.Event) (event.Event, error) {
+        ok, err := prg.Eval(ev)
+        if err != nil {
+            return ev, nil // pass through on error
+        }
+        if !ok {
+            return ev, ErrDropEvent
+        }
+        return ev, nil
+    }, nil
+}
+```
+
+Example usage:
+
+```sh
+# Only INSERT events on the orders channel
+pgcdc listen --db postgres://... --detector wal --all-tables \
+  --filter-cel 'operation == "INSERT" && channel == "pgcdc:orders"'
+
+# Only events from the inventory schema
+pgcdc listen --db postgres://... --detector wal --all-tables \
+  --filter-cel 'schema_name == "inventory"'
+```
+
+CEL expressions support the full CEL language — boolean operators (`&&`, `||`, `!`), string operations (`contains`, `startsWith`, `endsWith`), comparisons, and ternary expressions. The `google/cel-go` library handles parsing, type-checking, and evaluation. The compile step validates the expression and verifies the return type is `bool` — a non-boolean expression fails at startup, not at runtime.
 
 ### 4.3 Hot Reload
 
@@ -1174,6 +1371,8 @@ func (p *Pipeline) wrapSubscription(name string, inCh <-chan event.Event,
     return out
 }
 ```
+
+Built-in transforms are registered via `registry.RegisterTransform()` in `cmd/register_transforms.go` (called from `init()`), one entry per transform type. The `registry.SpecToTransform(spec)` function looks up the factory by `spec.Type` and calls it — no hardcoded switch. Adding a new transform type means adding one `registry.RegisterTransform` call; `specToTransform` in `cmd/reload.go` does not need to change.
 
 When `SIGHUP` arrives, the `Pipeline.Reload` method builds new `wrapperConfig` values and stores them atomically:
 
@@ -1249,6 +1448,45 @@ CLI flags always take precedence: if `--route webhook=orders` was set on the com
 4. YAML `transforms.adapter.<name>` (in array order)
 
 There is no deduplication between layers. If you specify `--drop-columns password` on the CLI and also list `drop_columns: [password]` in YAML global transforms, the drop runs twice (harmlessly, but wastefully). The ordering logic lives in `cmd/reload.go:buildTransformOpts`.
+
+### 4.4 CEL Filter
+
+The CEL filter transform is registered in the component registry like every other transform:
+
+```go
+registry.RegisterTransform(registry.TransformEntry{
+    Name:        "cel_filter",
+    Description: "Filter events using a CEL expression",
+    Create: func(spec config.TransformSpec) transform.TransformFunc {
+        if spec.Expression == "" {
+            return nil
+        }
+        fn, err := transform.FilterCEL(spec.Expression)
+        if err != nil {
+            slog.Warn("invalid cel_filter expression, skipping", "error", err)
+            return nil
+        }
+        return fn
+    },
+})
+```
+
+This means CEL filter works everywhere the registry does: in YAML `transforms:` config, in `SIGHUP` hot-reload (the expression is recompiled from the new YAML), and in `pgcdc describe cel_filter` for parameter introspection. Invalid expressions produce a warning at startup (or reload) and are silently skipped rather than aborting — a defensive choice that lets the rest of the pipeline run even if one filter expression has a typo.
+
+YAML configuration example:
+
+```yaml
+transforms:
+  global:
+    - type: cel_filter
+      expression: 'operation != "TRUNCATE"'
+  adapter:
+    webhook:
+      - type: cel_filter
+        expression: 'table == "orders" && operation == "INSERT"'
+```
+
+The CEL filter composes naturally with other transforms in the chain. Since it returns `ErrDropEvent` to signal filtering, it short-circuits the chain — transforms after the CEL filter in the chain never see dropped events. Place it early in the chain to avoid unnecessary work on events that will be discarded.
 
 ---
 
@@ -1447,7 +1685,17 @@ This is a common pattern in pgcdc adapters: separate connection-level failures (
 
 **File: `adapter/adapter.go`**
 
-Beyond the basic `Adapter` interface (`Start` + `Name`), adapters can opt into additional capabilities through interface implementation:
+Beyond the basic `Adapter` interface (`Start` + `Name`), adapters can opt into additional capabilities through interface implementation. There are now three distinct **execution paths** the pipeline dispatches through, plus several opt-in capability interfaces.
+
+**Three execution paths** (selected via type assertion in `startAdapter`):
+
+1. **`adapter.Deliverer`** — implements `Deliver(ctx context.Context, ev event.Event) error`. The pipeline calls `middleware.Build()` and runs a `StartLoop` event loop. All of retry, circuit-breaking, rate-limiting, DLQ recording, tracing, and ack are provided by the `adapter/middleware` stack. The adapter implements only the delivery logic. Webhook and embedding use this path.
+
+2. **`adapter.Batcher`** — implements `Flush(ctx context.Context, batch []event.Event) FlushResult` and `BatchConfig() BatchConfig`. The pipeline runs a `batch.Runner` that buffers events and flushes them in bulk on a timer or size trigger, with DLQ and ack managed by the runner.
+
+3. **Legacy `Start` path** — implements only `Start(ctx, <-chan event.Event) error`. The pipeline calls `Start` directly. The adapter manages its own event loop. Used by broker-style adapters (SSE, WebSocket, gRPC, kafkaserver, view).
+
+**Opt-in capability interfaces** (detected via type assertion at construction time):
 
 ```go
 type Acknowledger interface {
@@ -1465,28 +1713,22 @@ type Drainer interface {
 type Reinjector interface {
     SetIngestChan(ch chan<- event.Event)
 }
-
-type Traceable interface {
-    SetTracer(t trace.Tracer)
-}
 ```
 
-The pipeline uses type assertions to detect these capabilities at construction time:
+For Deliverer and Batcher adapters, DLQ and ack are managed by the middleware/batch runner and are **not** injected via `SetDLQ`/`SetAckFunc`. For legacy adapters, the pipeline injects these at construction:
 
 ```go
-for _, a := range p.adapters {
+// Only for legacy (non-Deliverer, non-Batcher) adapters:
+if !isMiddlewareManaged {
     if da, ok := a.(DLQAware); ok && p.dlq != nil {
         da.SetDLQ(p.dlq)
-    }
-    if ta, ok := a.(adapter.Traceable); ok {
-        ta.SetTracer(tracer)
     }
 }
 ```
 
 **Validator** runs pre-flight checks before the pipeline starts. The webhook adapter validates DNS resolution. The S3 adapter calls HeadBucket. If any validator fails, startup is aborted (unless `--skip-validation`).
 
-**Acknowledger** enables cooperative checkpointing. The pipeline injects an ack function that the adapter calls after fully processing each event — whether that's successful delivery, DLQ recording, or intentional skip.
+**Acknowledger** enables cooperative checkpointing. For legacy adapters, the pipeline injects an ack function. For Deliverer adapters, the middleware's Ack layer calls it after `Deliver` returns.
 
 **Drainer** flushes in-flight work during graceful shutdown. The webhook adapter's Drain waits for its `sync.WaitGroup` (tracking in-flight HTTP requests). The S3 adapter's Drain flushes its buffer.
 
@@ -1574,30 +1816,22 @@ The signature covers the serialized event body — if any field is modified in t
 
 **Custom headers** (`--webhook-headers`): Arbitrary headers can be added for authentication (`Authorization: Bearer <token>`), routing (`X-Target-Service: orders`), or metadata (`X-Environment: production`).
 
-The `Start` loop wraps delivery with circuit breaker, rate limiter, tracing, and DLQ:
+The webhook adapter implements `adapter.Deliverer` — its `Deliver(ctx, ev)` method handles only the HTTP logic (signing, headers, trace context injection, per-delivery retry with backoff). The pipeline's `startAdapter` dispatches webhook through the `adapter/middleware` chain, which provides the circuit breaker, rate limiter, DLQ recording, tracing span, and ack — none of that lives inside the webhook package itself.
+
+The middleware chain for webhook looks like:
+
+```
+Metrics → Tracing → CircuitBreaker → RateLimit → Retry → DLQ → Ack → webhook.Deliver
+```
+
+`middleware.Build(name, cfg, opts...)` constructs this chain, and `middleware.StartLoop(ctx, events, chain, logger)` is the event loop that calls the chain for each event. The entire resilience stack is configured via `registry.AdapterResult.MiddlewareConfig` (set in `cmd/register_core.go` for webhook):
 
 ```go
-case ev, ok := <-events:
-    // Circuit breaker: skip if open
-    if a.cb != nil && !a.cb.Allow() {
-        a.dlq.Record(ctx, ev, "webhook", &pgcdcerr.CircuitBreakerOpenError{})
-        a.ackFn(ev.LSN) // ack even on CB skip
-        continue
-    }
-
-    // Rate limiter: block until token available
-    a.limiter.Wait(ctx)
-
-    // Delivery with tracing span
-    a.inflight.Add(1)
-    if err := a.deliver(ctx, ev); err != nil {
-        a.cb.RecordFailure()
-        a.dlq.Record(ctx, ev, "webhook", err)
-    } else {
-        a.cb.RecordSuccess()
-    }
-    a.inflight.Done()
-    a.ackFn(ev.LSN) // ack after terminal outcome
+mwCfg := webhookMiddlewareConfig(cfg)
+return registry.AdapterResult{
+    Adapter:          a,
+    MiddlewareConfig: &mwCfg,
+}, nil
 ```
 
 **Circuit breaker** (`internal/circuitbreaker/circuitbreaker.go`): Three states — Closed (normal operation), Open (all requests rejected), HalfOpen (one trial request allowed). After `--webhook-cb-failures` consecutive failures, the breaker opens. After `--webhook-cb-reset` duration, it transitions to half-open. One success in half-open closes the breaker; one failure re-opens it.
@@ -2918,6 +3152,67 @@ pgcdc dlq purge --db postgres://localhost/mydb --before 24h
 
 The replay command reconstructs the original event from the stored JSONB payload, creates a temporary adapter with the specified (or default) configuration, and delivers the event. Each successful replay updates `replayed_at`; failed replays leave the record untouched for the next attempt.
 
+### 11.4 Nack Window — Adaptive DLQ
+
+**File: `dlq/window.go`**
+
+The circuit breaker protects against sustained downstream failures, but it operates at the connection level — it opens after N consecutive failures and blocks all delivery until the reset timeout. The nack window operates at the event level, providing a finer-grained mechanism: it tracks recent delivery outcomes in a sliding window and pauses an adapter when the failure rate exceeds a threshold.
+
+The data structure is a fixed-size ring buffer of boolean outcomes (ack = `true`, nack = `false`):
+
+```go
+type NackWindow struct {
+    mu        sync.Mutex
+    outcomes  []bool // ring buffer: true=ack, false=nack
+    size      int
+    head      int    // index of oldest entry
+    count     int    // total outcomes in buffer (0..size)
+    nackCount int    // count of nacks in buffer
+    threshold int    // nack count to trigger pause
+}
+```
+
+The `record` method handles the sliding window mechanics. When the buffer isn't full, outcomes are appended at the tail. When full, the oldest outcome at `head` is evicted — and if it was a nack, `nackCount` is decremented before the new outcome is written:
+
+```go
+func (w *NackWindow) record(ack bool) bool {
+    w.mu.Lock()
+    defer w.mu.Unlock()
+
+    if w.count < w.size {
+        idx := (w.head + w.count) % w.size
+        w.outcomes[idx] = ack
+        w.count++
+    } else {
+        if !w.outcomes[w.head] {
+            w.nackCount--
+        }
+        w.outcomes[w.head] = ack
+        w.head = (w.head + 1) % w.size
+    }
+
+    if !ack {
+        w.nackCount++
+    }
+
+    return w.nackCount >= w.threshold
+}
+```
+
+Both `RecordAck()` and `RecordNack()` return `true` if the threshold is currently exceeded, so the caller can act immediately. `Exceeded()` provides a read-only check. `Reset()` clears the window (useful when the downstream issue is resolved). `Stats()` returns `(total, nacks, threshold)` for debugging and metrics.
+
+The window self-recovers. As successful deliveries (acks) slide in and failed deliveries (nacks) slide out, the nack count drops below the threshold and `Exceeded()` returns `false` again. No manual intervention needed — unlike the circuit breaker, which requires a successful half-open delivery to close, the nack window naturally recovers as the error burst moves out of the window.
+
+**Wiring.** In `pgcdc.go`'s wrapper subscription, when `nackWindowSize > 0`, a `NackWindow` is created per adapter. After each delivery attempt:
+- Success: `window.RecordAck()`
+- Failure (after DLQ): `window.RecordNack()`
+
+When `window.Exceeded()` returns `true`, events are skipped with a warning log and the `pgcdc_nack_window_exceeded_total{adapter}` counter increments. The `pgcdc_adapter_paused{adapter}` gauge shows `1` when an adapter is in the paused state, `0` when it recovers.
+
+CLI: `--dlq-window-size 100` (default), `--dlq-window-threshold 50` (default). With these defaults, if 50 out of the last 100 deliveries failed, the adapter is paused. Once enough acks slide in to bring the nack count below 50, delivery resumes automatically.
+
+The relationship between the circuit breaker and the nack window: the circuit breaker protects the downstream system (it stops sending requests when the endpoint is clearly down), while the nack window protects the pipeline (it stops wasting resources on an adapter that's failing intermittently). They complement each other — the circuit breaker handles "endpoint is down," the nack window handles "endpoint is flaky."
+
 ---
 
 ## Chapter 12: Encoding, Schema Evolution, and TOAST
@@ -3294,6 +3589,81 @@ The end-to-end trace for a single event typically looks like:
 
 The link (rather than parent-child) relationship preserves the fan-out semantics: if one event is delivered to three adapters, each adapter creates its own CONSUMER span linked to the same PRODUCER span. In your tracing UI (Jaeger, Grafana Tempo, Honeycomb), you can follow the event from creation to all its destinations.
 
+### 13.4 Event Inspector
+
+**File: `inspect/inspector.go`, `inspect/ring.go`, `inspect/handler.go`**
+
+Tracing shows you the journey of individual events through distributed systems. Metrics show you aggregate counts and latencies. But sometimes you need to answer a simpler question: "what does the event look like right now, at this point in the pipeline?" The inspector is a ring-buffer event sampler that captures events at three tap points:
+
+```go
+type TapPoint string
+
+const (
+    TapPostDetector  TapPoint = "post-detector"  // after detector emits, before transforms
+    TapPostTransform TapPoint = "post-transform" // after transforms run, before route filtering
+    TapPreAdapter    TapPoint = "pre-adapter"     // just before adapter delivery
+)
+```
+
+Each tap point has its own ring buffer (default 100 entries per point). The ring buffer is a pre-allocated slice with head/count tracking — the same structure as the nack window, applied to events instead of booleans:
+
+```go
+type ringBuffer struct {
+    mu    sync.Mutex
+    items []event.Event
+    size  int
+    head  int
+    count int
+
+    subsMu sync.RWMutex
+    subs   map[*subscriber]struct{}
+}
+
+func (rb *ringBuffer) add(ev event.Event) {
+    rb.mu.Lock()
+    idx := (rb.head + rb.count) % rb.size
+    if rb.count >= rb.size {
+        rb.head = (rb.head + 1) % rb.size
+    } else {
+        rb.count++
+    }
+    rb.items[idx] = ev
+    rb.mu.Unlock()
+
+    // Notify real-time subscribers (non-blocking).
+    rb.subsMu.RLock()
+    for sub := range rb.subs {
+        select {
+        case sub.ch <- ev:
+        default: // slow subscriber — drop
+        }
+    }
+    rb.subsMu.RUnlock()
+}
+```
+
+The `Record` method is a simple append to the ring buffer. When the buffer is full, the oldest event is overwritten — no allocation, no growing. The `Snapshot` method returns the last N events from the buffer, and `Subscribe` returns a channel that receives events in real-time (with a non-blocking send, so slow subscribers don't block the pipeline).
+
+The inspector is enabled via `--inspect-buffer N` (where N is the ring buffer size per tap point). When not enabled, the inspector pointer is nil and all tap points are no-ops — zero overhead on the hot path.
+
+**HTTP endpoints.** When enabled, two endpoints are mounted on the existing HTTP server:
+
+`GET /inspect?point=post-detector&limit=10` returns a JSON snapshot of the last 10 events captured at the `post-detector` tap point:
+
+```json
+{
+  "point": "post-detector",
+  "count": 10,
+  "events": [ ... ]
+}
+```
+
+`GET /inspect/stream?point=post-transform` opens an SSE connection that streams events in real-time as they pass through the `post-transform` tap point. The SSE handler uses the `Subscribe` method to get a channel and forwards events as `data:` frames.
+
+The tap points let you compare events at different pipeline stages. Capture `post-detector` to see the raw event as the detector produced it. Capture `post-transform` to see it after transforms ran (columns dropped, fields renamed, payload reshaped). Capture `pre-adapter` to see the final form before delivery. Comparing the three shows you exactly what each pipeline stage did to the event — invaluable when debugging a transform chain that produces unexpected output.
+
+This is a debug/development tool. The ring buffer is fixed-size and events are not persisted. In production, the buffer size should be small (or the inspector disabled entirely) to minimize memory overhead. The real-time SSE stream is useful for development — connect it while iterating on transform expressions to see immediate results.
+
 ---
 
 ## Chapter 14: The Plugin System — Wasm Extensions
@@ -3361,6 +3731,8 @@ Events are serialized as JSON by default, with an opt-in Protobuf serialization 
 
 Metrics are tracked per-plugin: `pgcdc_plugin_calls_total{plugin,function}`, `pgcdc_plugin_duration_seconds{plugin,function}`, and `pgcdc_plugin_errors_total{plugin,function}`. These help identify slow or failing plugins without inspecting plugin internals.
 
+**Implementation note**: All four Wasm wrapper types embed a shared `basePlugin` struct (`plugin/wasm/base.go`) that holds the common state (`name`, `plugin` instance, `encoding`, `logger`) and implements `call(fnName string, input []byte) ([]byte, error)`. The `call` method records metrics uniformly for all plugin types. Previously this code was duplicated across the four files; now each wrapper type is ~30 lines of type-specific logic on top of `basePlugin`.
+
 ### 14.3 The LSN Boundary
 
 There's a subtle correctness issue when events cross the Wasm serialization boundary. The LSN field has `json:"-"` — it's excluded from JSON serialization. If a transform plugin receives a serialized event, modifies it, and returns the result, the LSN is lost.
@@ -3377,6 +3749,152 @@ func (t *WasmTransform) Transform(ev event.Event) (event.Event, error) {
 ```
 
 This is critical for cooperative checkpointing. Without LSN preservation, the ack tracker would see LSN=0 for plugin-transformed events, and the cooperative checkpoint would never advance.
+
+---
+
+## Chapter 14b: The Registry — Component Self-Registration
+
+**File: `registry/registry.go`**
+
+The registry is the glue between CLI flags, configuration, and component construction. Every adapter, detector, and transform is registered at startup via `init()` functions in `cmd/register_*.go` files. The listen command then calls `registry.CreateAdapter(name, ctx)` or `registry.CreateDetector(name, ctx)` to instantiate them — no hardcoded switch.
+
+**Adapter registration:**
+
+```go
+registry.RegisterAdapter(registry.AdapterEntry{
+    Name:        "webhook",
+    Description: "HTTP POST to a webhook URL",
+    Create: func(ctx registry.AdapterContext) (registry.AdapterResult, error) {
+        a := webhook.New(ctx.Cfg.Webhook.URL, ...)
+        mwCfg := webhookMiddlewareConfig(ctx.Cfg)
+        return registry.AdapterResult{
+            Adapter:          a,
+            MiddlewareConfig: &mwCfg,
+        }, nil
+    },
+    BindFlags: func(f *pflag.FlagSet) {
+        f.StringP("url", "u", "", "webhook destination URL")
+        // ...
+    },
+    ViperKeys: [][2]string{
+        {"url", "webhook.url"},
+        // ...
+    },
+})
+```
+
+`AdapterContext` carries shared resources: `Cfg config.Config`, `Logger *slog.Logger`, `Ctx context.Context`, `KafkaEncoder`, `NatsEncoder`.
+
+`AdapterResult` carries typed outputs: `Adapter`, `MiddlewareConfig *middleware.Config`, `SSEBroker *sse.Broker`, `WSBroker *ws.Broker`. Typed fields replace the old `Extra map[string]any`.
+
+**Detector registration:**
+
+```go
+registry.RegisterDetector(registry.DetectorEntry{
+    Name:   "wal",
+    Create: func(ctx registry.DetectorContext) (registry.DetectorResult, error) {
+        det := walreplication.New(...)
+        // ... all WAL-specific Set* calls
+        return registry.DetectorResult{
+            Detector:        det,
+            CheckpointStore: cpStore, // non-nil when --persistent-slot
+            Cleanup:         cleanup, // deferred (e.g. progress store close)
+        }, nil
+    },
+})
+```
+
+`DetectorContext` carries: `Cfg`, `Logger`, `Ctx`, `TracerProvider trace.TracerProvider`, `WasmRT any`.
+
+**Transform registration:**
+
+```go
+registry.RegisterTransform(registry.TransformEntry{
+    Name: "drop_columns",
+    Create: func(spec config.TransformSpec) transform.TransformFunc {
+        return transform.DropColumns(spec.Columns...)
+    },
+})
+```
+
+`registry.SpecToTransform(spec)` looks up the factory by `spec.Type` and calls it. Used by both the hot-reload path (`cmd/reload.go`) and initial pipeline construction.
+
+**`pgcdc list`** uses `registry.Adapters()`, `registry.Detectors()`, and `registry.Transforms()` to enumerate what's registered in the current build — slim builds missing `no_kafka` show no kafka entry.
+
+---
+
+## Chapter 14c: Connector Specs and Introspection
+
+**File: `registry/spec.go`**
+
+The registry knows what components exist and how to create them. But it doesn't tell you what a component needs — what flags it requires, what their types are, what values are valid. That's the job of connector specs.
+
+Every adapter and detector registration can include a `Spec` field — a slice of `ParamSpec` structs describing the component's configuration parameters:
+
+```go
+type ParamSpec struct {
+    Name        string   // "kafka-brokers"
+    Type        string   // "string", "int", "duration", "bool", "[]string", "float64"
+    Default     any      // default value
+    Required    bool     // is this required?
+    Description string   // human-readable description
+    Validations []string // "min:1", "max:100", "oneof:a,b,c"
+}
+```
+
+The `Validations` field is a list of human-readable rules (not enforced by the spec system — enforcement happens in `internal/config/validate.go`). They serve as documentation: when `pgcdc describe kafka` shows `Validations: min:1` on the `kafka-brokers` parameter, you know at least one broker is required.
+
+`GetConnectorSpec(name)` searches adapters first, then detectors, returning a `ConnectorSpec` with the component's metadata:
+
+```go
+type ConnectorSpec struct {
+    Name        string      // connector name
+    Type        string      // "adapter" or "detector"
+    Description string      // human-readable description
+    Params      []ParamSpec // configuration parameters
+}
+
+func GetConnectorSpec(name string) *ConnectorSpec {
+    if e, ok := GetAdapter(name); ok {
+        return &ConnectorSpec{
+            Name:        e.Name,
+            Type:        "adapter",
+            Description: e.Description,
+            Params:      e.Spec,
+        }
+    }
+    if e, ok := GetDetector(name); ok {
+        return &ConnectorSpec{
+            Name:        e.Name,
+            Type:        "detector",
+            Description: e.Description,
+            Params:      e.Spec,
+        }
+    }
+    return nil
+}
+```
+
+The search order (adapters first, then detectors) means that if an adapter and a detector happen to share a name, the adapter wins. In practice this doesn't happen — adapter and detector names are distinct by convention.
+
+The `pgcdc describe <name>` command (`cmd/describe.go`) uses this to print a formatted table:
+
+```
+$ pgcdc describe kafka
+kafka (adapter)
+Publish events to Kafka topics
+
+NAME                TYPE       DEFAULT    REQUIRED  VALIDATIONS  DESCRIPTION
+----                ----       -------    --------  -----------  -----------
+kafka-brokers       []string   -          yes       min:1        Kafka broker addresses
+kafka-topic         string     -          no        -            Override topic name
+kafka-encoding      string     json       no        oneof:...    Event encoding format
+...
+```
+
+This enables discoverability — you can explore what a connector needs without reading source code or scrolling through `--help` output. The `tabwriter`-based formatting aligns columns cleanly regardless of value lengths. Unknown connector names produce a clear error: `"unknown connector \"foo\": not found in adapters or detectors"`.
+
+The spec system also enables programmatic introspection. The multi-pipeline server (`cmd/serve.go`) could use specs to validate pipeline configurations before starting them, and tooling (IDEs, config generators) can consume specs to provide autocomplete and validation for pgcdc YAML config files.
 
 ---
 
@@ -3401,18 +3919,23 @@ func NewPipeline(det detector.Detector, opts ...Option) *Pipeline {
 }
 ```
 
-Options include `WithAdapter`, `WithBusBuffer`, `WithBusMode`, `WithLogger`, `WithCheckpointStore`, `WithDLQ`, `WithRoute`, `WithTransform`, `WithCooperativeCheckpoint`, `WithBackpressure`, `WithTracerProvider`, `WithSkipValidation`, and `WithShutdownTimeout`.
+Options include `WithAdapter`, `WithBusBuffer`, `WithBusMode`, `WithLogger`, `WithCheckpointStore`, `WithDLQ`, `WithRoute`, `WithTransform`, `WithCooperativeCheckpoint`, `WithBackpressure`, `WithTracerProvider`, `WithSkipValidation`, `WithShutdownTimeout`, and `WithMiddlewareConfig(adapterName, middleware.Config)`.
 
-During construction, the pipeline wires together all the optional interfaces:
+`WithMiddlewareConfig` stores per-adapter middleware configuration (retry, circuit breaker, rate limit) in `p.middlewareConfigs`. `startAdapter` reads this map when building the middleware chain for Deliverer adapters.
+
+During construction, the pipeline wires optional interfaces. For Deliverer and Batcher adapters, DLQ and tracer are handled by the middleware/batch runner and are skipped here:
 
 ```go
 for _, a := range p.adapters {
     p.health.Register(a.Name())
-    if da, ok := a.(DLQAware); ok && p.dlq != nil {
-        da.SetDLQ(p.dlq)
-    }
-    if ta, ok := a.(adapter.Traceable); ok {
-        ta.SetTracer(tracer)
+    isMiddlewareManaged := false
+    if _, ok := a.(adapter.Deliverer); ok { isMiddlewareManaged = true }
+    if _, ok := a.(adapter.Batcher); ok  { isMiddlewareManaged = true }
+
+    if !isMiddlewareManaged {
+        if da, ok := a.(DLQAware); ok && p.dlq != nil {
+            da.SetDLQ(p.dlq)
+        }
     }
 }
 ```
@@ -3510,7 +4033,7 @@ Each goroutine updates its health status on entry and exit. This means the `/hea
         p.safeGo(g, a.Name(), func() error {
             p.health.SetStatus(a.Name(), health.StatusUp)
             defer p.health.SetStatus(a.Name(), health.StatusDown)
-            return a.Start(gCtx, sub)
+            return p.startAdapter(gCtx, a, sub)
         })
     }
 ```
@@ -3518,6 +4041,22 @@ Each goroutine updates its health status on entry and exit. This means the `/hea
 Reinjector wiring happens before adapter start. The view adapter needs the ingest channel so it can send `VIEW_RESULT` events back into the bus.
 
 `subscribeAdapter` creates a subscriber channel on the bus, wraps it with the wrapper goroutine (for transforms and route filtering), and returns the output channel. The wrapper goroutine loads its config from the `atomic.Pointer` on every event, enabling hot-reload.
+
+`startAdapter` selects the execution path via type assertion:
+
+```go
+// Path 1: Batcher → batch.Runner (timer/size flush, DLQ, ack)
+if b, ok := a.(adapter.Batcher); ok { ... }
+
+// Path 2: Deliverer → middleware chain (retry, CB, RL, DLQ, tracing, ack)
+if d, ok := a.(adapter.Deliverer); ok {
+    chain := middleware.Build(a.Name(), cfg, opts...)
+    return middleware.StartLoop(ctx, events, chain, p.logger)
+}
+
+// Path 3: Legacy → a.Start() directly
+return a.Start(ctx, events)
+```
 
 ```go
     err := g.Wait()
@@ -3590,9 +4129,17 @@ The checkpoint store is closed in a deferred call at the top of Run, after drain
 
 ### 16.1 Configuration
 
-**File: `internal/config/config.go`**
+**Files: `internal/config/`**
 
-All configuration flows through a single `Config` struct. Viper handles three layers of configuration with this priority order:
+All configuration flows through a single `Config` struct defined in `config.go`. The config package is split across five files to keep each domain manageable:
+
+- `config.go` — core `Config` struct, shared types (Bus, OTel, DLQ, Transform, Backpressure), `Default()`
+- `adapter_config.go` — adapter-specific config structs (WebhookConfig, EmbeddingConfig, KafkaConfig, etc.)
+- `detector_config.go` — detector-specific config structs (DetectorConfig, OutboxConfig, MySQLConfig, MongoDBConfig, etc.)
+- `plugin_config.go` — plugin config structs (PluginConfig, PluginSpec, etc.)
+- `validate.go` — `Validate()` method with all cross-field validation rules
+
+The `Config` struct also has a `Middleware map[string]MiddlewareConfig` field for per-adapter middleware configuration via YAML. Viper handles three layers of configuration with this priority order:
 
 1. **CLI flags** (highest priority)
 2. **Environment variables** (prefixed with `PGCDC_`)
@@ -3765,7 +4312,26 @@ pgcdc listen --db postgres://localhost/mydb --detector wal \
 
 **`pgcdc dlq list|replay|purge`** — Dead letter queue management (covered in Chapter 11).
 
+**`pgcdc list [adapters|detectors|transforms]`** — Lists all registered adapters, detectors, or transforms with their descriptions. Because the registry is build-tag-aware, `pgcdc list adapters` on a slim binary shows only the adapters compiled in. Useful for confirming which features are available in the running build.
+
 **`pgcdc playground`** — Starts a Docker-based demo environment with PostgreSQL, auto-generated data, and pgcdc configured to stream to stdout. This is a zero-setup introduction: it pulls a PostgreSQL container, creates tables, inserts random data on a loop, and shows the CDC events flowing in real-time.
+
+**`pgcdc serve --config pipelines.yaml`** — Starts a multi-pipeline server that manages N independent pipelines defined in a YAML config file. Each pipeline has its own detector, adapters, and transforms — completely independent contexts, channels, and goroutines. A shared HTTP server provides Prometheus metrics (`/metrics`), health checks (`/healthz`), and a REST API for runtime pipeline management:
+
+```
+GET    /api/v1/pipelines            — list all pipelines with status
+GET    /api/v1/pipelines/:id        — get pipeline detail (config + runtime state)
+POST   /api/v1/pipelines            — create pipeline from JSON spec
+DELETE /api/v1/pipelines/:id        — remove pipeline (must be stopped)
+POST   /api/v1/pipelines/:id/start  — start pipeline
+POST   /api/v1/pipelines/:id/stop   — stop pipeline
+POST   /api/v1/pipelines/:id/pause  — pause a running pipeline
+POST   /api/v1/pipelines/:id/resume — resume a paused pipeline
+```
+
+The pipeline builder uses the component registry — `registry.CreateDetector`, `registry.CreateAdapter`, and `registry.SpecToTransform` — to construct real pipelines from the YAML specs. Config maps are converted to typed config via JSON round-trip (`json.Marshal` the `map[string]any`, then `json.Unmarshal` into the typed config struct). This is covered in detail in Chapter 18.
+
+**`pgcdc describe <name>`** — Shows the full parameter specification for any registered adapter or detector. Uses `registry.GetConnectorSpec()` to look up the component and prints a formatted table of parameters with name, type, default value, required flag, validation rules, and description. See Chapter 14c for the spec system that powers this command.
 
 Each command follows the same pattern: a cobra `Command` struct with flag definitions in `init()`, a `RunE` function that reads config from viper and executes. Commands register themselves with `rootCmd.AddCommand()` in their `init()` function. This pattern means commands are self-contained — each command file is independently understandable.
 
@@ -3802,7 +4368,7 @@ Need crash-resumable streaming?
 - `--toast-cache` requires `--detector wal` (line 558)
 - `--all-tables` is incompatible with `--detector outbox` (line 502)
 
-**The viper collision pattern.** You'll notice that many flags in `cmd/listen.go:458-496` are read via `cmd.Flags().GetBool()` instead of the usual `viper.GetBool()`. This is deliberate. Viper flag bindings are global — if two cobra commands both bind the same flag name to viper, they share state. The `listen` and `snapshot` commands share several flag names (`snapshot-first`, `snapshot-table`, etc.), so the listen command reads these directly from cobra's flag set to avoid cross-command contamination. If you add a new flag that might conflict with another command, follow this pattern.
+**The viper binding strategy.** All viper flag bindings are registered in `bindListenFlags`, the `PreRunE` hook on `listenCmd`, not in `init()`. This is deliberate: viper flag bindings are global — if two cobra commands both bind the same flag key in `init()`, they share state. Moving bindings to `PreRunE` means only the active command binds its flags for that invocation, eliminating the collision. Adapter flags are declared in each adapter's `BindFlags` callback in the `registry.AdapterEntry`, then bound to viper keys listed in `ViperKeys [][2]string`. When adding a new flag that is shared between `listen` and `snapshot`, either bind it in both commands' `PreRunE` hooks (with the same key, which is safe since only one runs per invocation), or read it directly from `cmd.Flags()` for flags truly unique to one command.
 
 ### 16.5 Build System and Slim Binary
 
@@ -3824,10 +4390,12 @@ pgcdc ships as two binaries: **full** (all 17 adapters, plugins, view engine) an
 
 **Stub file pattern.** Each excludable adapter has two files:
 
-- `cmd/adapter_kafka.go` — guarded with `//go:build !no_kafka`, contains the real `makeKafkaAdapter()` function
-- `cmd/adapter_kafka_stub.go` — guarded with `//go:build no_kafka`, returns an error: `"kafka adapter not available (built with -tags no_kafka)"`
+- `cmd/register_kafka.go` — guarded with `//go:build !no_kafka`, calls `registry.RegisterAdapter(...)` with the real factory
+- `cmd/register_kafka_stub.go` — guarded with `//go:build no_kafka`, calls `registry.RegisterAdapter(...)` with a factory that returns `fmt.Errorf("kafka adapter not available (built with -tags no_kafka)")`
 
-This means requesting `--adapter kafka` on a slim binary produces a clear runtime error, not a compile-time one. The user sees exactly which build tag excluded the feature.
+This means requesting `--adapter kafka` on a slim binary produces a clear runtime error at startup, not a compile-time one. The registry is always populated — the stub's factory just always fails. The user sees exactly which build tag excluded the feature.
+
+Detectors follow the same pattern: `cmd/register_detector_mysql.go` and `cmd/register_detector_mysql_stub.go`.
 
 **Version embedding.** GoReleaser injects the version via ldflags: `-X github.com/florinutz/pgcdc/cmd.Version={{.Version}}`. The slim binary appends `-slim` to the version string, so `pgcdc version` shows whether you're running the full or slim build.
 
@@ -3902,6 +4470,8 @@ This chapter covers common operational scenarios: what to check, what to do, and
 
 **Check metrics**: `curl localhost:8080/metrics | grep pgcdc_` shows all pipeline metrics. Key ones to check: `pgcdc_events_ingested_total` (detector producing?), `pgcdc_events_delivered_total{adapter}` (adapters receiving?), `pgcdc_bus_events_dropped_total` (bus dropping in fast mode?).
 
+**Use the inspector**: When `--inspect-buffer` is set, `curl localhost:8080/inspect?point=post-detector&limit=5` shows the last 5 events captured after the detector. This lets you verify events are being produced, check their shape before transforms run, and compare pre-transform vs post-transform payloads. The SSE endpoint `curl localhost:8080/inspect/stream` provides a live feed for real-time debugging — leave it running in a terminal while iterating on transform expressions to see immediate results. See section 13.4 for the full inspector architecture.
+
 ### 17.6 Upgrading pgcdc
 
 **Migrations are safe**: The migration system (`internal/migrate`) is idempotent — running a newer binary against an existing database applies only new migrations. Already-applied migrations are skipped. Each migration runs in its own transaction.
@@ -3911,6 +4481,113 @@ This chapter covers common operational scenarios: what to check, what to do, and
 **Rolling back**: If the new version has issues, stop it and start the old binary. Schema migrations are forward-only (no down migrations), but they use `CREATE TABLE IF NOT EXISTS` and are additive — a newer schema is backward-compatible with older binaries. The persistent slot and checkpoint are unaffected by the rollback.
 
 **Version check**: Run `pgcdc version` to confirm the running version. The slim binary shows `<version>-slim`.
+
+---
+
+## Chapter 18: Multi-Pipeline Server
+
+### 18.1 Multi-Pipeline Server
+
+**File: `cmd/serve.go`, `server/manager.go`, `server/api.go`**
+
+The `pgcdc listen` command runs one pipeline: one detector, one bus, N adapters. For many deployments, that's sufficient. But when you need multiple independent CDC streams — orders to Kafka, users to search, inventory to webhooks — you'd otherwise need to run multiple pgcdc processes, each with its own config, metrics port, and lifecycle management.
+
+`pgcdc serve` runs N pipelines in a single process. Each pipeline is fully independent: its own detector, bus, adapters, transforms, routes, and context. A shared HTTP server exposes unified metrics, health checks, and a REST API for runtime control.
+
+The config file defines each pipeline declaratively:
+
+```yaml
+# pipelines.yaml
+addr: ":8080"
+pipelines:
+  - name: orders-to-kafka
+    detector:
+      type: wal
+      config:
+        database_url: postgres://localhost/mydb
+    adapters:
+      - name: kafka
+        type: kafka
+        config:
+          kafka_brokers: ["localhost:9092"]
+    transforms:
+      - type: drop_columns
+        config:
+          columns: ["internal_notes"]
+    routes:
+      kafka: ["pgcdc:orders", "pgcdc:payments"]
+
+  - name: users-to-search
+    detector:
+      type: wal
+      config:
+        database_url: postgres://localhost/mydb
+    adapters:
+      - name: search
+        type: search
+        config:
+          search_engine: typesense
+          search_url: http://localhost:8108
+    routes:
+      search: ["pgcdc:users"]
+```
+
+**The Manager.** The `server.Manager` is the orchestrator. It maintains a map of `ManagedPipeline` structs, each wrapping a `*pgcdc.Pipeline` with lifecycle state:
+
+```go
+type ManagedPipeline struct {
+    config    PipelineConfig
+    pipeline  *pgcdc.Pipeline
+    status    PipelineStatus  // stopped | starting | running | paused | error
+    startedAt *time.Time
+    lastErr   string
+    cancel    context.CancelFunc
+    done      chan struct{}
+}
+```
+
+The state machine is simple: `stopped` -> `starting` -> `running` -> (`paused` | `error` | `stopped`). Starting a pipeline builds it from the config (via the `PipelineBuilder` function), creates a cancellable context, and runs `pipeline.Run(ctx)` in a background goroutine. The `done` channel signals when the goroutine exits, which the `Stop` method waits on for clean shutdown.
+
+**Pipeline construction.** The `registryPipelineBuilder` function in `cmd/serve.go` bridges the YAML config to the component registry. The pattern for each component type is the same: take the `map[string]any` config from the YAML spec, JSON round-trip it into the typed config struct, then call the registry factory:
+
+```go
+func mapToStruct(m map[string]any, target any) error {
+    data, err := json.Marshal(m)
+    if err != nil {
+        return fmt.Errorf("marshal config map: %w", err)
+    }
+    return json.Unmarshal(data, target)
+}
+```
+
+This JSON round-trip is intentionally simple. YAML parsing produces `map[string]any` with string keys and untyped values. JSON marshaling normalizes the types (YAML integers become JSON numbers), and JSON unmarshaling into the typed struct applies Go's standard type coercion. It handles nested structs, slices, and duration strings without any custom mapping code.
+
+Detectors are created via `registry.CreateDetector(type, ctx)`, which returns a `DetectorResult` containing the detector, an optional checkpoint store, and a cleanup function. Adapters are created via `registry.CreateAdapter(type, ctx)`, which returns the adapter and optional middleware config. Transforms are created via `registry.SpecToTransform(spec)`. All three use the same registry that powers `pgcdc listen` — the serve command doesn't have its own component wiring.
+
+**The REST API.** The `server.APIHandler` mounts eight endpoints on a chi router:
+
+```go
+func APIHandler(mgr *Manager) http.Handler {
+    r := chi.NewRouter()
+    r.Get("/api/v1/pipelines", listPipelines(mgr))
+    r.Post("/api/v1/pipelines", createPipeline(mgr))
+    r.Get("/api/v1/pipelines/{id}", getPipeline(mgr))
+    r.Delete("/api/v1/pipelines/{id}", deletePipeline(mgr))
+    r.Post("/api/v1/pipelines/{id}/start", startPipeline(mgr))
+    r.Post("/api/v1/pipelines/{id}/stop", stopPipeline(mgr))
+    r.Post("/api/v1/pipelines/{id}/pause", pausePipeline(mgr))
+    r.Post("/api/v1/pipelines/{id}/resume", resumePipeline(mgr))
+    return r
+}
+```
+
+Each handler is a thin wrapper around the corresponding Manager method. Error responses use HTTP status codes that match the semantic: 404 for unknown pipeline, 409 (Conflict) for invalid state transitions (e.g., starting an already-running pipeline, deleting a running pipeline). The `createPipeline` handler accepts a `PipelineConfig` JSON body and adds it to the manager without starting it — you POST to create, then POST to `/:id/start` to run it. This two-step pattern lets you inspect the config before committing to running it.
+
+**Pause and Resume.** Pausing a pipeline cancels its context (which triggers graceful shutdown of the detector, bus, and adapters) but keeps the `ManagedPipeline` entry in the map with `status: "paused"`. Resuming builds a fresh pipeline from the same config and starts it. With a persistent slot, the resumed pipeline picks up from the last checkpoint — zero event loss across pause/resume cycles. Without a persistent slot, events during the pause window are lost (same as a restart).
+
+**Health integration.** Each pipeline registers with the shared health checker as `pipeline:<name>`. When a pipeline is running, its health status is `up`; when stopped, paused, or errored, it's `down`. The `/healthz` endpoint reports the aggregate — if any pipeline is down, the health check returns 503. This integrates with load balancers and orchestrators (Kubernetes readiness probes) that need to know whether the process is healthy.
+
+**Shutdown.** On SIGINT/SIGTERM, the serve command calls `mgr.StopAll()`, which iterates all running/paused pipelines and calls `Stop` on each. Each stop cancels the pipeline's context and waits for the `done` channel, ensuring all adapters drain before the process exits. The HTTP server gets a 5-second graceful shutdown window for in-flight API requests.
 
 ---
 
@@ -3930,9 +4607,9 @@ A few design principles that shaped the codebase:
 
 **No hidden state.** All configuration flows through the Config struct. All runtime state is on the Pipeline struct. Metrics are package-level variables (the Prometheus convention), but everything else is explicit. When you read the Run method, you see every goroutine that will be started and every wire that will be connected.
 
-**Zero overhead when disabled.** The noop TracerProvider, the nil-checked TOAST cache, the nil-checked backpressure controller, the nil-checked DLQ — when a feature is not configured, it doesn't exist at runtime. This means the base case (detector + bus + stdout) is fast and simple, and features are layered on top. The slim binary build (with Go build tags like `no_kafka`, `no_grpc`, `no_plugins`) takes this further — entire adapter packages are excluded from compilation.
+**Zero overhead when disabled.** The noop TracerProvider, the nil-checked TOAST cache, the nil-checked backpressure controller, the nil-checked DLQ, the nil-checked inspector, the nil-checked schema store — when a feature is not configured, it doesn't exist at runtime. This means the base case (detector + bus + stdout) is fast and simple, and features are layered on top. The slim binary build (with Go build tags like `no_kafka`, `no_grpc`, `no_plugins`) takes this further — entire adapter packages are excluded from compilation.
 
-**Consistent patterns across adapters.** Every adapter follows the same shape: constructor with sensible defaults, Start method with select loop, reconnect-with-backoff for network adapters, metrics instrumentation, and optional interface implementations. Once you understand one adapter, you can read any of the 17 adapters in the system. This consistency was a deliberate choice — it makes the codebase navigable by pattern recognition rather than deep per-component understanding.
+**Consistent patterns across adapters.** Adapters converge on three shapes. Deliverer adapters (webhook, embedding) implement only `Deliver(ctx, ev) error` — no event loop, no retry/CB/RL/DLQ logic — the middleware provides all of that. Batcher adapters implement `Flush(batch)` and `BatchConfig()` — the batch runner handles the event loop. Legacy broker adapters (SSE, WebSocket, gRPC, kafkaserver, view) use the Start/select-loop pattern. Within each shape, the pattern is consistent: constructor with sensible defaults, metrics instrumentation, optional interface implementations. Once you understand one adapter of each shape, you can read any of the 17 adapters in the system.
 
 **Fail at boundaries, recover at the loop.** Network errors are expected at the boundary (HTTP request, Kafka produce, Redis command). Each adapter handles these at the appropriate level: per-event retry (webhook, embedding), per-connection reconnect (Kafka, NATS, Redis, pg_table), or per-write failure handling (file, exec). The common pattern is an inner `run` method that fails on connection errors, wrapped in an outer `Start` method that reconnects with backoff. This separates "what to do with an event" from "what to do when the connection dies."
 
@@ -3940,7 +4617,7 @@ A few design principles that shaped the codebase:
 
 The file you'll want to read next depends on what you're building:
 
-- **Adding a new adapter**: Start with `adapter/stdout/stdout.go` (77 lines, the full pattern), then look at `adapter/webhook/webhook.go` for resilience features (retry, circuit breaker, DLQ), then `adapter/s3/s3.go` for buffered flush patterns.
+- **Adding a new adapter**: Start with `adapter/stdout/stdout.go` for the legacy Start-loop pattern. For the modern path, read `adapter/webhook/webhook.go` — it's a pure Deliverer adapter (only `Deliver`, no event loop) with the resilience features (signing, tracing, retry) handled entirely by the `adapter/middleware` chain. Then read `cmd/register_core.go` to see how `MiddlewareConfig` is wired in via the registry. For buffered flush patterns, read `adapter/s3/s3.go`.
 
 - **Adding a new detector**: Start with `detector/listennotify/listennotify.go` for the pattern (connect, loop, reconnect), then study `detector/walreplication/walreplication.go` for protocol-level CDC.
 

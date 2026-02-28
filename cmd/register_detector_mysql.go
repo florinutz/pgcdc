@@ -11,6 +11,55 @@ func init() {
 	registry.RegisterDetector(registry.DetectorEntry{
 		Name:        "mysql",
 		Description: "MySQL binlog replication",
+		Spec: []registry.ParamSpec{
+			{
+				Name:        "mysql-addr",
+				Type:        "string",
+				Required:    true,
+				Description: "MySQL address (host:port)",
+			},
+			{
+				Name:        "mysql-user",
+				Type:        "string",
+				Description: "MySQL user",
+			},
+			{
+				Name:        "mysql-password",
+				Type:        "string",
+				Description: "MySQL password",
+			},
+			{
+				Name:        "mysql-server-id",
+				Type:        "int",
+				Required:    true,
+				Description: "MySQL server ID for replication (must be > 0)",
+				Validations: []string{"min:1"},
+			},
+			{
+				Name:        "mysql-tables",
+				Type:        "[]string",
+				Description: "MySQL tables to replicate (schema.table format, repeatable)",
+			},
+			{
+				Name:        "mysql-gtid",
+				Type:        "bool",
+				Default:     false,
+				Description: "Use GTID-based replication instead of file+position",
+			},
+			{
+				Name:        "mysql-flavor",
+				Type:        "string",
+				Default:     "mysql",
+				Description: "MySQL flavor: mysql or mariadb",
+				Validations: []string{"oneof:mysql,mariadb"},
+			},
+			{
+				Name:        "mysql-binlog-prefix",
+				Type:        "string",
+				Default:     "mysql-bin",
+				Description: "Binlog filename prefix for position decoding",
+			},
+		},
 		Create: func(ctx registry.DetectorContext) (registry.DetectorResult, error) {
 			cfg := ctx.Cfg
 			if cfg.MySQL.ServerID == 0 {

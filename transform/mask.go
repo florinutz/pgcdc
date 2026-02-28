@@ -23,29 +23,45 @@ type MaskField struct {
 	Mode  MaskMode
 }
 
-// Mask returns a transform that masks the specified payload fields.
+// Mask returns a transform that masks the specified columns in the event's
+// row data. For structured records, operates directly on Change.Before/After.
 // Missing fields are silently ignored. Values are converted to string via
 // fmt.Sprintf before masking.
 func Mask(fields ...MaskField) TransformFunc {
+	maskValue := func(val any, mode MaskMode) any {
+		s := fmt.Sprintf("%v", val)
+		switch mode {
+		case MaskHash:
+			h := sha256.Sum256([]byte(s))
+			return fmt.Sprintf("%x", h)
+		case MaskRedact:
+			return "***REDACTED***"
+		case MaskPartial:
+			return partialMask(s)
+		default:
+			return "***REDACTED***"
+		}
+	}
+
 	return func(ev event.Event) (event.Event, error) {
+		if ev.HasRecord() {
+			return withRecordData(ev, func(sd *event.StructuredData) {
+				for _, f := range fields {
+					val, ok := sd.Get(f.Field)
+					if !ok {
+						continue
+					}
+					sd.Set(f.Field, maskValue(val, f.Mode))
+				}
+			})
+		}
 		return withPayload(ev, func(m map[string]any) {
 			for _, f := range fields {
 				val, ok := m[f.Field]
 				if !ok {
 					continue
 				}
-				s := fmt.Sprintf("%v", val)
-				switch f.Mode {
-				case MaskHash:
-					h := sha256.Sum256([]byte(s))
-					m[f.Field] = fmt.Sprintf("%x", h)
-				case MaskRedact:
-					m[f.Field] = "***REDACTED***"
-				case MaskPartial:
-					m[f.Field] = partialMask(s)
-				default:
-					m[f.Field] = "***REDACTED***"
-				}
+				m[f.Field] = maskValue(val, f.Mode)
 			}
 		})
 	}

@@ -271,6 +271,41 @@ type payload struct {
 }
 
 func (a *Adapter) extractPayload(ev event.Event) (doc map[string]interface{}, id string, isDel bool, partial bool) {
+	// Structured record path: zero JSON parsing.
+	if rec := ev.Record(); rec != nil && rec.Operation != 0 &&
+		(rec.Change.After != nil || rec.Change.Before != nil) {
+		isDel = rec.Operation == event.OperationDelete
+
+		var row map[string]any
+		if isDel {
+			if rec.Change.Before != nil {
+				row = rec.Change.Before.ToMap()
+			}
+		} else {
+			if rec.Change.After != nil {
+				row = rec.Change.After.ToMap()
+			}
+		}
+
+		if row == nil {
+			return nil, "", isDel, false
+		}
+		if v, ok := row[a.idColumn]; ok && v != nil {
+			id = fmt.Sprintf("%v", v)
+		}
+
+		// Check unchanged TOAST columns from metadata.
+		if toastCSV, ok := rec.Metadata[event.MetaUnchangedToastCols]; ok && toastCSV != "" {
+			for _, col := range strings.Split(toastCSV, ",") {
+				delete(row, col)
+			}
+			partial = true
+		}
+
+		return row, id, isDel, partial
+	}
+
+	// Legacy path: parse payload JSON.
 	var p payload
 	if err := json.Unmarshal(ev.Payload, &p); err != nil {
 		return nil, "", false, false

@@ -51,6 +51,7 @@ type AdapterEntry struct {
 	Create      func(ctx AdapterContext) (AdapterResult, error)
 	BindFlags   func(f *pflag.FlagSet)
 	ViperKeys   [][2]string // flag-name → viper-key pairs for PreRunE binding
+	Spec        []ParamSpec // typed parameter specifications for describe/validation
 }
 
 // DetectorContext carries shared resources for detector factories.
@@ -75,6 +76,7 @@ type DetectorEntry struct {
 	Description string
 	Create      func(ctx DetectorContext) (DetectorResult, error)
 	BindFlags   func(f *pflag.FlagSet)
+	Spec        []ParamSpec // typed parameter specifications for describe/validation
 }
 
 // TransformEntry describes a registered transform type.

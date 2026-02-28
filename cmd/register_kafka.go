@@ -47,6 +47,40 @@ func init() {
 			// Schema Registry and NATS encoding are shared infrastructure registered
 			// in listen.go init() alongside core flags, so they are not listed here.
 		},
+		Spec: []registry.ParamSpec{
+			{
+				Name:        "kafka-brokers",
+				Type:        "[]string",
+				Default:     "localhost:9092",
+				Required:    true,
+				Description: "Kafka broker addresses",
+				Validations: []string{"min:1"},
+			},
+			{
+				Name:        "kafka-topic",
+				Type:        "string",
+				Description: "Fixed Kafka topic (empty = per-channel mapping, pgcdc:orders -> pgcdc.orders)",
+			},
+			{
+				Name:        "kafka-sasl-mechanism",
+				Type:        "string",
+				Description: "SASL authentication mechanism",
+				Validations: []string{"oneof:plain,scram-sha-256,scram-sha-512"},
+			},
+			{
+				Name:        "kafka-tls",
+				Type:        "bool",
+				Default:     false,
+				Description: "Enable TLS for Kafka connection",
+			},
+			{
+				Name:        "kafka-encoding",
+				Type:        "string",
+				Default:     "json",
+				Description: "Message encoding format",
+				Validations: []string{"oneof:json,avro,protobuf"},
+			},
+		},
 	})
 
 	// Kafka adapter flags.

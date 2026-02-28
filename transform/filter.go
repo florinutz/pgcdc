@@ -7,16 +7,27 @@ import (
 )
 
 // FilterExpression returns a transform that drops events where the predicate
-// returns false for the payload map. Non-object payloads pass through.
-// Benefits from Chain's payload cache when available.
+// returns false for the row data map. For structured records, the predicate
+// receives the primary StructuredData (After for most ops, Before for DELETE)
+// as a map. Non-object payloads pass through. Benefits from Chain's payload
+// cache when available.
 func FilterExpression(predicate func(map[string]any) bool) TransformFunc {
 	return func(ev event.Event) (event.Event, error) {
+		if ev.HasRecord() {
+			sd := readRecordData(ev)
+			if sd == nil {
+				return ev, nil
+			}
+			if !predicate(sd.ToMap()) {
+				return ev, ErrDropEvent
+			}
+			return ev, nil
+		}
 		if len(ev.Payload) == 0 {
 			return ev, nil
 		}
 		m, ok := readPayload(ev)
 		if !ok {
-			// Not a JSON object — pass through.
 			return ev, nil
 		}
 		if !predicate(m) {

@@ -52,6 +52,45 @@ func init() {
 			{"kafkaserver-checkpoint-db", "kafkaserver.checkpoint_db"},
 			{"kafkaserver-key-column", "kafkaserver.key_column"},
 		},
+		Spec: []registry.ParamSpec{
+			{
+				Name:        "kafkaserver-addr",
+				Type:        "string",
+				Default:     ":9092",
+				Description: "Kafka protocol server listen address",
+			},
+			{
+				Name:        "kafkaserver-partitions",
+				Type:        "int",
+				Default:     8,
+				Description: "Number of partitions per topic",
+				Validations: []string{"min:1"},
+			},
+			{
+				Name:        "kafkaserver-buffer-size",
+				Type:        "int",
+				Default:     10000,
+				Description: "Ring buffer size per partition",
+				Validations: []string{"min:1"},
+			},
+			{
+				Name:        "kafkaserver-session-timeout",
+				Type:        "duration",
+				Default:     30 * time.Second,
+				Description: "Consumer group session timeout",
+			},
+			{
+				Name:        "kafkaserver-key-column",
+				Type:        "string",
+				Default:     "id",
+				Description: "JSON field used as partition key",
+			},
+			{
+				Name:        "kafkaserver-checkpoint-db",
+				Type:        "string",
+				Description: "PostgreSQL URL for offset storage (default: same as --db)",
+			},
+		},
 	})
 
 	// Kafka server adapter flags.

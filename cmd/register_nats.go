@@ -37,6 +37,45 @@ func init() {
 			// schema-registry-* flags are registered as core/shared flags in listen.go init()
 			// to handle the case where kafka is built out (no_kafka) but nats is not.
 		},
+		Spec: []registry.ParamSpec{
+			{
+				Name:        "nats-url",
+				Type:        "string",
+				Default:     "nats://localhost:4222",
+				Required:    true,
+				Description: "NATS server URL",
+			},
+			{
+				Name:        "nats-subject",
+				Type:        "string",
+				Default:     "pgcdc",
+				Description: "NATS subject prefix",
+			},
+			{
+				Name:        "nats-stream",
+				Type:        "string",
+				Default:     "pgcdc",
+				Description: "NATS JetStream stream name",
+			},
+			{
+				Name:        "nats-cred-file",
+				Type:        "string",
+				Description: "NATS credentials file",
+			},
+			{
+				Name:        "nats-max-age",
+				Type:        "duration",
+				Default:     "24h",
+				Description: "NATS stream max message age",
+			},
+			{
+				Name:        "nats-encoding",
+				Type:        "string",
+				Default:     "json",
+				Description: "NATS message encoding",
+				Validations: []string{"oneof:json,avro,protobuf"},
+			},
+		},
 	})
 
 	// NATS adapter flags.

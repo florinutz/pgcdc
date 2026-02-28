@@ -98,7 +98,14 @@ func (b *broker) ingest(ev event.Event) {
 	topicName := channelToTopic(ev.Channel)
 	t := b.getOrCreateTopic(topicName)
 
-	key := extractKey(ev.Payload, b.keyColumn, ev.ID)
+	// Try structured record first for zero-parse key extraction.
+	var key string
+	if rec := ev.Record(); rec != nil && rec.Operation != 0 &&
+		(rec.Change.After != nil || rec.Change.Before != nil || rec.Key != nil) {
+		key = extractKeyFromRecord(rec, b.keyColumn, ev.ID)
+	} else {
+		key = extractKey(ev.Payload, b.keyColumn, ev.ID)
+	}
 	partIdx := partitionForKey(key, len(t.partitions))
 
 	rec := record{

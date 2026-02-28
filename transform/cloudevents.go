@@ -40,6 +40,9 @@ func CloudEvents(opts ...CloudEventsOption) TransformFunc {
 	}
 
 	return func(ev event.Event) (event.Event, error) {
+		// Ensure payload is materialized from Record if present.
+		ev.EnsurePayload()
+
 		// Determine timestamp.
 		ts := ev.CreatedAt
 		if ev.Transaction != nil && !ev.Transaction.CommitTime.IsZero() {

@@ -23,8 +23,10 @@ import (
 	"github.com/florinutz/pgcdc/dlq"
 	"github.com/florinutz/pgcdc/event"
 	"github.com/florinutz/pgcdc/health"
+	"github.com/florinutz/pgcdc/inspect"
 	"github.com/florinutz/pgcdc/metrics"
 	"github.com/florinutz/pgcdc/pgcdcerr"
+	"github.com/florinutz/pgcdc/schema"
 	"github.com/florinutz/pgcdc/snapshot"
 	"github.com/florinutz/pgcdc/transform"
 	"golang.org/x/sync/errgroup"
@@ -108,6 +110,19 @@ type Pipeline struct {
 
 	// Per-adapter middleware configuration.
 	middlewareConfigs map[string]middleware.Config
+
+	// Inspector for event sampling at tap points.
+	inspector *inspect.Inspector
+
+	// Schema store for versioned schema tracking.
+	schemaStore schema.Store
+
+	// Nack window configuration for adaptive DLQ.
+	nackWindowSize      int
+	nackWindowThreshold int
+
+	// Per-pipeline name for metric labeling.
+	pipelineName string
 }
 
 // Option configures a Pipeline.
@@ -248,6 +263,46 @@ func WithMiddlewareConfig(adapterName string, cfg middleware.Config) Option {
 		}
 		p.middlewareConfigs[adapterName] = cfg
 	}
+}
+
+// WithInspector sets the event inspector for pipeline tap-point sampling.
+// The inspector records events at post-detector, post-transform, and
+// pre-adapter stages for debugging and introspection.
+func WithInspector(insp *inspect.Inspector) Option {
+	return func(p *Pipeline) {
+		p.inspector = insp
+	}
+}
+
+// WithSchemaStore sets the schema store for versioned schema tracking.
+// When set, the WAL detector will register schema changes as they arrive.
+func WithSchemaStore(s schema.Store) Option {
+	return func(p *Pipeline) {
+		p.schemaStore = s
+	}
+}
+
+// WithNackWindow configures the nack window for adaptive DLQ monitoring.
+// When the number of nacks in the sliding window exceeds the threshold,
+// the adapter is paused.
+func WithNackWindow(size, threshold int) Option {
+	return func(p *Pipeline) {
+		p.nackWindowSize = size
+		p.nackWindowThreshold = threshold
+	}
+}
+
+// WithPipelineName sets the pipeline name used for per-pipeline metric labels.
+func WithPipelineName(name string) Option {
+	return func(p *Pipeline) {
+		p.pipelineName = name
+	}
+}
+
+// SchemaStoreAware is implemented by detectors that support schema versioning.
+// When a schema store is set on the pipeline, it is passed to the detector.
+type SchemaStoreAware interface {
+	SetSchemaStore(s schema.Store)
 }
 
 // NewPipeline creates a Pipeline that will use the given detector and options.
@@ -447,6 +502,13 @@ func (p *Pipeline) Run(ctx context.Context) error {
 		t.SetTracer(tracer)
 	}
 
+	// Wire schema store into detector if supported.
+	if p.schemaStore != nil {
+		if sa, ok := p.detector.(SchemaStoreAware); ok {
+			sa.SetSchemaStore(p.schemaStore)
+		}
+	}
+
 	g, gCtx := errgroup.WithContext(ctx)
 
 	// Start backpressure controller if configured.
@@ -521,6 +583,11 @@ func (p *Pipeline) DLQ() dlq.DLQ {
 	return p.dlq
 }
 
+// Inspector returns the pipeline's event inspector, or nil if not configured.
+func (p *Pipeline) Inspector() *inspect.Inspector {
+	return p.inspector
+}
+
 // channelFilter returns a bus.FilterFunc that passes only events whose channel
 // is in the allowed set. Returns nil if the set is empty.
 func channelFilter(channels []string) bus.FilterFunc {
@@ -575,10 +642,21 @@ func (p *Pipeline) buildTransformChain(name string) transform.TransformFunc {
 // and writes surviving events to outCh. The atomic pointer allows Reload() to
 // swap transforms and routes with zero event loss.
 func (p *Pipeline) wrapSubscription(name string, inCh <-chan event.Event, cfgPtr *atomic.Pointer[wrapperConfig], autoAck bool) <-chan event.Event {
+	// Create per-adapter nack window if configured.
+	var nackWin *dlq.NackWindow
+	if p.nackWindowSize > 0 {
+		nackWin = dlq.NewNackWindow(p.nackWindowSize, p.nackWindowThreshold)
+	}
+
 	out := make(chan event.Event, cap(inCh))
 	go func() {
 		defer close(out)
 		for ev := range inCh {
+			// Inspector: record post-detector event.
+			if p.inspector != nil {
+				p.inspector.Record(inspect.TapPostDetector, ev)
+			}
+
 			// Load the current config atomically.
 			wcfg := cfgPtr.Load()
 
@@ -602,6 +680,15 @@ func (p *Pipeline) wrapSubscription(name string, inCh <-chan event.Event, cfgPtr
 				continue
 			}
 
+			// Nack window: skip events when adapter is paused due to excessive nacks.
+			if nackWin != nil && nackWin.Exceeded() {
+				if p.ackTracker != nil && origLSN > 0 {
+					p.ackTracker.Ack(name, origLSN)
+				}
+				metrics.NackWindowExceeded.WithLabelValues(name).Inc()
+				continue
+			}
+
 			// Transform chain: auto-ack dropped/errored events.
 			if wcfg.transformFn != nil {
 				result, err := wcfg.transformFn(ev)
@@ -616,12 +703,29 @@ func (p *Pipeline) wrapSubscription(name string, inCh <-chan event.Event, cfgPtr
 							slog.String("error", err.Error()),
 						)
 					}
+					if nackWin != nil {
+						nackWin.RecordNack()
+					}
 					if p.ackTracker != nil && origLSN > 0 {
 						p.ackTracker.Ack(name, origLSN)
 					}
 					continue
 				}
 				ev = result
+			}
+
+			// Inspector: record post-transform event.
+			if p.inspector != nil {
+				p.inspector.Record(inspect.TapPostTransform, ev)
+			}
+
+			// Inspector: record pre-adapter event.
+			if p.inspector != nil {
+				p.inspector.Record(inspect.TapPreAdapter, ev)
+			}
+
+			if nackWin != nil {
+				nackWin.RecordAck()
 			}
 
 			out <- ev

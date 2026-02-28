@@ -587,6 +587,31 @@ var (
 		Help: "Total number of panics recovered by safe goroutine wrapper.",
 	}, []string{"component"})
 
+	// Chain adapter metrics.
+
+	ChainEventsProcessed = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "pgcdc_chain_events_processed_total",
+		Help: "Total number of events successfully processed through adapter chain links.",
+	}, []string{"chain"})
+
+	ChainLinkErrors = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "pgcdc_chain_link_errors_total",
+		Help: "Total number of events skipped due to chain link errors.",
+	}, []string{"chain"})
+
+	// Adapter pause metrics (nack window).
+
+	AdapterPaused = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "pgcdc",
+		Name:      "adapter_paused",
+		Help:      "Whether an adapter is paused due to nack threshold (1=paused, 0=running).",
+	}, []string{"adapter"})
+
+	NackWindowExceeded = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "pgcdc_nack_window_exceeded_total",
+		Help: "Total number of events skipped due to nack window threshold exceeded.",
+	}, []string{"adapter"})
+
 	// Circuit breaker metrics.
 
 	CircuitBreakerState = promauto.NewGaugeVec(prometheus.GaugeOpts{

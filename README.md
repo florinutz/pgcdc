@@ -15,13 +15,13 @@ go install github.com/florinutz/pgcdc/cmd/pgcdc@latest
  CAPTURE                    TRANSFORM                   DELIVER
 ┌──────────────────┐    ┌──────────────────────┐    ┌──────────────────────────┐
 │ PostgreSQL       │    │ Drop / rename / mask │    │ Webhook, SSE, WebSocket  │
-│  • LISTEN/NOTIFY │───▶│ Filter operations     │───▶│ gRPC, stdout, file, exec │
+│  • LISTEN/NOTIFY │───▶│ Filter / CEL filter   │───▶│ gRPC, stdout, file, exec │
 │  • WAL logical   │    │ Debezium envelope     │    │ Kafka, NATS JetStream    │
 │  • Outbox table  │    │ CloudEvents envelope  │    │ S3, Redis, Typesense     │
 │ MySQL binlog     │    │ Streaming SQL views   │    │ pgvector embeddings      │
 │ MongoDB streams  │    │ Wasm plugins          │    │ Kafka wire protocol svr  │
 └──────────────────┘    └──────────────────────┘    └──────────────────────────┘
- 5 detectors               6 built-in transforms       17 adapters
+ 5 detectors               7 built-in transforms       17 adapters
 ```
 
 pgcdc is the only single-binary CDC tool combining multi-source capture, a built-in Kafka wire protocol server, streaming SQL analytics, and real-time pgvector embedding sync — with zero external dependencies.
@@ -224,7 +224,12 @@ pgcdc listen --all-tables --filter-operations INSERT,UPDATE --db postgres://...
 pgcdc listen --all-tables --debezium-envelope --db postgres://...
 ```
 
-Built-in: `drop_columns`, `rename_fields`, `mask` (hash/redact), `filter`, `debezium`, `cloudevents`. Full config via YAML (global or per-adapter). Custom transforms via Wasm plugins.
+Built-in: `drop_columns`, `rename_fields`, `mask` (hash/redact), `filter`, `cel_filter`, `debezium`, `cloudevents`. Full config via YAML (global or per-adapter). Custom transforms via Wasm plugins.
+
+CEL filter example:
+```bash
+pgcdc listen --all-tables --filter-cel 'operation == "INSERT" && table == "orders"' --db postgres://...
+```
 
 ## Streaming SQL Views
 
@@ -272,6 +277,10 @@ Channels become topics, events hash across N partitions, consumer groups with pa
 - **Incremental snapshots**: Signal-table triggered, crash-resumable chunk-based snapshots alongside live WAL
 - **SIGHUP reload**: `kill -HUP <pid>` atomically swaps transforms + routes with zero event loss
 - **Adapter validation**: Pre-flight checks (DNS, connectivity) at startup, skip with `--skip-validation`
+- **Multi-pipeline server**: `pgcdc serve --config pipelines.yaml` manages N pipelines with REST API (start/stop/pause/resume)
+- **Event inspector**: `--inspect-buffer 100` samples events at tap points, view at `/inspect` or stream via `/inspect/stream`
+- **Multi-detector**: Compose detectors with sequential, parallel, or failover modes (`--detector-mode failover`)
+- **Connector introspection**: `pgcdc describe kafka` shows all parameters, types, and defaults
 
 ## Observability
 
