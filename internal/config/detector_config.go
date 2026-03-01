@@ -3,26 +3,30 @@ package config
 import "time"
 
 type DetectorConfig struct {
-	Type              string        `mapstructure:"type"`
-	BackoffBase       time.Duration `mapstructure:"backoff_base"`
-	BackoffCap        time.Duration `mapstructure:"backoff_cap"`
-	Publication       string        `mapstructure:"publication"`
-	TxMetadata        bool          `mapstructure:"tx_metadata"`
-	TxMarkers         bool          `mapstructure:"tx_markers"`
-	PersistentSlot    bool          `mapstructure:"persistent_slot"`
-	SlotName          string        `mapstructure:"slot_name"`
-	CheckpointDB      string        `mapstructure:"checkpoint_db"`
-	IncludeSchema     bool          `mapstructure:"include_schema"`
-	SchemaEvents      bool          `mapstructure:"schema_events"`
-	HeartbeatInterval time.Duration `mapstructure:"heartbeat_interval"`
-	HeartbeatTable    string        `mapstructure:"heartbeat_table"`
-	SlotLagWarn       int64         `mapstructure:"slot_lag_warn"`
-	// Feature flags (used for cross-cutting validation).
-	ToastCache            bool `mapstructure:"toast_cache"`
-	ToastCacheMaxEntries  int  `mapstructure:"toast_cache_max_entries"`
+	// Core detector selection and reconnection.
+	Type        string        `mapstructure:"type"`
+	BackoffBase time.Duration `mapstructure:"backoff_base"`
+	BackoffCap  time.Duration `mapstructure:"backoff_cap"`
+
+	// WAL replication settings.
+	Publication          string        `mapstructure:"publication"`
+	TxMetadata           bool          `mapstructure:"tx_metadata"`
+	TxMarkers            bool          `mapstructure:"tx_markers"`
+	PersistentSlot       bool          `mapstructure:"persistent_slot"`
+	SlotName             string        `mapstructure:"slot_name"`
+	CheckpointDB         string        `mapstructure:"checkpoint_db"`
+	IncludeSchema        bool          `mapstructure:"include_schema"`
+	SchemaEvents         bool          `mapstructure:"schema_events"`
+	HeartbeatInterval    time.Duration `mapstructure:"heartbeat_interval"`
+	HeartbeatTable       string        `mapstructure:"heartbeat_table"`
+	SlotLagWarn          int64         `mapstructure:"slot_lag_warn"`
+	ToastCache           bool          `mapstructure:"toast_cache"`
+	ToastCacheMaxEntries int           `mapstructure:"toast_cache_max_entries"`
+
+	// Pipeline-level flags bound to detector viper keys for CLI convenience.
+	// Backpressure and incremental snapshot have their own top-level config sections
+	// (Config.Backpressure.Enabled, Config.IncrementalSnapshot.Enabled).
 	CooperativeCheckpoint bool `mapstructure:"cooperative_checkpoint"`
-	BackpressureEnabled   bool `mapstructure:"backpressure_enabled"`
-	IncrementalSnapshot   bool `mapstructure:"incremental_snapshot"`
 	SnapshotFirst         bool `mapstructure:"snapshot_first"`
 	AllTables             bool `mapstructure:"all_tables"`
 }

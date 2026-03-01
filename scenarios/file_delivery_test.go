@@ -23,36 +23,37 @@ func TestScenario_FileDelivery(t *testing.T) {
 		fa := fileadapter.New(outPath, 0, 0, testLogger())
 		startPipeline(t, connStr, []string{"file_test_happy"}, fa)
 
-		// Allow detector to connect.
-		time.Sleep(500 * time.Millisecond)
+		// Wait for detector to connect by sending probes until the file has content.
+		waitFor(t, 10*time.Second, func() bool {
+			sendNotify(t, connStr, "file_test_happy", `{"__probe":true}`)
+			time.Sleep(100 * time.Millisecond)
+			data, err := os.ReadFile(outPath)
+			return err == nil && len(data) > 0
+		})
 
 		sendNotify(t, connStr, "file_test_happy", `{"item":"widget"}`)
 
-		// Wait for file to be written.
+		// Wait for the real event to be written.
 		var lines []string
-		deadline := time.Now().Add(5 * time.Second)
-		for time.Now().Before(deadline) {
+		waitFor(t, 5*time.Second, func() bool {
 			data, err := os.ReadFile(outPath)
-			if err == nil && len(data) > 0 {
-				// Parse JSON lines.
-				for _, line := range splitLines(data) {
-					if len(line) > 0 {
-						lines = append(lines, string(line))
-					}
-				}
-				if len(lines) > 0 {
-					break
+			if err != nil || len(data) == 0 {
+				return false
+			}
+			lines = nil
+			for _, line := range splitLines(data) {
+				if len(line) > 0 {
+					lines = append(lines, string(line))
 				}
 			}
-			time.Sleep(100 * time.Millisecond)
-		}
+			// At least 2 lines: probe + real event.
+			return len(lines) >= 2
+		})
 
-		if len(lines) == 0 {
-			t.Fatal("no events written to file")
-		}
-
+		// The last line should be our real event.
+		lastLine := lines[len(lines)-1]
 		var ev event.Event
-		if err := json.Unmarshal([]byte(lines[0]), &ev); err != nil {
+		if err := json.Unmarshal([]byte(lastLine), &ev); err != nil {
 			t.Fatalf("unmarshal event: %v", err)
 		}
 		if ev.Channel != "file_test_happy" {
@@ -68,7 +69,13 @@ func TestScenario_FileDelivery(t *testing.T) {
 		fa := fileadapter.New(outPath, 100, 3, testLogger())
 		startPipeline(t, connStr, []string{"file_test_rotate"}, fa)
 
-		time.Sleep(500 * time.Millisecond)
+		// Wait for detector to connect.
+		waitFor(t, 10*time.Second, func() bool {
+			sendNotify(t, connStr, "file_test_rotate", `{"__probe":true}`)
+			time.Sleep(100 * time.Millisecond)
+			data, err := os.ReadFile(outPath)
+			return err == nil && len(data) > 0
+		})
 
 		// Send enough events to trigger rotation.
 		for i := range 10 {
@@ -76,13 +83,12 @@ func TestScenario_FileDelivery(t *testing.T) {
 			time.Sleep(50 * time.Millisecond)
 		}
 
-		// Wait for writes + rotation.
-		time.Sleep(2 * time.Second)
-
+		// Wait for rotation to happen.
 		rotated := outPath + ".1"
-		if _, err := os.Stat(rotated); os.IsNotExist(err) {
-			t.Error("expected rotated file .1 to exist")
-		}
+		waitFor(t, 5*time.Second, func() bool {
+			_, err := os.Stat(rotated)
+			return err == nil
+		})
 	})
 }
 

@@ -1,3 +1,9 @@
+// Package schema tracks versioned column definitions detected from WAL
+// replication events. It stores the column names, types, and nullability
+// for each table (subject) and detects schema changes across versions.
+//
+// This is distinct from encoding/registry, which is a Confluent Schema
+// Registry client for Avro/Protobuf wire format negotiation.
 package schema
 
 import (

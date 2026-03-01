@@ -17,7 +17,7 @@ func TestScenario_StdoutDelivery(t *testing.T) {
 	startPipeline(t, connStr, []string{"stdout_test"}, stdout.New(capture, testLogger()))
 
 	// Wait for detector to connect and start listening.
-	time.Sleep(1 * time.Second)
+	waitForDetector(t, connStr, "stdout_test", capture)
 
 	t.Run("happy path", func(t *testing.T) {
 		sendNotify(t, connStr, "stdout_test", `{"op":"INSERT","table":"orders","row":{"id":1}}`)

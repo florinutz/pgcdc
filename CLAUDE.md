@@ -114,7 +114,7 @@ Direct deps (keep minimal): `pgx/v5` (PG driver), `pglogrepl` (WAL logical repli
 
 **Scenario file structure:** `//go:build integration` tag, `TestScenario_<Name>` top-level, `t.Run("happy path", ...)` + `t.Run("<failure>", ...)`, shared helpers from `scenarios/helpers_test.go`.
 
-**Max scenarios:** 41 — consolidate related ones before adding new ones.
+**Max scenarios:** 42 — consolidate related ones before adding new ones. Currently at 37.
 
 ## Code Organization
 

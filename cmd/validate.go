@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/viper"
 
 	"github.com/florinutz/pgcdc/internal/config"
+	"github.com/florinutz/pgcdc/registry"
 )
 
 type validationResult struct {
@@ -80,6 +81,25 @@ func runValidate(cmd *cobra.Command, args []string) error {
 			component: "config",
 			status:    "OK",
 			message:   "structural validation passed",
+		})
+	}
+
+	// ParamSpec-based validation (driven by registry declarations).
+	specErrors := registry.ValidateConfig(cfg)
+	if len(specErrors) > 0 {
+		for _, ve := range specErrors {
+			results = append(results, validationResult{
+				component: fmt.Sprintf("spec/%s", ve.Connector),
+				status:    "FAIL",
+				message:   fmt.Sprintf("%s [%s]: %s", ve.Param, ve.Rule, ve.Message),
+			})
+		}
+		hasFailure = true
+	} else {
+		results = append(results, validationResult{
+			component: "spec",
+			status:    "OK",
+			message:   "all parameter specs passed",
 		})
 	}
 
@@ -259,6 +279,7 @@ func runValidate(cmd *cobra.Command, args []string) error {
 	}
 	validDetectors := map[string]bool{
 		"listen_notify": true, "wal": true, "outbox": true, "mysql": true, "mongodb": true,
+		"sqlite": true, "webhookgw": true,
 	}
 	if !validDetectors[detectorType] {
 		results = append(results, validationResult{
@@ -289,8 +310,8 @@ func runValidate(cmd *cobra.Command, args []string) error {
 			{"snapshot-first", cfg.Detector.SnapshotFirst},
 			{"persistent-slot", cfg.Detector.PersistentSlot},
 			{"cooperative-checkpoint", cfg.Detector.CooperativeCheckpoint},
-			{"incremental-snapshot", cfg.Detector.IncrementalSnapshot},
-			{"backpressure", cfg.Detector.BackpressureEnabled},
+			{"incremental-snapshot", cfg.IncrementalSnapshot.Enabled},
+			{"backpressure", cfg.Backpressure.Enabled},
 		}
 		for _, f := range walFeatures {
 			if f.enabled {
@@ -309,7 +330,7 @@ func runValidate(cmd *cobra.Command, args []string) error {
 			message:   "requires --persistent-slot",
 		})
 	}
-	if cfg.Detector.BackpressureEnabled && !cfg.Detector.PersistentSlot {
+	if cfg.Backpressure.Enabled && !cfg.Detector.PersistentSlot {
 		results = append(results, validationResult{
 			component: "feature/backpressure",
 			status:    "WARN",

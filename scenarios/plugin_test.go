@@ -61,8 +61,8 @@ func TestScenario_WasmPlugin(t *testing.T) {
 		g, gCtx := errgroup.WithContext(ctx)
 		g.Go(func() error { return p.Run(gCtx) })
 
-		// Give the detector time to connect.
-		time.Sleep(500 * time.Millisecond)
+		// Wait for detector to connect.
+		waitForDetector(t, connStr, channel, capture)
 
 		// Send a NOTIFY with a payload that has "secret" at the top level.
 		sendNotify(t, connStr, channel, `{"name":"alice","secret":"s3cret-value"}`)

@@ -9,6 +9,13 @@ func init() {
 	registry.RegisterDetector(registry.DetectorEntry{
 		Name:        "outbox",
 		Description: "Transactional outbox table polling",
+		ViperKeys: [][2]string{
+			{"db", "database_url"},
+			{"outbox-table", "outbox.table"},
+			{"outbox-poll-interval", "outbox.poll_interval"},
+			{"outbox-batch-size", "outbox.batch_size"},
+			{"outbox-keep-processed", "outbox.keep_processed"},
+		},
 		Spec: []registry.ParamSpec{
 			{
 				Name:        "db",

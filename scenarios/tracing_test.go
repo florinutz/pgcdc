@@ -54,7 +54,7 @@ func TestScenario_Tracing(t *testing.T) {
 		})
 
 		// Wait for detector to connect.
-		time.Sleep(1 * time.Second)
+		waitForDetectorWebhook(t, connStr, "tracing_happy", receiver)
 
 		sendNotify(t, connStr, "tracing_happy", `{"op":"INSERT","table":"orders","row":{"id":1}}`)
 

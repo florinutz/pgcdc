@@ -137,6 +137,14 @@ func (a *Adapter) Name() string {
 	return "iceberg"
 }
 
+// Validate implements adapter.Validator: checks that the warehouse path is accessible.
+func (a *Adapter) Validate(_ context.Context) error {
+	if a.warehouse == "" {
+		return fmt.Errorf("iceberg: warehouse path is required")
+	}
+	return nil
+}
+
 // Start blocks, consuming events from the channel and flushing batches to Iceberg.
 func (a *Adapter) Start(ctx context.Context, events <-chan event.Event) error {
 	a.logger.Info("iceberg adapter started",

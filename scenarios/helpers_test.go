@@ -617,3 +617,195 @@ func startWALPipelineWithOpts(t *testing.T, connStr string, publication string, 
 		g.Wait()
 	})
 }
+
+// ─── Synchronization helpers ─────────────────────────────────────────────────
+
+// waitFor polls check at short intervals until it returns true or timeout expires.
+func waitFor(t *testing.T, timeout time.Duration, check func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if check() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("waitFor: timed out")
+}
+
+// waitForDetector waits until the LISTEN/NOTIFY detector is connected and
+// delivering events by sending a probe notification and waiting for it to
+// arrive on the lineCapture.
+func waitForDetector(t *testing.T, connStr string, channel string, lc *lineCapture) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		sendNotify(t, connStr, channel, `{"__probe":true}`)
+		select {
+		case <-lc.lines:
+			return
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+	t.Fatal("waitForDetector: detector did not become ready within 10s")
+}
+
+// waitForDetectorWebhook waits until the LISTEN/NOTIFY detector is connected
+// and delivering events by sending a probe notification and waiting for it to
+// arrive on the webhookReceiver.
+func waitForDetectorWebhook(t *testing.T, connStr string, channel string, wr *webhookReceiver) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		sendNotify(t, connStr, channel, `{"__probe":true}`)
+		select {
+		case <-wr.requests:
+			return
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+	t.Fatal("waitForDetectorWebhook: detector did not become ready within 10s")
+}
+
+// waitForSSEDetector waits until the detector is connected by opening an SSE
+// connection, sending probe notifications, and waiting for one to arrive.
+func waitForSSEDetector(t *testing.T, connStr string, channel string, sseURL string) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	events := connectSSE(ctx, t, sseURL)
+	time.Sleep(50 * time.Millisecond)
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		sendNotify(t, connStr, channel, `{"__probe":true}`)
+		select {
+		case <-events:
+			return
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+	t.Fatal("waitForSSEDetector: detector did not become ready within 10s")
+}
+
+// ─── TOAST-specific helpers ─────────────────────────────────────────────────
+
+// createToastTable creates a table with a TEXT column that will use TOAST
+// storage for large values. Uses REPLICA IDENTITY DEFAULT (not FULL) so
+// unchanged TOAST columns arrive as 'u' in the WAL.
+func createToastTable(t *testing.T, connStr, table string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	conn, err := pgx.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("createToastTable connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	safeTable := pgx.Identifier{table}.Sanitize()
+	sql := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
+		id SERIAL PRIMARY KEY,
+		status TEXT NOT NULL DEFAULT '',
+		description TEXT NOT NULL DEFAULT ''
+	)`, safeTable)
+	if _, err := conn.Exec(ctx, sql); err != nil {
+		t.Fatalf("createToastTable: %v", err)
+	}
+
+	storage := fmt.Sprintf(`ALTER TABLE %s ALTER COLUMN description SET STORAGE EXTERNAL`, safeTable)
+	if _, err := conn.Exec(ctx, storage); err != nil {
+		t.Fatalf("createToastTable set storage external: %v", err)
+	}
+
+	identity := fmt.Sprintf(`ALTER TABLE %s REPLICA IDENTITY DEFAULT`, safeTable)
+	if _, err := conn.Exec(ctx, identity); err != nil {
+		t.Fatalf("createToastTable set replica identity: %v", err)
+	}
+}
+
+func insertToastRow(t *testing.T, connStr, table, status, description string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := pgx.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("insertToastRow connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	_, err = conn.Exec(ctx,
+		fmt.Sprintf("INSERT INTO %s (status, description) VALUES ($1, $2)", pgx.Identifier{table}.Sanitize()),
+		status, description,
+	)
+	if err != nil {
+		t.Fatalf("insertToastRow: %v", err)
+	}
+}
+
+func updateToastStatus(t *testing.T, connStr, table string, id int, status string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := pgx.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("updateToastStatus connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	_, err = conn.Exec(ctx,
+		fmt.Sprintf("UPDATE %s SET status = $1 WHERE id = $2", pgx.Identifier{table}.Sanitize()),
+		status, id,
+	)
+	if err != nil {
+		t.Fatalf("updateToastStatus: %v", err)
+	}
+}
+
+// startWALPipelineWithToastCache starts a WAL pipeline with the TOAST cache enabled.
+func startWALPipelineWithToastCache(t *testing.T, connStr string, publication string, cacheSize int, adapters ...adapter.Adapter) {
+	t.Helper()
+
+	logger := testLogger()
+	ctx, cancel := context.WithCancel(context.Background())
+
+	det := walreplication.New(connStr, publication, 0, 0, false, false, logger)
+	det.SetToastCache(cacheSize)
+	b := bus.New(64, logger)
+
+	g, gCtx := errgroup.WithContext(ctx)
+	g.Go(func() error { return b.Start(gCtx) })
+	g.Go(func() error { return det.Start(gCtx, b.Ingest()) })
+
+	for _, a := range adapters {
+		sub, err := b.Subscribe(a.Name())
+		if err != nil {
+			cancel()
+			t.Fatalf("subscribe %s: %v", a.Name(), err)
+		}
+		a := a
+		g.Go(func() error { return a.Start(gCtx, sub) })
+	}
+
+	t.Cleanup(func() {
+		cancel()
+		g.Wait()
+	})
+}
+
+// waitForWALDetector waits until the WAL replication detector has set up its
+// replication slot and is streaming by inserting a probe row and waiting for
+// the event to arrive on the lineCapture.
+func waitForWALDetector(t *testing.T, connStr string, table string, lc *lineCapture) {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		insertRow(t, connStr, table, map[string]any{"__probe": true})
+		select {
+		case <-lc.lines:
+			return
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+	t.Fatal("waitForWALDetector: WAL detector did not become ready within 15s")
+}

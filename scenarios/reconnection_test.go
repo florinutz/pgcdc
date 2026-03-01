@@ -17,7 +17,7 @@ func TestScenario_Reconnection(t *testing.T) {
 	startPipeline(t, connStr, []string{"reconnect_test"}, stdout.New(capture, testLogger()))
 
 	// Wait for detector to connect.
-	time.Sleep(1 * time.Second)
+	waitForDetector(t, connStr, "reconnect_test", capture)
 
 	t.Run("happy path", func(t *testing.T) {
 		sendNotify(t, connStr, "reconnect_test", `{"op":"INSERT","table":"orders","row":{"id":1}}`)
@@ -75,7 +75,7 @@ func TestScenario_WALReconnection(t *testing.T) {
 	startWALPipeline(t, connStr, "pgcdc_wal_reconnect", stdout.New(capture, testLogger()))
 
 	// Wait for replication slot setup.
-	time.Sleep(3 * time.Second)
+	waitForWALDetector(t, connStr, "wal_reconnect_orders", capture)
 
 	t.Run("happy path", func(t *testing.T) {
 		insertRow(t, connStr, "wal_reconnect_orders", map[string]any{"key": "value"})

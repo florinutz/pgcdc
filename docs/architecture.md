@@ -7,49 +7,113 @@ This document describes the internal architecture of pgcdc using Mermaid diagram
 The core pipeline connects a detector to adapters through a fan-out bus. The `Pipeline` type in `pgcdc.go` orchestrates this:
 
 ```mermaid
-graph TD
-    Signal["Signal (SIGINT/SIGTERM)"] --> Context
-    Context --> Pipeline
+flowchart LR
+    SIG["Signal\nSIGINT/SIGTERM"] --> CTX["Context\ncancel"]
 
-    subgraph Pipeline ["Pipeline (pgcdc.go)"]
-        Detector["Detector\n(listennotify | wal | outbox | mysql | mongodb)"]
-        IngestChan["ingest chan\n(buffered, default 1024)"]
-        Bus["Bus\n(fan-out)"]
-        WrapperN["Wrapper Goroutine\n(route filter + transforms)"]
-        SubChanN["subscriber chan\n(per-adapter)"]
+    subgraph DET ["Detectors"]
+        direction TB
+        LN["listen_notify\nLISTEN/NOTIFY"]
+        WAL["wal_replication\nlogical WAL"]
+        OB["outbox\npoll table"]
+        MY["mysql_binlog\nbinlog replication"]
+        MG["mongodb\nchange streams"]
+        WH["webhook_gateway\nHTTP ingest"]
+        SQ["sqlite\npoll table"]
     end
 
-    Detector -->|"events"| IngestChan
-    IngestChan --> Bus
+    subgraph PIP ["Pipeline · pgcdc.go"]
+        IC["ingest chan"]
+        BUS["Bus\nfast-drop · reliable-block"]
+        WRP["Wrapper Goroutine × N\nroute filter → transforms"]
+        SC["subscriber chan × N"]
+    end
 
-    Bus -->|"clone to each subscriber"| WrapperN
-    WrapperN -->|"filtered + transformed"| SubChanN
+    subgraph ADP ["Adapters"]
+        direction TB
+        subgraph OUT ["Output"]
+            STDOUT["stdout"]
+            FILE["file"]
+            EXEC["exec"]
+            WBH["webhook"]
+        end
+        subgraph STREAM ["HTTP · Streaming"]
+            SSE["sse"]
+            WS["websocket"]
+            GQL["graphql\ngraphql-transport-ws"]
+        end
+        subgraph MSG ["Messaging"]
+            NATS["nats · JetStream"]
+            KFK["kafka"]
+            KFS["kafkaserver\nKafka wire protocol"]
+        end
+        subgraph STORE ["Storage · Analytics"]
+            PGT["pg_table"]
+            S3["s3 · JSONL · Parquet"]
+            ICE["iceberg\nParquet + Avro manifests"]
+            DUCK["duckdb\nin-process analytics"]
+        end
+        subgraph SVC ["External Services"]
+            SRCH["search\nTypesense · Meilisearch"]
+            RDS["redis\ninvalidate · sync"]
+            GRPC["grpc · streaming"]
+            EMB["embedding\npgvector upsert"]
+        end
+        subgraph SPEC ["Special"]
+            ARW["arrow\nFlight gRPC"]
+            VIEW["view\nstreaming SQL"]
+        end
+    end
 
-    SubChanN --> Stdout["stdout"]
-    SubChanN --> Webhook["webhook"]
-    SubChanN --> SSE["sse"]
-    SubChanN --> File["file"]
-    SubChanN --> Exec["exec"]
-    SubChanN --> PGTable["pg_table"]
-    SubChanN --> WS["ws"]
-    SubChanN --> Embedding["embedding"]
-    SubChanN --> NATS["nats"]
-    SubChanN --> Kafka["kafka"]
-    SubChanN --> Search["search"]
-    SubChanN --> Redis["redis"]
-    SubChanN --> gRPC["grpc"]
-    SubChanN --> S3["s3"]
-    SubChanN --> KafkaServer["kafkaserver"]
-    SubChanN --> View["view"]
+    CTX --> PIP
+    DET -->|"events"| IC
+    IC --> BUS
+    BUS -->|"fan-out"| WRP
+    WRP -->|"filtered + transformed"| SC
 
-    View -->|"VIEW_RESULT re-injection"| IngestChan
-    Webhook -->|"failed events"| DLQ["DLQ\n(stderr | pg_table)"]
-    Kafka -->|"terminal errors"| DLQ
-    Embedding -->|"API exhaustion"| DLQ
+    SC --> OUT & STREAM & MSG & STORE & SVC & SPEC
 
-    HealthChecker["Health Checker\n(/healthz)"] -.->|"monitors"| Pipeline
-    Metrics["Prometheus\n(/metrics)"] -.->|"observes"| Pipeline
+    VIEW -->|"VIEW_RESULT\nre-inject"| IC
+
+    WBH & KFK & EMB -.->|"terminal errors"| DLQ["DLQ\nstderr · pg_table · nop"]
+
+    HC["Health Checker\n/healthz"] -. monitors .-> PIP
+    PROM["Prometheus\n/metrics"] -. observes .-> PIP
+    OTEL["OpenTelemetry\ntracing"] -. traces .-> PIP
 ```
+
+## Middleware Chain (Deliverer Adapters)
+
+Adapters implementing `Deliver(ctx, event) error` get a middleware chain wired automatically by `adapter/middleware`. The chain wraps the adapter before it's handed to the wrapper goroutine:
+
+```mermaid
+flowchart LR
+    SC["subscriber chan"] --> WRP
+
+    subgraph WRP ["Wrapper Goroutine"]
+        RF["Route Filter"]
+        BP["Backpressure\nShed"]
+        TC["Transform Chain"]
+    end
+
+    TC --> MW
+
+    subgraph MW ["Middleware Chain · adapter/middleware"]
+        direction LR
+        OTEL2["OTel\nTracing"]
+        M["Metrics\nevents_delivered"]
+        CB["Circuit Breaker\nclosed · open · half-open"]
+        RL["Rate Limiter\ntoken bucket"]
+        RT["Retry\nexponential backoff"]
+        DLQ2["DLQ\non terminal error"]
+        ACK["Ack\n(cooperative checkpoint)"]
+    end
+
+    ACK --> ADAPTER["Adapter.Deliver()"]
+
+    OTEL2 --> M --> CB --> RL --> RT --> DLQ2 --> ACK
+```
+
+Adapters that implement `adapter.Adapter` directly (not `Deliverer`) skip the middleware chain and consume their subscriber channel in `Start()`.
 
 ## Wrapper Goroutine
 
@@ -371,3 +435,53 @@ sequenceDiagram
 
 Immutable on reload: CLI flags, plugin transforms, adapters, detectors, bus mode.
 Mutable on reload: `transforms:` and `routes:` YAML sections.
+
+## Ecosystem & Edge Components
+
+The five newer components that extend pgcdc beyond the core pipeline:
+
+```mermaid
+flowchart TB
+    subgraph WGW ["detector/webhookgw · Webhook Gateway"]
+        direction LR
+        HTTP_IN["POST /ingest/:source"] --> SigV["Signature Validation\nStripe · GitHub · generic HMAC"]
+        SigV --> WGW_OUT["event.Event\nsource=webhook_gateway"]
+    end
+
+    subgraph SQ ["detector/sqlite · SQLite CDC"]
+        direction LR
+        POLL["Poll loop\n100ms default"] --> SQTBL["SELECT FROM pgcdc_changes\nWHERE processed=0"]
+        SQTBL --> SQ_OUT["event.Event\nsource=sqlite"]
+        SQ_OUT --> SQACT{"keepProcessed?"}
+        SQACT -->|"false"| DEL["DELETE row"]
+        SQACT -->|"true"| MARK["UPDATE processed=1"]
+    end
+
+    subgraph GQL ["adapter/graphql · GraphQL Subscriptions"]
+        direction LR
+        WS_UP["WebSocket Upgrade\ngraphql-transport-ws"] --> PROTO["Protocol Handler\nconnection_init → ack\nsubscribe → next"]
+        PROTO --> FAN["Subscriber Fan-out\n(channel filter)"]
+        FAN --> WS_DOWN["WS next message\nJSON event payload"]
+    end
+
+    subgraph ARW ["adapter/arrow · Arrow Flight"]
+        direction LR
+        GRPC_SRV["gRPC Flight Server\n:addr"] --> LF["ListFlights\nper-channel descriptor"]
+        LF --> DG["DoGet\nring buffer → RecordBatches"]
+    end
+
+    subgraph DUCK ["adapter/duckdb · DuckDB Analytics"]
+        direction LR
+        BUF["Event Buffer\n(flush interval)"] --> FLUSH["INSERT INTO cdc_events\n(in-process DuckDB)"]
+        FLUSH --> QRY["POST /query\nSQL → []map[string]any"]
+        FLUSH --> TBL["GET /query/tables\nchannel counts"]
+    end
+```
+
+| Component | Interface | HTTP/gRPC Mount | Build tag |
+|-----------|-----------|-----------------|-----------|
+| `detector/webhookgw` | `detector.Detector` + `HTTPMountable` | `MountHTTP(chi.Router)` | — |
+| `detector/sqlite` | `detector.Detector` | — | `no_sqlite` |
+| `adapter/graphql` | `adapter.Adapter` + `HTTPMountable` | `MountHTTP(chi.Router)` | — |
+| `adapter/arrow` | `adapter.Adapter` | gRPC listener (self-managed) | `no_arrow` |
+| `adapter/duckdb` | `adapter.Adapter` + `HTTPMountable` + `Drainer` | `MountHTTP(chi.Router)` | `no_duckdb` (CGO) |

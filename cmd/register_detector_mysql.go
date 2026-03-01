@@ -11,6 +11,16 @@ func init() {
 	registry.RegisterDetector(registry.DetectorEntry{
 		Name:        "mysql",
 		Description: "MySQL binlog replication",
+		ViperKeys: [][2]string{
+			{"mysql-addr", "mysql.addr"},
+			{"mysql-user", "mysql.user"},
+			{"mysql-password", "mysql.password"},
+			{"mysql-server-id", "mysql.server_id"},
+			{"mysql-tables", "mysql.tables"},
+			{"mysql-gtid", "mysql.use_gtid"},
+			{"mysql-flavor", "mysql.flavor"},
+			{"mysql-binlog-prefix", "mysql.binlog_prefix"},
+		},
 		Spec: []registry.ParamSpec{
 			{
 				Name:        "mysql-addr",

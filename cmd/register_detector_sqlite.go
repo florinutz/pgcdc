@@ -14,6 +14,12 @@ func init() {
 	registry.RegisterDetector(registry.DetectorEntry{
 		Name:        "sqlite",
 		Description: "SQLite change tracking (polling-based, local-first CDC)",
+		ViperKeys: [][2]string{
+			{"sqlite-db", "sqlite.db_path"},
+			{"sqlite-poll-interval", "sqlite.poll_interval"},
+			{"sqlite-batch-size", "sqlite.batch_size"},
+			{"sqlite-keep-processed", "sqlite.keep_processed"},
+		},
 		Spec: []registry.ParamSpec{
 			{
 				Name:        "sqlite-db",

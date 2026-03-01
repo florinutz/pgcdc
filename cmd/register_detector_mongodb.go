@@ -11,6 +11,15 @@ func init() {
 	registry.RegisterDetector(registry.DetectorEntry{
 		Name:        "mongodb",
 		Description: "MongoDB Change Streams",
+		ViperKeys: [][2]string{
+			{"mongodb-uri", "mongodb.uri"},
+			{"mongodb-scope", "mongodb.scope"},
+			{"mongodb-database", "mongodb.database"},
+			{"mongodb-collections", "mongodb.collections"},
+			{"mongodb-full-document", "mongodb.full_document"},
+			{"mongodb-metadata-db", "mongodb.metadata_db"},
+			{"mongodb-metadata-coll", "mongodb.metadata_coll"},
+		},
 		Spec: []registry.ParamSpec{
 			{
 				Name:        "mongodb-uri",

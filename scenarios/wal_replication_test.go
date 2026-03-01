@@ -3,12 +3,16 @@
 package scenarios
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/florinutz/pgcdc/adapter/stdout"
 	"github.com/florinutz/pgcdc/event"
+	"github.com/jackc/pgx/v5"
 )
 
 func TestScenario_WALReplication(t *testing.T) {
@@ -20,7 +24,7 @@ func TestScenario_WALReplication(t *testing.T) {
 
 		capture := newLineCapture()
 		startWALPipeline(t, connStr, "pgcdc_wal_orders", stdout.New(capture, testLogger()))
-		time.Sleep(3 * time.Second)
+		waitForWALDetector(t, connStr, "wal_orders", capture)
 
 		insertRow(t, connStr, "wal_orders", map[string]any{"key": "value"})
 
@@ -64,7 +68,7 @@ func TestScenario_WALReplication(t *testing.T) {
 
 		capture := newLineCapture()
 		startWALPipeline(t, connStr, "pgcdc_wal_notx_orders", stdout.New(capture, testLogger()))
-		time.Sleep(3 * time.Second)
+		waitForWALDetector(t, connStr, "wal_notx_orders", capture)
 
 		insertRow(t, connStr, "wal_notx_orders", map[string]any{"check": "no_tx"})
 		line := capture.waitLine(t, 10*time.Second)
@@ -90,7 +94,7 @@ func TestScenario_WALReplication(t *testing.T) {
 
 		capture := newLineCapture()
 		startWALPipeline(t, connStr, "pgcdc_wal_ud_orders", stdout.New(capture, testLogger()))
-		time.Sleep(3 * time.Second)
+		waitForWALDetector(t, connStr, "wal_ud_orders", capture)
 
 		insertRow(t, connStr, "wal_ud_orders", map[string]any{"status": "pending"})
 		insertLine := capture.waitLine(t, 10*time.Second)
@@ -153,7 +157,7 @@ func TestScenario_WALReplication(t *testing.T) {
 
 		capture := newLineCapture()
 		startWALPipelineWithTxMetadata(t, connStr, "pgcdc_wal_tx_orders", stdout.New(capture, testLogger()))
-		time.Sleep(3 * time.Second)
+		waitForWALDetector(t, connStr, "wal_tx_orders", capture)
 
 		insertRowsInTx(t, connStr, "wal_tx_orders", []map[string]any{
 			{"item": "alpha"},
@@ -208,7 +212,7 @@ func TestScenario_WALReplication(t *testing.T) {
 
 		capture := newLineCapture()
 		startWALPipeline(t, connStr, "pgcdc_wal_trunc_orders", stdout.New(capture, testLogger()))
-		time.Sleep(3 * time.Second)
+		waitForWALDetector(t, connStr, "wal_trunc_orders", capture)
 
 		// Insert a row first so TRUNCATE has something to clear.
 		insertRow(t, connStr, "wal_trunc_orders", map[string]any{"item": "doomed"})
@@ -249,13 +253,153 @@ func TestScenario_WALReplication(t *testing.T) {
 		}
 	})
 
+	t.Run("all tables publication captures multi-table events", func(t *testing.T) {
+		createTable(t, connStr, "at_orders")
+		createTable(t, connStr, "at_customers")
+
+		pubName := "pgcdc_at_pub"
+		createPublicationAllTables(t, connStr, pubName)
+
+		capture := newLineCapture()
+		startWALPipeline(t, connStr, pubName, stdout.New(capture, testLogger()))
+		time.Sleep(3 * time.Second)
+
+		insertRow(t, connStr, "at_orders", map[string]any{"item": "widget"})
+		insertRow(t, connStr, "at_customers", map[string]any{"name": "alice"})
+
+		seen := make(map[string]bool)
+		for !seen["pgcdc:at_orders"] || !seen["pgcdc:at_customers"] {
+			line := capture.waitLine(t, 10*time.Second)
+			var ev event.Event
+			if err := json.Unmarshal([]byte(line), &ev); err != nil {
+				continue
+			}
+			if ev.Operation == "INSERT" {
+				seen[ev.Channel] = true
+			}
+		}
+	})
+
+	t.Run("TOAST cache resolves unchanged columns", func(t *testing.T) {
+		table := "toast_cache_happy"
+		pub := "pgcdc_toast_happy"
+		createToastTable(t, connStr, table)
+		createPublication(t, connStr, pub, table)
+
+		capture := newLineCapture()
+		startWALPipelineWithToastCache(t, connStr, pub, 100000, stdout.New(capture, testLogger()))
+		time.Sleep(3 * time.Second)
+
+		largeText := strings.Repeat("x", 3000)
+		insertToastRow(t, connStr, table, "active", largeText)
+		insertLine := capture.waitLine(t, 10*time.Second)
+
+		var insertEv event.Event
+		if err := json.Unmarshal([]byte(insertLine), &insertEv); err != nil {
+			t.Fatalf("invalid JSON for insert: %v", err)
+		}
+		var insertPayload map[string]any
+		json.Unmarshal(insertEv.Payload, &insertPayload)
+		row := insertPayload["row"].(map[string]any)
+		idStr := row["id"].(string)
+		var rowID int
+		for _, c := range idStr {
+			rowID = rowID*10 + int(c-'0')
+		}
+
+		updateToastStatus(t, connStr, table, rowID, "shipped")
+		updateLine := capture.waitLine(t, 10*time.Second)
+
+		var updateEv event.Event
+		if err := json.Unmarshal([]byte(updateLine), &updateEv); err != nil {
+			t.Fatalf("invalid JSON for update: %v", err)
+		}
+		var updatePayload map[string]any
+		json.Unmarshal(updateEv.Payload, &updatePayload)
+
+		updateRow := updatePayload["row"].(map[string]any)
+		desc, ok := updateRow["description"]
+		if !ok {
+			t.Fatal("expected description column in update row")
+		}
+		descStr, ok := desc.(string)
+		if !ok || descStr != largeText {
+			t.Errorf("expected description resolved from cache (%d chars), got %v", len(largeText), desc)
+		}
+
+		if _, hasToast := updatePayload["_unchanged_toast_columns"]; hasToast {
+			t.Error("expected no _unchanged_toast_columns (cache should have resolved it)")
+		}
+	})
+
+	t.Run("TOAST cache miss emits metadata", func(t *testing.T) {
+		table := "toast_cache_miss"
+		pub := "pgcdc_toast_miss"
+		createToastTable(t, connStr, table)
+		createPublication(t, connStr, pub, table)
+
+		largeText := strings.Repeat("y", 3000)
+		insertToastRow(t, connStr, table, "pending", largeText)
+
+		ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel2()
+		conn, err := pgx.Connect(ctx2, connStr)
+		if err != nil {
+			t.Fatalf("connect: %v", err)
+		}
+		var rowID int
+		err = conn.QueryRow(ctx2, fmt.Sprintf("SELECT id FROM %s LIMIT 1", pgx.Identifier{table}.Sanitize())).Scan(&rowID)
+		conn.Close(ctx2)
+		if err != nil {
+			t.Fatalf("get row id: %v", err)
+		}
+
+		capture := newLineCapture()
+		startWALPipelineWithToastCache(t, connStr, pub, 100000, stdout.New(capture, testLogger()))
+		time.Sleep(3 * time.Second)
+
+		updateToastStatus(t, connStr, table, rowID, "shipped")
+		updateLine := capture.waitLine(t, 10*time.Second)
+
+		var updateEv event.Event
+		if err := json.Unmarshal([]byte(updateLine), &updateEv); err != nil {
+			t.Fatalf("invalid JSON for update: %v", err)
+		}
+		var updatePayload map[string]any
+		json.Unmarshal(updateEv.Payload, &updatePayload)
+
+		updateRow := updatePayload["row"].(map[string]any)
+		if desc, exists := updateRow["description"]; exists && desc != nil {
+			t.Errorf("expected description=null on cache miss, got %v", desc)
+		}
+
+		toastCols, ok := updatePayload["_unchanged_toast_columns"]
+		if !ok {
+			t.Fatal("expected _unchanged_toast_columns metadata on cache miss")
+		}
+		toastArr, ok := toastCols.([]any)
+		if !ok || len(toastArr) == 0 {
+			t.Fatalf("expected non-empty _unchanged_toast_columns array, got %v", toastCols)
+		}
+		found := false
+		for _, col := range toastArr {
+			if col == "description" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected 'description' in _unchanged_toast_columns, got %v", toastArr)
+		}
+	})
+
 	t.Run("begin and commit markers wrap DML events", func(t *testing.T) {
 		createTable(t, connStr, "wal_marker_orders")
 		createPublication(t, connStr, "pgcdc_wal_marker_orders", "wal_marker_orders")
 
 		capture := newLineCapture()
 		startWALPipelineWithTxMarkers(t, connStr, "pgcdc_wal_marker_orders", stdout.New(capture, testLogger()))
-		time.Sleep(3 * time.Second)
+		waitForWALDetector(t, connStr, "wal_marker_orders", capture)
 
 		insertRowsInTx(t, connStr, "wal_marker_orders", []map[string]any{
 			{"item": "alpha"},

@@ -59,19 +59,10 @@ func (s *Store) connect(ctx context.Context) (*pgx.Conn, error) {
 	return conn, nil
 }
 
-// EnsureSchema adds the replayed_at column if it does not exist.
-func (s *Store) EnsureSchema(ctx context.Context) error {
-	conn, err := s.connect(ctx)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = conn.Close(ctx) }()
-
-	safeTable := pgx.Identifier{s.table}.Sanitize()
-	alter := fmt.Sprintf(`ALTER TABLE %s ADD COLUMN IF NOT EXISTS replayed_at TIMESTAMPTZ`, safeTable)
-	if _, err := conn.Exec(ctx, alter); err != nil {
-		return fmt.Errorf("ensure dlq schema: %w", err)
-	}
+// EnsureSchema is a no-op. The pgcdc_dead_letters table and its replayed_at
+// column are managed by the migration system (internal/migrate/sql/003_dlq_replayed_at.sql).
+// This method is retained for backwards compatibility with CLI callers.
+func (s *Store) EnsureSchema(_ context.Context) error {
 	return nil
 }
 

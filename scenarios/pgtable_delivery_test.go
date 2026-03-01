@@ -22,26 +22,27 @@ func TestScenario_PGTableDelivery(t *testing.T) {
 		pa := pgtable.New(connStr, tableName, 0, 0, testLogger())
 		startPipeline(t, connStr, []string{"pgtable_test_happy"}, pa)
 
-		time.Sleep(500 * time.Millisecond)
+		// Wait for detector by sending probes until a row appears.
+		waitFor(t, 10*time.Second, func() bool {
+			sendNotify(t, connStr, "pgtable_test_happy", `{"__probe":true}`)
+			time.Sleep(100 * time.Millisecond)
+			return countEventsRows(t, connStr, tableName) > 0
+		})
 
 		sendNotify(t, connStr, "pgtable_test_happy", `{"order_id":42}`)
 
-		// Poll for the row.
+		// Poll for the real row (at least 2: probe + real).
 		var count int
-		deadline := time.Now().Add(5 * time.Second)
-		for time.Now().Before(deadline) {
+		waitFor(t, 5*time.Second, func() bool {
 			count = countEventsRows(t, connStr, tableName)
-			if count > 0 {
-				break
-			}
-			time.Sleep(100 * time.Millisecond)
+			return count >= 2
+		})
+
+		if count < 2 {
+			t.Fatal("expected at least 2 rows (probe + real) in events table")
 		}
 
-		if count == 0 {
-			t.Fatal("no rows inserted into events table")
-		}
-
-		// Verify row content.
+		// Verify a row has correct content.
 		row := queryFirstEventRow(t, connStr, tableName)
 		if row.channel != "pgtable_test_happy" {
 			t.Errorf("channel = %q, want pgtable_test_happy", row.channel)
@@ -72,28 +73,30 @@ func TestScenario_PGTableDelivery(t *testing.T) {
 		pa := pgtable.New(connStr, tableName, 0, 0, testLogger())
 		startPipeline(t, connStr, []string{"pgtable_reject", "pgtable_ok"}, pa)
 
-		time.Sleep(500 * time.Millisecond)
+		// Wait for detector by sending a probe on the OK channel.
+		waitFor(t, 10*time.Second, func() bool {
+			sendNotify(t, connStr, "pgtable_ok", `{"__probe":true}`)
+			time.Sleep(100 * time.Millisecond)
+			return countEventsRows(t, connStr, tableName) > 0
+		})
+		probeCount := countEventsRows(t, connStr, tableName)
 
 		// Event on rejected channel: INSERT will fail (CHECK violation), adapter should skip.
 		sendNotify(t, connStr, "pgtable_reject", `{"n":1}`)
-		time.Sleep(500 * time.Millisecond)
 
 		// Event on OK channel: INSERT should succeed.
 		sendNotify(t, connStr, "pgtable_ok", `{"n":2}`)
 
-		// Poll for the row.
-		deadline := time.Now().Add(5 * time.Second)
+		// Poll for the new row.
 		var count int
-		for time.Now().Before(deadline) {
+		waitFor(t, 5*time.Second, func() bool {
 			count = countEventsRows(t, connStr, tableName)
-			if count > 0 {
-				break
-			}
-			time.Sleep(100 * time.Millisecond)
-		}
+			return count > probeCount
+		})
 
-		if count != 1 {
-			t.Fatalf("expected exactly 1 row, got %d", count)
+		// Only the OK event should have been added (rejected one skipped).
+		if count != probeCount+1 {
+			t.Fatalf("expected %d rows (probes + 1 OK), got %d", probeCount+1, count)
 		}
 
 		row := queryFirstEventRow(t, connStr, tableName)
@@ -109,11 +112,12 @@ func TestScenario_PGTableDelivery(t *testing.T) {
 		pa := pgtable.New(connStr, tableName, 100*time.Millisecond, 500*time.Millisecond, testLogger())
 		startPipeline(t, connStr, []string{"pgtable_test_reconn"}, pa)
 
-		time.Sleep(500 * time.Millisecond)
-
-		// Send first event.
-		sendNotify(t, connStr, "pgtable_test_reconn", `{"n":1}`)
-		time.Sleep(500 * time.Millisecond)
+		// Wait for detector by sending probes until a row appears.
+		waitFor(t, 10*time.Second, func() bool {
+			sendNotify(t, connStr, "pgtable_test_reconn", `{"n":1}`)
+			time.Sleep(100 * time.Millisecond)
+			return countEventsRows(t, connStr, tableName) > 0
+		})
 
 		// Terminate all backends (simulates connection drop for both detector and adapter).
 		terminateBackends(t, connStr)

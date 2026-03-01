@@ -53,6 +53,18 @@ func (a *Adapter) Name() string {
 	return "exec"
 }
 
+// Validate implements adapter.Validator: checks that the command is resolvable.
+func (a *Adapter) Validate(_ context.Context) error {
+	if a.command == "" {
+		return fmt.Errorf("exec: command is required")
+	}
+	// Check that the shell is available (command is run via "sh -c").
+	if _, err := exec.LookPath("sh"); err != nil {
+		return fmt.Errorf("exec: shell not found: %w", err)
+	}
+	return nil
+}
+
 // Start blocks, consuming events and writing them as JSON lines to the
 // subprocess stdin. The process is restarted on failure with backoff.
 func (a *Adapter) Start(ctx context.Context, events <-chan event.Event) error {

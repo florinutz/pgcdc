@@ -41,7 +41,7 @@ func TestScenario_Reload(t *testing.T) {
 			_ = g.Wait()
 		})
 
-		time.Sleep(1 * time.Second)
+		waitForDetector(t, connStr, channel, lc)
 
 		// Send event: "secret" should be dropped.
 		sendNotify(t, connStr, channel, `{"name":"alice","secret":"s3cret"}`)
@@ -104,7 +104,7 @@ func TestScenario_Reload(t *testing.T) {
 			_ = g.Wait()
 		})
 
-		time.Sleep(1 * time.Second)
+		waitForDetector(t, connStr, channel, lc)
 
 		// Reload with a transform that drops every event: simulate a bad config.
 		badTransform := func(ev event.Event) (event.Event, error) {

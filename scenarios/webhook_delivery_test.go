@@ -25,7 +25,7 @@ func TestScenario_WebhookDelivery(t *testing.T) {
 		a := webhook.New(receiver.Server.URL, nil, signingKey, 3, 0, 0, 0, testLogger())
 
 		startPipeline(t, connStr, []string{"webhook_happy"}, a)
-		time.Sleep(1 * time.Second)
+		waitForDetectorWebhook(t, connStr, "webhook_happy", receiver)
 
 		sendNotify(t, connStr, "webhook_happy", `{"op":"INSERT","table":"orders","row":{"id":1}}`)
 
@@ -70,7 +70,7 @@ func TestScenario_WebhookDelivery(t *testing.T) {
 		a := webhook.New(receiver.Server.URL, nil, "", 3, 0, 0, 0, testLogger())
 
 		startPipeline(t, connStr, []string{"webhook_retry"}, a)
-		time.Sleep(1 * time.Second)
+		waitForDetectorWebhook(t, connStr, "webhook_retry", receiver)
 
 		sendNotify(t, connStr, "webhook_retry", `{"op":"INSERT","table":"orders","row":{"id":2}}`)
 
@@ -102,7 +102,7 @@ func TestScenario_WebhookDelivery(t *testing.T) {
 		a := webhook.New(receiver.Server.URL, nil, "", 2, 0, 50*time.Millisecond, 100*time.Millisecond, testLogger())
 
 		startPipeline(t, connStr, []string{"webhook_exhaust"}, a)
-		time.Sleep(1 * time.Second)
+		waitForDetectorWebhook(t, connStr, "webhook_exhaust", receiver)
 
 		// Event 1: all retries will fail (2 attempts total for maxRetries=2).
 		sendNotify(t, connStr, "webhook_exhaust", `{"op":"INSERT","table":"orders","row":{"id":10}}`)

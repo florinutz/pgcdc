@@ -76,18 +76,20 @@ func (d *StderrDLQ) Close() error { return nil }
 const defaultTable = "pgcdc_dead_letters"
 
 // PGTableDLQ writes failed events to a PostgreSQL table.
+// The pgcdc_dead_letters table is managed by the migration system
+// (internal/migrate/sql/001_initial.sql and 003_dlq_replayed_at.sql).
+// Callers must run migrations before using this type.
 type PGTableDLQ struct {
 	dbURL     string
 	table     string
 	conn      *pgx.Conn
 	logger    *slog.Logger
 	mu        sync.Mutex
-	created   bool
 	insertSQL string // cached INSERT statement
 }
 
-// NewPGTableDLQ creates a DLQ backed by a PostgreSQL table. The table is
-// auto-created on the first Record call.
+// NewPGTableDLQ creates a DLQ backed by a PostgreSQL table.
+// The pgcdc_dead_letters table must already exist (created by the migration system).
 func NewPGTableDLQ(dbURL, table string, logger *slog.Logger) *PGTableDLQ {
 	if table == "" {
 		table = defaultTable
@@ -116,32 +118,6 @@ func (d *PGTableDLQ) ensureConn(ctx context.Context) error {
 	return nil
 }
 
-func (d *PGTableDLQ) ensureTable(ctx context.Context) error {
-	if d.created {
-		return nil
-	}
-	safeTable := pgx.Identifier{d.table}.Sanitize()
-	ddl := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
-		id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-		event_id TEXT NOT NULL,
-		adapter TEXT NOT NULL,
-		error TEXT NOT NULL,
-		payload JSONB NOT NULL,
-		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-		replayed_at TIMESTAMPTZ
-	)`, safeTable)
-	if _, err := d.conn.Exec(ctx, ddl); err != nil {
-		return fmt.Errorf("create dlq table: %w", err)
-	}
-	// Migrate existing tables that lack the replayed_at column.
-	alter := fmt.Sprintf(`ALTER TABLE %s ADD COLUMN IF NOT EXISTS replayed_at TIMESTAMPTZ`, safeTable)
-	if _, err := d.conn.Exec(ctx, alter); err != nil {
-		return fmt.Errorf("alter dlq table: %w", err)
-	}
-	d.created = true
-	return nil
-}
-
 func (d *PGTableDLQ) Record(ctx context.Context, ev event.Event, adapter string, err error) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -149,10 +125,6 @@ func (d *PGTableDLQ) Record(ctx context.Context, ev event.Event, adapter string,
 	if connErr := d.ensureConn(ctx); connErr != nil {
 		metrics.DLQErrors.Inc()
 		return connErr
-	}
-	if tblErr := d.ensureTable(ctx); tblErr != nil {
-		metrics.DLQErrors.Inc()
-		return tblErr
 	}
 
 	payload, marshalErr := json.Marshal(ev)

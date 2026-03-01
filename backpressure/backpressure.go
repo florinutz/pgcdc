@@ -155,14 +155,10 @@ func (c *Controller) IsShed(adapterName string) bool {
 
 // Run starts the backpressure control loop. It polls lagFn and updates zone,
 // throttle, pause, and shed state. Blocks until ctx is cancelled.
+// If lagFn has not been set yet (via SetLagFunc), poll ticks are skipped
+// until it becomes available — this avoids ordering dependencies between
+// backpressure setup and detector creation.
 func (c *Controller) Run(ctx context.Context) error {
-	c.mu.Lock()
-	fn := c.lagFn
-	c.mu.Unlock()
-	if fn == nil {
-		return nil
-	}
-
 	ticker := time.NewTicker(c.pollInterval)
 	defer ticker.Stop()
 
@@ -181,6 +177,9 @@ func (c *Controller) evaluate() {
 	c.mu.Lock()
 	fn := c.lagFn
 	c.mu.Unlock()
+	if fn == nil {
+		return // lagFn not set yet; skip this tick
+	}
 	lag := fn()
 	if lag < 0 {
 		lag = 0

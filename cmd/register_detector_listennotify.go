@@ -9,6 +9,10 @@ func init() {
 	registry.RegisterDetector(registry.DetectorEntry{
 		Name:        "listen_notify",
 		Description: "PostgreSQL LISTEN/NOTIFY",
+		ViperKeys: [][2]string{
+			{"db", "database_url"},
+			{"channel", "channels"},
+		},
 		Spec: []registry.ParamSpec{
 			{
 				Name:        "db",

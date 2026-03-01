@@ -50,8 +50,8 @@ func TestScenario_Transform(t *testing.T) {
 			_ = g.Wait()
 		})
 
-		// Give pipeline time to connect.
-		time.Sleep(1 * time.Second)
+		// Wait for detector to connect.
+		waitForDetector(t, connStr, channel, lc)
 
 		// Send a flat JSON payload with fields at top level.
 		sendNotify(t, connStr, channel,
@@ -117,7 +117,7 @@ func TestScenario_Transform(t *testing.T) {
 			_ = g.Wait()
 		})
 
-		time.Sleep(1 * time.Second)
+		waitForDetector(t, connStr, channel, lc)
 
 		sendNotify(t, connStr, channel, `{"id":1,"name":"Alice"}`)
 
@@ -184,7 +184,9 @@ func TestScenario_Transform(t *testing.T) {
 			_ = g.Wait()
 		})
 
-		time.Sleep(1 * time.Second)
+		// Wait for detector — send a probe that matches the filter.
+		sendNotify(t, connStr, channel, `{"status":"published","__probe":true}`)
+		lc.waitLine(t, 10*time.Second)
 
 		// Send a "draft" event — should be filtered out.
 		sendNotify(t, connStr, channel, `{"id":1,"status":"draft","title":"Draft Post"}`)

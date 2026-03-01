@@ -27,7 +27,7 @@ func TestScenario_MultiAdapterFanOut(t *testing.T) {
 			stdout.New(capture, testLogger()),
 			webhook.New(receiver.Server.URL, nil, "", 1, 0, 0, 0, testLogger()),
 		)
-		time.Sleep(1 * time.Second)
+		waitForDetector(t, connStr, "fanout_happy", capture)
 
 		sendNotify(t, connStr, "fanout_happy", `{"op":"INSERT","table":"orders","row":{"id":1}}`)
 
@@ -72,7 +72,7 @@ func TestScenario_MultiAdapterFanOut(t *testing.T) {
 			stdout.New(capture, testLogger()),
 			webhook.New(slowServer.URL, nil, "", 1, 0, 0, 0, testLogger()),
 		)
-		time.Sleep(1 * time.Second)
+		waitForDetector(t, connStr, "fanout_slow", capture)
 
 		// Send 3 events rapidly.
 		for i := 0; i < 3; i++ {

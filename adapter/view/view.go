@@ -3,11 +3,16 @@ package view
 import (
 	"context"
 	"log/slog"
+	"strings"
 
 	"github.com/florinutz/pgcdc/event"
 	viewpkg "github.com/florinutz/pgcdc/view"
 	"golang.org/x/sync/errgroup"
 )
+
+// viewChannelPrefix is the channel prefix for re-injected VIEW_RESULT events.
+// Events on this prefix are skipped to prevent infinite re-injection loops.
+const viewChannelPrefix = "pgcdc:_view:"
 
 // Adapter is a view adapter that processes events through streaming SQL views
 // and re-injects VIEW_RESULT events back into the bus.
@@ -55,6 +60,9 @@ func (a *Adapter) Start(ctx context.Context, events <-chan event.Event) error {
 			case ev, ok := <-events:
 				if !ok {
 					return nil
+				}
+				if strings.HasPrefix(ev.Channel, viewChannelPrefix) {
+					continue // skip re-injected VIEW_RESULT events to prevent loops
 				}
 				a.engine.Process(ev)
 			}

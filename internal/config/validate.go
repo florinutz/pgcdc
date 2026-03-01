@@ -12,7 +12,7 @@ var knownAdapters = map[string]bool{
 	"exec": true, "pg_table": true, "ws": true, "embedding": true,
 	"iceberg": true, "nats": true, "search": true, "redis": true,
 	"kafka": true, "kafkaserver": true, "s3": true, "grpc": true,
-	"view": true,
+	"view": true, "graphql": true, "arrow": true, "duckdb": true,
 }
 
 // Validate performs structural validation on the config.

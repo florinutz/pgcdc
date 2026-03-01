@@ -1,3 +1,9 @@
+// Package registry is a Confluent Schema Registry HTTP client for
+// registering and retrieving Avro and Protobuf schemas used in
+// Kafka/NATS wire format encoding.
+//
+// This is distinct from the top-level schema package, which tracks
+// versioned column definitions detected from WAL replication events.
 package registry
 
 import (

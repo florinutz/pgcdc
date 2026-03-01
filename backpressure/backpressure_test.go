@@ -249,10 +249,14 @@ func TestWaitResume_ContextCancelled(t *testing.T) {
 
 func TestRun_NilLagFn(t *testing.T) {
 	c := New(500, 2000, 0, 0, nil, nil)
-	// Run with nil lagFn should return immediately.
-	err := c.Run(context.Background())
-	if err != nil {
-		t.Fatalf("expected nil, got %v", err)
+	// Run with nil lagFn should block until context cancellation,
+	// silently skipping evaluation ticks. This avoids ordering
+	// dependencies between SetLagFunc and Run.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := c.Run(ctx)
+	if err != nil && err != context.Canceled {
+		t.Fatalf("expected nil or context.Canceled, got %v", err)
 	}
 }
 

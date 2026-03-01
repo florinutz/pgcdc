@@ -13,6 +13,13 @@ func init() {
 	registry.RegisterDetector(registry.DetectorEntry{
 		Name:        "wal",
 		Description: "PostgreSQL WAL logical replication",
+		ViperKeys: [][2]string{
+			{"publication", "detector.publication"},
+			{"persistent-slot", "detector.persistent_slot"},
+			{"slot-name", "detector.slot_name"},
+			{"tx-metadata", "detector.tx_metadata"},
+			{"include-schema", "detector.include_schema"},
+		},
 		Spec: []registry.ParamSpec{
 			{
 				Name:        "publication",

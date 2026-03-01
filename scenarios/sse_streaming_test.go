@@ -31,8 +31,8 @@ func TestScenario_SSEStreaming(t *testing.T) {
 
 	baseURL := "http://" + ln.Addr().String()
 
-	// Wait for detector to connect.
-	time.Sleep(1 * time.Second)
+	// Wait for detector to connect — send probes until one arrives via SSE.
+	waitForSSEDetector(t, connStr, "sse_orders", baseURL+"/events")
 
 	t.Run("happy path", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())

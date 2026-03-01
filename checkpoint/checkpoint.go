@@ -16,8 +16,7 @@ type Store interface {
 	// checkpoint exists.
 	Load(ctx context.Context, slotName string) (lsn uint64, err error)
 
-	// Save persists the current LSN for the given slot. The table is
-	// auto-created on first call.
+	// Save persists the current LSN for the given slot.
 	Save(ctx context.Context, slotName string, lsn uint64) error
 
 	// Close releases the underlying connection.
@@ -25,16 +24,18 @@ type Store interface {
 }
 
 // PGStore implements Store using a PostgreSQL table.
+// The pgcdc_checkpoints table is managed by the migration system
+// (internal/migrate/sql/001_initial.sql). Callers must run migrations
+// before using this store.
 type PGStore struct {
 	conn          *pgx.Conn
-	tableCreated  bool
 	logger        *slog.Logger
 	lastSavedLSN  uint64
 	lastSavedTime time.Time
 }
 
 // NewPGStore connects to PostgreSQL and returns a checkpoint store.
-// The pgcdc_checkpoints table is auto-created on the first Save call.
+// The pgcdc_checkpoints table must already exist (created by the migration system).
 func NewPGStore(ctx context.Context, connStr string, logger *slog.Logger) (*PGStore, error) {
 	if logger == nil {
 		logger = slog.Default()
@@ -51,33 +52,9 @@ func NewPGStore(ctx context.Context, connStr string, logger *slog.Logger) (*PGSt
 	}, nil
 }
 
-func (s *PGStore) ensureTable(ctx context.Context) error {
-	if s.tableCreated {
-		return nil
-	}
-
-	_, err := s.conn.Exec(ctx, `
-		CREATE TABLE IF NOT EXISTS pgcdc_checkpoints (
-			slot_name  TEXT PRIMARY KEY,
-			lsn        BIGINT NOT NULL,
-			updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-		)
-	`)
-	if err != nil {
-		return fmt.Errorf("create checkpoint table: %w", err)
-	}
-
-	s.tableCreated = true
-	return nil
-}
-
 // Load returns the last persisted LSN for the given slot. Returns 0 if no
 // checkpoint exists.
 func (s *PGStore) Load(ctx context.Context, slotName string) (uint64, error) {
-	if err := s.ensureTable(ctx); err != nil {
-		return 0, err
-	}
-
 	var lsn int64
 	err := s.conn.QueryRow(ctx,
 		"SELECT lsn FROM pgcdc_checkpoints WHERE slot_name = $1",
@@ -101,10 +78,6 @@ func (s *PGStore) Load(ctx context.Context, slotName string) (uint64, error) {
 func (s *PGStore) Save(ctx context.Context, slotName string, lsn uint64) error {
 	if lsn == s.lastSavedLSN {
 		return nil
-	}
-
-	if err := s.ensureTable(ctx); err != nil {
-		return err
 	}
 
 	_, err := s.conn.Exec(ctx, `

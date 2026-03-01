@@ -58,7 +58,9 @@ func TestScenario_DLQCommands(t *testing.T) {
 		g, gCtx := errgroup.WithContext(pipelineCtx)
 		g.Go(func() error { return pipeline.Run(gCtx) })
 
-		time.Sleep(1 * time.Second)
+		// Wait for detector to connect by probing — the webhook always returns 500,
+		// so the event will reach DLQ.
+		waitForDetectorWebhook(t, connStr, channel, receiver)
 
 		// 2. NOTIFY → webhook fails → event in DLQ table.
 		sendNotify(t, connStr, channel, `{"op":"INSERT","table":"orders","row":{"id":42}}`)
@@ -66,17 +68,13 @@ func TestScenario_DLQCommands(t *testing.T) {
 		// Wait for DLQ record.
 		store := dlq.NewStore(connStr, dlqTable, logger)
 		var records []dlq.StoredRecord
-		deadline := time.Now().Add(10 * time.Second)
-		for time.Now().Before(deadline) {
+		waitFor(t, 10*time.Second, func() bool {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
 			var listErr error
 			records, listErr = store.List(ctx, dlq.ListFilter{})
-			cancel()
-			if listErr == nil && len(records) > 0 {
-				break
-			}
-			time.Sleep(200 * time.Millisecond)
-		}
+			return listErr == nil && len(records) > 0
+		})
 		if len(records) == 0 {
 			pipelineCancel()
 			_ = g.Wait()

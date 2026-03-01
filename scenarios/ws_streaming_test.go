@@ -33,8 +33,18 @@ func TestScenario_WSStreaming(t *testing.T) {
 
 		messages := connectWS(ctx, t, "ws://"+addr+"/ws")
 
-		// Allow connection to establish.
-		time.Sleep(300 * time.Millisecond)
+		// Wait for detector + WS subscription by sending probes until one arrives.
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			sendNotify(t, connStr, "ws_test_happy", `{"__probe":true}`)
+			select {
+			case <-messages:
+				goto wsReady
+			case <-time.After(200 * time.Millisecond):
+			}
+		}
+		t.Fatal("ws detector did not become ready")
+	wsReady:
 
 		sendNotify(t, connStr, "ws_test_happy", `{"item":"gadget"}`)
 
@@ -62,11 +72,21 @@ func TestScenario_WSStreaming(t *testing.T) {
 		// Connect to filtered endpoint.
 		messages := connectWS(ctx, t, "ws://"+addr+"/ws/ws_orders")
 
-		time.Sleep(300 * time.Millisecond)
+		// Wait for detector + WS subscription by sending probes on the matching channel.
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			sendNotify(t, connStr, "ws_orders", `{"__probe":true}`)
+			select {
+			case <-messages:
+				goto wsFilterReady
+			case <-time.After(200 * time.Millisecond):
+			}
+		}
+		t.Fatal("ws detector did not become ready (filter)")
+	wsFilterReady:
 
 		// Send to non-matching channel first.
 		sendNotify(t, connStr, "ws_users", `{"name":"alice"}`)
-		time.Sleep(300 * time.Millisecond)
 
 		// Send to matching channel.
 		sendNotify(t, connStr, "ws_orders", `{"order":99}`)

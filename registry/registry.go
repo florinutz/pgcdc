@@ -76,6 +76,7 @@ type DetectorEntry struct {
 	Description string
 	Create      func(ctx DetectorContext) (DetectorResult, error)
 	BindFlags   func(f *pflag.FlagSet)
+	ViperKeys   [][2]string // flag-name → viper-key pairs for validation
 	Spec        []ParamSpec // typed parameter specifications for describe/validation
 }
 
