@@ -3,11 +3,27 @@ package cmd
 import (
 	"fmt"
 	"strings"
-	"text/tabwriter"
 
+	"github.com/florinutz/pgcdc/internal/output"
 	"github.com/florinutz/pgcdc/registry"
 	"github.com/spf13/cobra"
 )
+
+type describeResult struct {
+	Name        string        `json:"name"`
+	Type        string        `json:"type"`
+	Description string        `json:"description,omitempty"`
+	Params      []paramResult `json:"params,omitempty"`
+}
+
+type paramResult struct {
+	Name        string   `json:"name"`
+	Type        string   `json:"type"`
+	Default     string   `json:"default"`
+	Required    bool     `json:"required"`
+	Validations []string `json:"validations,omitempty"`
+	Description string   `json:"description"`
+}
 
 var describeCmd = &cobra.Command{
 	Use:   "describe <connector>",
@@ -19,6 +35,7 @@ var describeCmd = &cobra.Command{
 
 func init() {
 	rootCmd.AddCommand(describeCmd)
+	output.AddOutputFlag(describeCmd)
 }
 
 func runDescribe(cmd *cobra.Command, args []string) error {
@@ -28,8 +45,33 @@ func runDescribe(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("unknown connector %q: not found in adapters or detectors", name)
 	}
 
-	out := cmd.OutOrStdout()
+	printer := output.FromCommand(cmd)
 
+	result := describeResult{
+		Name:        spec.Name,
+		Type:        spec.Type,
+		Description: spec.Description,
+	}
+	for _, p := range spec.Params {
+		def := registry.FormatDefault(p.Default)
+		if def == "" {
+			def = "-"
+		}
+		result.Params = append(result.Params, paramResult{
+			Name:        p.Name,
+			Type:        p.Type,
+			Default:     def,
+			Required:    p.Required,
+			Validations: p.Validations,
+			Description: p.Description,
+		})
+	}
+
+	if printer.IsJSON() {
+		return printer.JSON(result)
+	}
+
+	out := printer.Writer()
 	_, _ = fmt.Fprintf(out, "%s (%s)\n", spec.Name, spec.Type)
 	if spec.Description != "" {
 		_, _ = fmt.Fprintf(out, "%s\n", spec.Description)
@@ -41,23 +83,18 @@ func runDescribe(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
-	_, _ = fmt.Fprintln(w, "NAME\tTYPE\tDEFAULT\tREQUIRED\tVALIDATIONS\tDESCRIPTION")
-	_, _ = fmt.Fprintln(w, "----\t----\t-------\t--------\t-----------\t-----------")
-	for _, p := range spec.Params {
+	headers := []string{"NAME", "TYPE", "DEFAULT", "REQUIRED", "VALIDATIONS", "DESCRIPTION"}
+	var rows [][]string
+	for _, p := range result.Params {
 		req := "no"
 		if p.Required {
 			req = "yes"
-		}
-		def := registry.FormatDefault(p.Default)
-		if def == "" {
-			def = "-"
 		}
 		validations := "-"
 		if len(p.Validations) > 0 {
 			validations = strings.Join(p.Validations, ", ")
 		}
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", p.Name, p.Type, def, req, validations, p.Description)
+		rows = append(rows, []string{p.Name, p.Type, p.Default, req, validations, p.Description})
 	}
-	return w.Flush()
+	return printer.Table(headers, rows)
 }
