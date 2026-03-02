@@ -574,7 +574,7 @@ func runListen(cmd *cobra.Command, args []string) error {
 	})
 
 	// SIGHUP handler: reload transforms and routes from YAML config.
-	startSIGHUPHandler(g, gCtx, p, immutableCLI, plugTfx, cliRoutes, logger)
+	startSIGHUPHandler(g, gCtx, p, immutableCLI, plugTfx, cliRoutes, cfg, logger)
 
 	// HTTP servers: SSE/WS combined and standalone metrics.
 	allMountFns := adapterMountFns
@@ -931,9 +931,12 @@ func setupTransforms(ctx context.Context, cfg config.Config, cmd *cobra.Command,
 }
 
 // startSIGHUPHandler registers a goroutine in g that listens for SIGHUP and reloads transforms and routes.
-func startSIGHUPHandler(g *errgroup.Group, gCtx context.Context, p *pgcdc.Pipeline, immutableCLI []transform.TransformFunc, plugTfx pluginTransforms, cliRoutes map[string][]string, logger *slog.Logger) {
+func startSIGHUPHandler(g *errgroup.Group, gCtx context.Context, p *pgcdc.Pipeline, immutableCLI []transform.TransformFunc, plugTfx pluginTransforms, cliRoutes map[string][]string, initialCfg config.Config, logger *slog.Logger) {
 	sighupCh := make(chan os.Signal, 1)
 	signal.Notify(sighupCh, syscall.SIGHUP)
+
+	prevSummary := config.BuildReloadSummary(initialCfg)
+
 	g.Go(func() error {
 		defer signal.Stop(sighupCh)
 		for {
@@ -982,6 +985,11 @@ func startSIGHUPHandler(g *errgroup.Group, gCtx context.Context, p *pgcdc.Pipeli
 					metrics.ConfigReloadErrors.Inc()
 					continue
 				}
+
+				newSummary := config.BuildReloadSummary(newCfg)
+				diff := config.DiffReload(prevSummary, newSummary)
+				logger.Info("config reloaded", "diff", diff)
+				prevSummary = newSummary
 			}
 		}
 	})
