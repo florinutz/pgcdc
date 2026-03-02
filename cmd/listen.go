@@ -33,7 +33,9 @@ import (
 	"github.com/florinutz/pgcdc/health"
 	"github.com/florinutz/pgcdc/inspect"
 	"github.com/florinutz/pgcdc/internal/config"
+	"github.com/florinutz/pgcdc/internal/logcolor"
 	"github.com/florinutz/pgcdc/internal/migrate"
+	"github.com/florinutz/pgcdc/internal/output"
 	"github.com/florinutz/pgcdc/internal/server"
 	"github.com/florinutz/pgcdc/metrics"
 	"github.com/florinutz/pgcdc/registry"
@@ -380,6 +382,13 @@ func runListen(cmd *cobra.Command, args []string) error {
 	// Run unified config validation.
 	if err := cfg.Validate(); err != nil {
 		return err
+	}
+
+	// Print startup summary (only for human-readable log formats).
+	logFmt := viper.GetString("log_format")
+	if logFmt != "json" {
+		useColor := logcolor.ShouldColor(os.Stderr.Fd(), logFmt)
+		output.PrintSummary(os.Stderr, &cfg, useColor)
 	}
 
 	logger := slog.Default()
