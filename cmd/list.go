@@ -2,11 +2,22 @@ package cmd
 
 import (
 	"fmt"
-	"text/tabwriter"
 
+	"github.com/florinutz/pgcdc/internal/output"
 	"github.com/florinutz/pgcdc/registry"
 	"github.com/spf13/cobra"
 )
+
+type componentInfo struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+type listResult struct {
+	Adapters   []componentInfo `json:"adapters,omitempty"`
+	Detectors  []componentInfo `json:"detectors,omitempty"`
+	Transforms []componentInfo `json:"transforms,omitempty"`
+}
 
 var listCmd = &cobra.Command{
 	Use:   "list [adapters|detectors|transforms]",
@@ -18,6 +29,7 @@ var listCmd = &cobra.Command{
 
 func init() {
 	rootCmd.AddCommand(listCmd)
+	output.AddOutputFlag(listCmd)
 }
 
 func runList(cmd *cobra.Command, args []string) error {
@@ -26,51 +38,109 @@ func runList(cmd *cobra.Command, args []string) error {
 		kind = args[0]
 	}
 
-	w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
+	printer := output.FromCommand(cmd)
 
 	switch kind {
 	case "adapters", "adapter":
-		_, _ = fmt.Fprintln(w, "NAME\tDESCRIPTION")
-		for _, e := range registry.Adapters() {
-			_, _ = fmt.Fprintf(w, "%s\t%s\n", e.Name, e.Description)
+		entries := registry.Adapters()
+		if printer.IsJSON() {
+			items := make([]componentInfo, len(entries))
+			for i, e := range entries {
+				items[i] = componentInfo{Name: e.Name, Description: e.Description}
+			}
+			return printer.JSON(listResult{Adapters: items})
 		}
+		headers := []string{"NAME", "DESCRIPTION"}
+		rows := make([][]string, len(entries))
+		for i, e := range entries {
+			rows[i] = []string{e.Name, e.Description}
+		}
+		return printer.Table(headers, rows)
 
 	case "detectors", "detector":
-		_, _ = fmt.Fprintln(w, "NAME\tDESCRIPTION")
-		for _, e := range registry.Detectors() {
-			_, _ = fmt.Fprintf(w, "%s\t%s\n", e.Name, e.Description)
+		entries := registry.Detectors()
+		if printer.IsJSON() {
+			items := make([]componentInfo, len(entries))
+			for i, e := range entries {
+				items[i] = componentInfo{Name: e.Name, Description: e.Description}
+			}
+			return printer.JSON(listResult{Detectors: items})
 		}
+		headers := []string{"NAME", "DESCRIPTION"}
+		rows := make([][]string, len(entries))
+		for i, e := range entries {
+			rows[i] = []string{e.Name, e.Description}
+		}
+		return printer.Table(headers, rows)
 
 	case "transforms", "transform":
-		_, _ = fmt.Fprintln(w, "NAME\tDESCRIPTION")
-		for _, e := range registry.Transforms() {
-			_, _ = fmt.Fprintf(w, "%s\t%s\n", e.Name, e.Description)
+		entries := registry.Transforms()
+		if printer.IsJSON() {
+			items := make([]componentInfo, len(entries))
+			for i, e := range entries {
+				items[i] = componentInfo{Name: e.Name, Description: e.Description}
+			}
+			return printer.JSON(listResult{Transforms: items})
 		}
+		headers := []string{"NAME", "DESCRIPTION"}
+		rows := make([][]string, len(entries))
+		for i, e := range entries {
+			rows[i] = []string{e.Name, e.Description}
+		}
+		return printer.Table(headers, rows)
 
 	case "all":
+		adapters := registry.Adapters()
+		detectors := registry.Detectors()
+		transforms := registry.Transforms()
+
+		if printer.IsJSON() {
+			result := listResult{
+				Adapters:   make([]componentInfo, len(adapters)),
+				Detectors:  make([]componentInfo, len(detectors)),
+				Transforms: make([]componentInfo, len(transforms)),
+			}
+			for i, e := range adapters {
+				result.Adapters[i] = componentInfo{Name: e.Name, Description: e.Description}
+			}
+			for i, e := range detectors {
+				result.Detectors[i] = componentInfo{Name: e.Name, Description: e.Description}
+			}
+			for i, e := range transforms {
+				result.Transforms[i] = componentInfo{Name: e.Name, Description: e.Description}
+			}
+			return printer.JSON(result)
+		}
+
+		w := printer.Writer()
 		_, _ = fmt.Fprintln(w, "ADAPTERS")
-		_, _ = fmt.Fprintln(w, "NAME\tDESCRIPTION")
-		for _, e := range registry.Adapters() {
-			_, _ = fmt.Fprintf(w, "%s\t%s\n", e.Name, e.Description)
+		adapterRows := make([][]string, len(adapters))
+		for i, e := range adapters {
+			adapterRows[i] = []string{e.Name, e.Description}
+		}
+		if err := printer.Table([]string{"NAME", "DESCRIPTION"}, adapterRows); err != nil {
+			return err
 		}
 		_, _ = fmt.Fprintln(w)
 
 		_, _ = fmt.Fprintln(w, "DETECTORS")
-		_, _ = fmt.Fprintln(w, "NAME\tDESCRIPTION")
-		for _, e := range registry.Detectors() {
-			_, _ = fmt.Fprintf(w, "%s\t%s\n", e.Name, e.Description)
+		detectorRows := make([][]string, len(detectors))
+		for i, e := range detectors {
+			detectorRows[i] = []string{e.Name, e.Description}
+		}
+		if err := printer.Table([]string{"NAME", "DESCRIPTION"}, detectorRows); err != nil {
+			return err
 		}
 		_, _ = fmt.Fprintln(w)
 
 		_, _ = fmt.Fprintln(w, "TRANSFORMS")
-		_, _ = fmt.Fprintln(w, "NAME\tDESCRIPTION")
-		for _, e := range registry.Transforms() {
-			_, _ = fmt.Fprintf(w, "%s\t%s\n", e.Name, e.Description)
+		transformRows := make([][]string, len(transforms))
+		for i, e := range transforms {
+			transformRows[i] = []string{e.Name, e.Description}
 		}
+		return printer.Table([]string{"NAME", "DESCRIPTION"}, transformRows)
 
 	default:
 		return fmt.Errorf("unknown component type %q: expected adapters, detectors, or transforms", kind)
 	}
-
-	return w.Flush()
 }

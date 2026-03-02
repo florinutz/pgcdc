@@ -3,8 +3,6 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"os"
-	"text/tabwriter"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -12,14 +10,36 @@ import (
 	"github.com/spf13/viper"
 
 	"github.com/florinutz/pgcdc/internal/config"
+	"github.com/florinutz/pgcdc/internal/output"
 	"github.com/florinutz/pgcdc/registry"
 )
+
+// ValidationResult holds the outcome of a single validation check.
+type ValidationResult struct {
+	Component string `json:"component"`
+	Status    string `json:"status"`
+	Duration  string `json:"duration"`
+	Message   string `json:"message"`
+}
 
 type validationResult struct {
 	component string
 	status    string
 	message   string
 	duration  time.Duration
+}
+
+func (r validationResult) toExported() ValidationResult {
+	dur := "-"
+	if r.duration > 0 {
+		dur = r.duration.Truncate(time.Millisecond).String()
+	}
+	return ValidationResult{
+		Component: r.component,
+		Status:    r.status,
+		Duration:  dur,
+		Message:   r.message,
+	}
 }
 
 var validateCmd = &cobra.Command{
@@ -33,6 +53,7 @@ func init() {
 	rootCmd.AddCommand(validateCmd)
 	f := validateCmd.Flags()
 	f.String("db", "", "PostgreSQL connection string (env: PGCDC_DATABASE_URL)")
+	output.AddOutputFlag(validateCmd)
 }
 
 func runValidate(cmd *cobra.Command, args []string) error {
@@ -338,18 +359,29 @@ func runValidate(cmd *cobra.Command, args []string) error {
 		})
 	}
 
-	// Print results table.
-	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	_, _ = fmt.Fprintln(w, "COMPONENT\tSTATUS\tDURATION\tMESSAGE")
-	_, _ = fmt.Fprintln(w, "---------\t------\t--------\t-------")
+	// Output results.
+	printer := output.FromCommand(cmd)
+
+	if printer.IsJSON() {
+		exported := make([]ValidationResult, len(results))
+		for i, r := range results {
+			exported[i] = r.toExported()
+		}
+		return printer.JSON(exported)
+	}
+
+	headers := []string{"COMPONENT", "STATUS", "DURATION", "MESSAGE"}
+	var rows [][]string
 	for _, r := range results {
 		dur := "-"
 		if r.duration > 0 {
 			dur = r.duration.Truncate(time.Millisecond).String()
 		}
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", r.component, r.status, dur, r.message)
+		rows = append(rows, []string{r.component, r.status, dur, r.message})
 	}
-	_ = w.Flush()
+	if err := printer.Table(headers, rows); err != nil {
+		return err
+	}
 
 	if hasFailure {
 		return fmt.Errorf("validation failed")

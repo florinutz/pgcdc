@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"os"
 	"sync"
-	"text/tabwriter"
 	"time"
 
 	"github.com/florinutz/pgcdc/adapter"
@@ -15,6 +14,7 @@ import (
 	"github.com/florinutz/pgcdc/adapter/webhook"
 	"github.com/florinutz/pgcdc/dlq"
 	"github.com/florinutz/pgcdc/event"
+	"github.com/florinutz/pgcdc/internal/output"
 	"github.com/spf13/cobra"
 )
 
@@ -53,7 +53,7 @@ func init() {
 	dlqListCmd.Flags().String("id", "", "filter by record ID")
 	dlqListCmd.Flags().Int("limit", 50, "maximum number of records to return")
 	dlqListCmd.Flags().Bool("pending", false, "only show records not yet replayed")
-	dlqListCmd.Flags().String("format", "table", "output format: table or json")
+	output.AddOutputFlag(dlqListCmd)
 
 	// replay flags
 	dlqReplayCmd.Flags().String("adapter", "", "filter by adapter name")
@@ -148,36 +148,34 @@ func runDLQList(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	format, _ := cmd.Flags().GetString("format")
-	if format == "json" {
-		return dlqListJSON(ctx, store, filter)
+	printer := output.FromCommand(cmd)
+	if printer.IsJSON() {
+		return dlqListJSON(ctx, store, filter, printer)
 	}
-	return dlqListTable(ctx, store, filter)
+	return dlqListTable(ctx, store, filter, printer)
 }
 
-func dlqListJSON(ctx context.Context, store *dlq.Store, filter dlq.ListFilter) error {
+func dlqListJSON(ctx context.Context, store *dlq.Store, filter dlq.ListFilter, printer *output.Printer) error {
 	records, err := store.List(ctx, filter)
 	if err != nil {
 		return err
 	}
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	return enc.Encode(records)
+	return printer.JSON(records)
 }
 
-func dlqListTable(ctx context.Context, store *dlq.Store, filter dlq.ListFilter) error {
+func dlqListTable(ctx context.Context, store *dlq.Store, filter dlq.ListFilter, printer *output.Printer) error {
 	records, err := store.List(ctx, filter)
 	if err != nil {
 		return err
 	}
 
 	if len(records) == 0 {
-		fmt.Println("No dead letter queue records found.")
+		_, _ = fmt.Fprintln(printer.Writer(), "No dead letter queue records found.")
 		return nil
 	}
 
-	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	_, _ = fmt.Fprintln(w, "ID\tEVENT_ID\tADAPTER\tERROR\tCREATED_AT\tREPLAYED_AT")
+	headers := []string{"ID", "EVENT_ID", "ADAPTER", "ERROR", "CREATED_AT", "REPLAYED_AT"}
+	var rows [][]string
 
 	for _, r := range records {
 		errMsg := r.Error
@@ -188,17 +186,19 @@ func dlqListTable(ctx context.Context, store *dlq.Store, filter dlq.ListFilter) 
 		if r.ReplayedAt != nil {
 			replayed = r.ReplayedAt.Format(time.RFC3339)
 		}
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
+		rows = append(rows, []string{
 			r.ID, r.EventID, r.Adapter, errMsg,
 			r.CreatedAt.Format(time.RFC3339), replayed,
-		)
+		})
 	}
-	_ = w.Flush()
+	if err := printer.Table(headers, rows); err != nil {
+		return err
+	}
 
 	// Show count summary if limit was applied and there may be more records.
 	total, countErr := store.Count(ctx, filter)
 	if countErr == nil && total > int64(len(records)) {
-		fmt.Printf("\nShowing %d of %d total records. Use --limit to see more.\n", len(records), total)
+		_, _ = fmt.Fprintf(printer.Writer(), "\nShowing %d of %d total records. Use --limit to see more.\n", len(records), total)
 	}
 
 	return nil

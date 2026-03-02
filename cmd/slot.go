@@ -4,12 +4,22 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"text/tabwriter"
 	"time"
 
+	"github.com/florinutz/pgcdc/internal/output"
 	"github.com/jackc/pgx/v5"
 	"github.com/spf13/cobra"
 )
+
+type slotInfo struct {
+	Slot              string `json:"slot"`
+	Plugin            string `json:"plugin"`
+	Type              string `json:"type"`
+	Active            bool   `json:"active"`
+	RestartLSN        string `json:"restart_lsn"`
+	ConfirmedFlushLSN string `json:"confirmed_flush_lsn"`
+	WALRetained       string `json:"wal_retained,omitempty"`
+}
 
 var slotCmd = &cobra.Command{
 	Use:   "slot",
@@ -43,6 +53,9 @@ func init() {
 
 	slotDropCmd.Flags().String("name", "", "slot name (required)")
 	_ = slotDropCmd.MarkFlagRequired("name")
+
+	output.AddOutputFlag(slotListCmd)
+	output.AddOutputFlag(slotStatusCmd)
 
 	slotCmd.AddCommand(slotListCmd)
 	slotCmd.AddCommand(slotStatusCmd)
@@ -87,9 +100,7 @@ func runSlotList(cmd *cobra.Command, args []string) error {
 	}
 	defer rows.Close()
 
-	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	_, _ = fmt.Fprintln(w, "SLOT\tPLUGIN\tTYPE\tACTIVE\tRESTART_LSN\tCONFIRMED_FLUSH_LSN")
-
+	var slots []slotInfo
 	for rows.Next() {
 		var name, plugin, slotType string
 		var active bool
@@ -107,11 +118,31 @@ func runSlotList(cmd *cobra.Command, args []string) error {
 		if confirmedLSN != nil {
 			cl = *confirmedLSN
 		}
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%v\t%s\t%s\n", name, plugin, slotType, active, rl, cl)
+		slots = append(slots, slotInfo{
+			Slot:              name,
+			Plugin:            plugin,
+			Type:              slotType,
+			Active:            active,
+			RestartLSN:        rl,
+			ConfirmedFlushLSN: cl,
+		})
 	}
-	_ = w.Flush()
+	if err := rows.Err(); err != nil {
+		return err
+	}
 
-	return rows.Err()
+	printer := output.FromCommand(cmd)
+
+	if printer.IsJSON() {
+		return printer.JSON(slots)
+	}
+
+	headers := []string{"SLOT", "PLUGIN", "TYPE", "ACTIVE", "RESTART_LSN", "CONFIRMED_FLUSH_LSN"}
+	tableRows := make([][]string, len(slots))
+	for i, s := range slots {
+		tableRows[i] = []string{s.Slot, s.Plugin, s.Type, fmt.Sprintf("%v", s.Active), s.RestartLSN, s.ConfirmedFlushLSN}
+	}
+	return printer.Table(headers, tableRows)
 }
 
 func runSlotStatus(cmd *cobra.Command, args []string) error {
@@ -164,13 +195,30 @@ func runSlotStatus(cmd *cobra.Command, args []string) error {
 		lag = formatBytes(*lagBytes)
 	}
 
-	fmt.Printf("Slot:                %s\n", slotName)
-	fmt.Printf("Plugin:              %s\n", plugin)
-	fmt.Printf("Type:                %s\n", slotType)
-	fmt.Printf("Active:              %v\n", active)
-	fmt.Printf("Restart LSN:         %s\n", rl)
-	fmt.Printf("Confirmed Flush LSN: %s\n", cl)
-	fmt.Printf("WAL Retained:        %s\n", lag)
+	info := slotInfo{
+		Slot:              slotName,
+		Plugin:            plugin,
+		Type:              slotType,
+		Active:            active,
+		RestartLSN:        rl,
+		ConfirmedFlushLSN: cl,
+		WALRetained:       lag,
+	}
+
+	printer := output.FromCommand(cmd)
+
+	if printer.IsJSON() {
+		return printer.JSON(info)
+	}
+
+	w := printer.Writer()
+	fmt.Fprintf(w, "Slot:                %s\n", info.Slot)
+	fmt.Fprintf(w, "Plugin:              %s\n", info.Plugin)
+	fmt.Fprintf(w, "Type:                %s\n", info.Type)
+	fmt.Fprintf(w, "Active:              %v\n", info.Active)
+	fmt.Fprintf(w, "Restart LSN:         %s\n", info.RestartLSN)
+	fmt.Fprintf(w, "Confirmed Flush LSN: %s\n", info.ConfirmedFlushLSN)
+	fmt.Fprintf(w, "WAL Retained:        %s\n", info.WALRetained)
 
 	return nil
 }
