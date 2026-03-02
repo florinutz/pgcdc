@@ -168,6 +168,9 @@ internal/circuitbreaker/  Three-state CB (closed/open/half-open)
 internal/ratelimit/       Token-bucket rate limiter with Prometheus metrics
 internal/migrate/         Embedded SQL migrations (pgcdc_migrations table)
 internal/safegoroutine/   Panic recovery wrapper for errgroup
+internal/output/     Shared --output (table|json) printer for all CLI commands
+internal/logcolor/   Colored slog handler (ANSI level labels, TTY detection)
+internal/prompt/     Interactive terminal prompts (Select, MultiSelect, Confirm)
 scenarios/      Integration tests; helpers_test.go has shared PG container + pipeline wiring
 testutil/       Test utilities
 ```
@@ -203,4 +206,10 @@ testutil/       Test utilities
 - `adapter/duckdb/duckdb.go` — DuckDB in-process analytics adapter (buffered ingest + SQL query endpoint)
 - `detector/webhookgw/webhookgw.go` — Webhook gateway detector (HTTP ingest endpoint)
 - `detector/sqlite/sqlite.go` — SQLite CDC detector (poll-based change table)
+- `cmd/doctor.go` — System health checker (docker, config, DB, slots, WAL, adapters)
+- `cmd/quickstart.go` — Interactive project generator (config, SQL, docker-compose)
+- `cmd/plugin_scaffold.go` — Wasm plugin project scaffolding
+- `cmd/config_diff.go` — YAML config diff command
+- `internal/output/summary.go` — Startup config summary banner
+- `internal/config/diff.go` — SIGHUP reload config diffing
 - `scenarios/helpers_test.go` — Shared test infra: PG container setup, pipeline wiring helpers

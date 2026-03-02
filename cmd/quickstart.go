@@ -24,7 +24,7 @@ func init() {
 	rootCmd.AddCommand(quickstartCmd)
 
 	f := quickstartCmd.Flags()
-	f.String("db", "postgres", "database type: postgres, mysql, mongodb, sqlite")
+	f.String("db-type", "postgres", "database type: postgres, mysql, mongodb, sqlite")
 	f.String("detector", "", "detector type (auto-detected from --db if omitted)")
 	f.StringSlice("adapter", nil, "adapters (comma-separated)")
 	f.Bool("docker", false, "generate docker-compose.yml")
@@ -42,7 +42,7 @@ type quickstartConfig struct {
 }
 
 func runQuickstart(cmd *cobra.Command, args []string) error {
-	db, _ := cmd.Flags().GetString("db")
+	db, _ := cmd.Flags().GetString("db-type")
 	detector, _ := cmd.Flags().GetString("detector")
 	adapters, _ := cmd.Flags().GetStringSlice("adapter")
 	docker, _ := cmd.Flags().GetBool("docker")

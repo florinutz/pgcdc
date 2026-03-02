@@ -33,11 +33,32 @@ Each chapter is a failure mode. You have either experienced it already or you wi
 
 ---
 
+### If you're debugging a specific symptom
+
+| Symptom | Chapter |
+|---------|---------|
+| Postgres primary disk full at 2am | Ch 2 |
+| Pipeline stuck on one event for hours | Ch 3 |
+| Recovering downstream service keeps crashing | Ch 4 |
+| One slow adapter stalling the whole pipeline | Ch 5 |
+| Events dropped or duplicated on config deploy | Ch 6 |
+| Window aggregates showing wrong numbers | Ch 7 |
+| Duplicate events after pipeline restart | Ch 8 |
+| Cache serving stale data silently | Ch 9 |
+| Two nodes both elected themselves leader | Ch 10 |
+| Storage writes surviving process kill / data loss | Ch 1 |
+| Adding a consumer degraded everyone's throughput | Ch 11 |
+| Schema rename broke downstream consumers | Ch 12 |
+
+---
+
 **How to use this guide.** Read it in order once to build the mental map. The chapters are designed to be self-contained after that first pass, so you can return to any one in isolation. The appendix has reference tables and decision trees for when you need a fast answer during a design review. The interview traps scattered throughout are not trivia — they mark the boundary between knowing a concept and understanding it well enough to use it correctly under the pressures of production.
 
 ---
 
 ## Chapter 1: "A write that wasn't fsynced didn't happen."
+
+**Category:** `Storage` · **Concepts:** B-tree, LSM, WAL, fsync, MVCC, write amplification · **Files:** *(standalone — no pgcdc files)*
 
 **The failure.** Your service reports a successful write. The user sees a confirmation. Then the server reboots — power loss, OOM kill, whatever — and the record is gone. You check the disk. The file is there, but it has the old content. The write was buffered in the OS page cache and never made it to the physical medium.
 
@@ -61,15 +82,17 @@ The Write-Ahead Log (WAL) exists to solve this. Before touching any page, the da
 
 > **Key insight.** The page cache is a performance optimization maintained by the OS that makes writes look instant. `fsync` is the syscall that converts that illusion into a durability guarantee. A database that doesn't call `fsync` after a commit is not actually committing — it's buffering and hoping the power stays on.
 
-> **The Principle.** *"A write that wasn't fsynced didn't happen."*
+> **⚡ The Principle.** *"A write that wasn't fsynced didn't happen."*
 
-> **Interview trap.** "Isn't mmap faster than read/write?" It can be, for read-heavy workloads. But mmap with `msync(MS_ASYNC)` is the worst of both worlds for write durability — you've made fsync semantics implicit and easy to forget. Most production storage engines use explicit read/write + fsync for this reason.
+> **⚠️ Interview trap.** "Isn't mmap faster than read/write?" It can be, for read-heavy workloads. But mmap with `msync(MS_ASYNC)` is the worst of both worlds for write durability — you've made fsync semantics implicit and easy to forget. Most production storage engines use explicit read/write + fsync for this reason.
 
-> **Interview trap.** "Why does PostgreSQL need VACUUM if it has MVCC?" MVCC requires keeping old row versions alive for concurrent readers. When those readers finish, the old versions become dead tuples — they're invisible to all transactions but still occupy space. VACUUM finds and marks them as free space. Without it, tables grow without bound.
+> **⚠️ Interview trap.** "Why does PostgreSQL need VACUUM if it has MVCC?" MVCC requires keeping old row versions alive for concurrent readers. When those readers finish, the old versions become dead tuples — they're invisible to all transactions but still occupy space. VACUUM finds and marks them as free space. Without it, tables grow without bound.
 
 ---
 
 ## Chapter 2: "Every replication slot you forget is a disk bomb with no timer."
+
+**Category:** `CDC` · **Concepts:** WAL replication, replication slots, LSN, TOAST, outbox, SKIP LOCKED · **Files:** [`detector/walreplication/walreplication.go`](../detector/walreplication/walreplication.go), [`detector/outbox/outbox.go`](../detector/outbox/outbox.go)
 
 **The failure.** It's 2 AM. PagerDuty fires. The on-call engineer opens their laptop to find that the primary PostgreSQL server's data volume is full. The culprit: a replication slot created three weeks ago by a CDC pipeline that was decommissioned. The pipeline is gone. The slot is not. PostgreSQL has been retaining WAL since the slot's last confirmed flush LSN, which hasn't moved in three weeks.
 
@@ -89,17 +112,54 @@ The Write-Ahead Log (WAL) exists to solve this. Before touching any page, the da
 
 > **Key insight.** WAL replication is the only CDC method with zero application coupling, strong ordering, and exactly-once delivery potential simultaneously. Every other method sacrifices at least one of these properties. When choosing between the outbox pattern and WAL replication, the default answer is WAL — unless you can't grant replication permissions or your organization can't tolerate the operational risk of replication slots.
 
-**How pgcdc does it.** `detector/walreplication/walreplication.go` handles the WAL connection and logical decoding. Slot management and LSN reporting back to PostgreSQL are handled there. `detector/outbox/outbox.go` implements the `SKIP LOCKED` polling pattern. The detector interface does not close the events channel — the bus owns that lifecycle, which prevents the slot from being released prematurely.
+**How pgcdc does it.** [`detector/walreplication/walreplication.go`](../detector/walreplication/walreplication.go) handles the WAL connection and logical decoding. Slot management and LSN reporting back to PostgreSQL are handled there. [`detector/outbox/outbox.go`](../detector/outbox/outbox.go) implements the `SKIP LOCKED` polling pattern. The detector interface does not close the events channel — the bus owns that lifecycle, which prevents the slot from being released prematurely.
 
-**TOAST** is PostgreSQL's mechanism for storing large column values (>8 KB) out-of-line in a secondary heap. On `UPDATE`, unchanged TOAST columns appear in WAL as "unchanged" — they're not re-emitted, only a reference is. Without special handling, a downstream consumer would see `null` or a sentinel for those columns on updates. pgcdc's TOAST cache (`detector/walreplication/toastcache/`) is an LRU cache keyed on row identity that stores the last known full value for each TOAST column, so downstream consumers always see the complete row.
+```sql
+-- Outbox polling: multiple instances claim disjoint batches atomically
+SELECT id, payload, created_at
+FROM outbox
+WHERE processed_at IS NULL
+ORDER BY id
+LIMIT 100
+FOR UPDATE SKIP LOCKED;
+```
 
-> **The Principle.** *"Every replication slot you forget is a disk bomb with no timer."*
+**Configuration.**
 
-> **Interview trap.** "Can't you just set a higher `wal_keep_size`?" That's a retention buffer for physical replication, not logical. Replication slots bypass `wal_keep_size` — they pin WAL at the slot's LSN regardless of that setting. The slot is the authoritative retention mechanism.
+```yaml
+# pgcdc.yaml — WAL replication with persistent slot and TOAST cache
+database_url: postgres://user:pass@localhost/mydb
+channels: [orders, inventory]
+detector:
+  type: wal
+  persistent_slot: true
+  slot_name: pgcdc_main
+  toast_cache: true
+  cooperative_checkpoint: true
+  slot_lag_warn: 10000   # LSN units — alert before disk risk
+```
+
+```yaml
+# pgcdc.yaml — Outbox polling
+detector:
+  type: outbox
+  table: outbox_events
+  poll_interval: 2s
+  batch_size: 100
+  keep_processed: false
+```
+
+**TOAST** is PostgreSQL's mechanism for storing large column values (>8 KB) out-of-line in a secondary heap. On `UPDATE`, unchanged TOAST columns appear in WAL as "unchanged" — they're not re-emitted, only a reference is. Without special handling, a downstream consumer would see `null` or a sentinel for those columns on updates. pgcdc's TOAST cache ([`detector/walreplication/toastcache/`](../detector/walreplication/toastcache/)) is an LRU cache keyed on row identity that stores the last known full value for each TOAST column, so downstream consumers always see the complete row.
+
+> **⚡ The Principle.** *"Every replication slot you forget is a disk bomb with no timer."*
+
+> **⚠️ Interview trap.** "Can't you just set a higher `wal_keep_size`?" That's a retention buffer for physical replication, not logical. Replication slots bypass `wal_keep_size` — they pin WAL at the slot's LSN regardless of that setting. The slot is the authoritative retention mechanism.
 
 ---
 
 ## Chapter 3: "A poison pill is patient. It will wait forever for you to stop retrying it."
+
+**Category:** `Resilience` · **Concepts:** DLQ, poison pill, nack window, CEL filter · **Files:** [`dlq/dlq.go`](../dlq/dlq.go), [`adapter/middleware/dlq.go`](../adapter/middleware/dlq.go), [`dlq/window.go`](../dlq/window.go)
 
 **The failure.** An event arrives with a malformed JSON payload. Your webhook adapter tries to send it. The downstream API returns 400. You retry. It returns 400 again. You retry with exponential backoff. Three hours later, you're still retrying the same malformed event. Every event that arrived after it is queued behind it, waiting. Your pipeline has effectively stopped.
 
@@ -119,17 +179,55 @@ A ring buffer of the last N delivery outcomes (success/nack) gives you a rolling
 
 > **Key insight.** The DLQ middleware swallows the error after recording the event. This is intentional and correct. A DLQ is not a failure indicator — it's a safety valve that keeps the pipeline moving while quarantining the undeliverable events for human review. If you treat DLQ writes as errors (alerting on them, failing the pipeline), you've negated the entire value of having a DLQ.
 
-**How pgcdc does it.** `dlq/dlq.go` defines the `DLQ` interface. `adapter/middleware/dlq.go` catches errors from the inner retry layer, calls `dlq.Write()`, and returns `nil`. The `PGTableDLQ` backend stores events with their error metadata in a PostgreSQL table. `dlq/window.go` implements the ring buffer nack window.
+**How pgcdc does it.** [`dlq/dlq.go`](../dlq/dlq.go) defines the `DLQ` interface. [`adapter/middleware/dlq.go`](../adapter/middleware/dlq.go) catches errors from the inner retry layer, calls `dlq.Write()`, and returns `nil`. The `PGTableDLQ` backend stores events with their error metadata in a PostgreSQL table. [`dlq/window.go`](../dlq/window.go) implements the ring buffer nack window.
 
-> **The Principle.** *"A poison pill is patient. It will wait forever for you to stop retrying it."*
+```go
+// dlq/window.go — O(1) ring buffer nack tracking
+func (w *NackWindow) Record(nack bool) {
+	oldest := w.outcomes[w.head]
+	if oldest {
+		w.nackCount--
+	}
+	w.outcomes[w.head] = nack
+	if nack {
+		w.nackCount++
+	}
+	w.head = (w.head + 1) % len(w.outcomes)
+}
 
-> **Interview trap.** "Exactly-once delivery means using a DLQ, right?" No. DLQ is compatible with at-least-once delivery. For a DLQ event that gets replayed, the consumer may see it twice — once when it was originally attempted (if partial delivery occurred) and once on replay. If your workload needs exactly-once semantics, your consumers must be idempotent, and DLQ replay must preserve the original event ID so consumers can detect duplicates.
+func (w *NackWindow) Exceeded() bool {
+	return w.nackCount >= w.threshold
+}
+```
 
-> **Interview trap.** "If DLQ is safe, why not use it for everything?" A DLQ is only safe for workloads where events are independent and delivery is idempotent. If event B depends on event A, and A is in the DLQ while B is being delivered, you've delivered a dependent event out of order. For ordered, dependent events, the right answer is to stop the pipeline at the failure point, not route around it.
+**Configuration.**
+
+```yaml
+# pgcdc.yaml — DLQ with nack window and CEL pre-filter
+dlq:
+  type: pg_table
+  table: pgcdc_dlq
+  window_size: 100         # track last 100 deliveries
+  window_threshold: 50     # pause adapter if >50% are nacks
+
+adapters:
+  webhook:
+    url: https://api.example.com/events
+    retry_max: 5
+    filter_cel: 'event.table != "heartbeat"'  # drop before DLQ/retry
+```
+
+> **⚡ The Principle.** *"A poison pill is patient. It will wait forever for you to stop retrying it."*
+
+> **⚠️ Interview trap.** "Exactly-once delivery means using a DLQ, right?" No. DLQ is compatible with at-least-once delivery. For a DLQ event that gets replayed, the consumer may see it twice — once when it was originally attempted (if partial delivery occurred) and once on replay. If your workload needs exactly-once semantics, your consumers must be idempotent, and DLQ replay must preserve the original event ID so consumers can detect duplicates.
+
+> **⚠️ Interview trap.** "If DLQ is safe, why not use it for everything?" A DLQ is only safe for workloads where events are independent and delivery is idempotent. If event B depends on event A, and A is in the DLQ while B is being delivered, you've delivered a dependent event out of order. For ordered, dependent events, the right answer is to stop the pipeline at the failure point, not route around it.
 
 ---
 
 ## Chapter 4: "A circuit breaker isn't a retry strategy — it's permission to stop trying."
+
+**Category:** `Resilience` · **Concepts:** Circuit breaker, exponential backoff, full jitter · **Files:** [`internal/circuitbreaker/circuitbreaker.go`](../internal/circuitbreaker/circuitbreaker.go), [`adapter/middleware/retry.go`](../adapter/middleware/retry.go)
 
 **The failure.** Your webhook adapter's retry backoff is set to a maximum of 60 seconds. A downstream service goes down. Every one of your 20 pipeline instances starts retrying with exponential backoff. After a few minutes, they're all firing synchronized retries every 60 seconds, hitting the recovering service with 20× the normal request rate right when it's trying to come back up. The service crashes again. This is a retry storm.
 
@@ -154,17 +252,56 @@ Closed ──(N failures in window)──> Open ──(resetTimeout)──> Half
 
 > **Key insight.** The circuit breaker lives in the caller, not the callee. You cannot put a circuit breaker on a downstream service — you put it in every client that calls it. The service has no knowledge that it's being protected. This means in a microservices system, every service that calls service X must maintain its own CB state for X independently.
 
-**How pgcdc does it.** `internal/circuitbreaker/circuitbreaker.go` implements the three-state FSM. `adapter/middleware/retry.go` implements exponential backoff with configurable base and cap. Both are wired into the middleware chain for all `Deliverer` adapters via `adapter/middleware/middleware.go`. They compose: the retry layer is inside the circuit breaker layer, so the CB counts the outcome of the entire retry sequence, not individual retry attempts.
+**How pgcdc does it.** [`internal/circuitbreaker/circuitbreaker.go`](../internal/circuitbreaker/circuitbreaker.go) implements the three-state FSM. [`adapter/middleware/retry.go`](../adapter/middleware/retry.go) implements exponential backoff with configurable base and cap. Both are wired into the middleware chain for all `Deliverer` adapters via [`adapter/middleware/middleware.go`](../adapter/middleware/middleware.go). They compose: the retry layer is inside the circuit breaker layer, so the CB counts the outcome of the entire retry sequence, not individual retry attempts.
 
-> **The Principle.** *"A circuit breaker isn't a retry strategy — it's permission to stop trying."*
+```go
+// internal/circuitbreaker/circuitbreaker.go — Allow() state machine
+func (cb *CircuitBreaker) Allow() bool {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	switch cb.state {
+	case StateClosed:
+		return true
+	case StateOpen:
+		if time.Since(cb.lastFailure) >= cb.resetTimeout {
+			cb.state = StateHalfOpen
+			return true // probe request
+		}
+		return false
+	case StateHalfOpen:
+		return true
+	}
+	return true
+}
+```
 
-> **Interview trap.** "Exponential backoff without jitter — why is that worse than fixed backoff?" Because it synchronizes clients. Imagine 100 clients that all failed at T=0. With `base=1s`, they all retry at T=1, T=2, T=4, T=8. Each retry wave contains 100 clients hitting the service simultaneously. With fixed backoff at 2s, they also all retry at T=2, T=4, T=6 — also synchronized, but at least the inter-retry spacing doesn't grow. With full jitter, the clients spread themselves across the entire interval, distributing load rather than concentrating it.
+**Configuration.**
 
-> **Interview trap.** "Where does the reset timeout come from?" It should be empirically derived from the p95 or p99 recovery time of the downstream service, not a round number like "30 seconds." A `resetTimeout` shorter than the typical recovery time means the breaker half-opens before the service is ready, fails the probe, and opens again — extending the outage. A `resetTimeout` much longer than recovery time means you leave load off the service longer than necessary.
+```yaml
+# pgcdc.yaml — per-adapter circuit breaker + jitter backoff
+adapters:
+  webhook:
+    url: https://api.example.com/events
+    retry_max: 5
+    backoff_base: 200ms
+    backoff_cap: 30s
+    cb_max_failures: 10     # open after 10 failures
+    cb_reset_timeout: 45s   # probe after 45s (tune to service p95 recovery)
+    rate_limit: 500         # events/sec
+    rate_limit_burst: 1000
+```
+
+> **⚡ The Principle.** *"A circuit breaker isn't a retry strategy — it's permission to stop trying."*
+
+> **⚠️ Interview trap.** "Exponential backoff without jitter — why is that worse than fixed backoff?" Because it synchronizes clients. Imagine 100 clients that all failed at T=0. With `base=1s`, they all retry at T=1, T=2, T=4, T=8. Each retry wave contains 100 clients hitting the service simultaneously. With fixed backoff at 2s, they also all retry at T=2, T=4, T=6 — also synchronized, but at least the inter-retry spacing doesn't grow. With full jitter, the clients spread themselves across the entire interval, distributing load rather than concentrating it.
+
+> **⚠️ Interview trap.** "Where does the reset timeout come from?" It should be empirically derived from the p95 or p99 recovery time of the downstream service, not a round number like "30 seconds." A `resetTimeout` shorter than the typical recovery time means the breaker half-opens before the service is ready, fails the probe, and opens again — extending the outage. A `resetTimeout` much longer than recovery time means you leave load off the service longer than necessary.
 
 ---
 
 ## Chapter 5: "Reliability is always at the cost of the source."
+
+**Category:** `Concurrency` · **Concepts:** Fan-out, fast/reliable mode, backpressure zones, COW · **Files:** [`bus/bus.go`](../bus/bus.go), [`backpressure/backpressure.go`](../backpressure/backpressure.go)
 
 **The failure.** You have a Kafka adapter that occasionally takes 5 seconds to acknowledge a batch. During those 5 seconds, the bus dispatch goroutine is blocked trying to send to the Kafka adapter's channel. The channel is full. The bus stops dispatching. The detector stops reading from WAL. WAL lag starts growing. The primary PostgreSQL server's replication slot retains more WAL. Your DBA calls at 3 PM asking why WAL retention has spiked.
 
@@ -189,15 +326,85 @@ Hysteresis prevents thrashing: you exit Red only when lag drops below the warn t
 
 > **Key insight.** Reliability is always at the cost of the source. In reliable mode, a slow consumer's full channel blocks the dispatch goroutine, which stops reading from the ingest channel, which backs up into the detector. "Reliable" means no drops — it doesn't mean fast. There is no configuration that gives you both.
 
-**How pgcdc does it.** `bus/bus.go`: `ModeFast` uses `select { case sub.ch <- ev: default: /* drop */ }`. `ModeReliable` tries non-blocking first, then falls back to a blocking send. `backpressure/backpressure.go` implements the zone model: `computeZone()` applies hysteresis, `computeThrottle()` computes the proportional sleep. Fan-out uses COW (copy-on-write) subscriber lists — `Subscribe()` builds a new slice, stores it atomically via `atomic.Pointer`. The dispatch hot path reads the pointer with no lock.
+**How pgcdc does it.** [`bus/bus.go`](../bus/bus.go): `ModeFast` uses `select { case sub.ch <- ev: default: /* drop */ }`. `ModeReliable` tries non-blocking first, then falls back to a blocking send. [`backpressure/backpressure.go`](../backpressure/backpressure.go) implements the zone model: `computeZone()` applies hysteresis, `computeThrottle()` computes the proportional sleep. Fan-out uses COW (copy-on-write) subscriber lists — `Subscribe()` builds a new slice, stores it atomically via `atomic.Pointer`. The dispatch hot path reads the pointer with no lock.
 
-> **The Principle.** *"Reliability is always at the cost of the source."*
+```go
+// bus/bus.go — fast mode (drop on full)
+for _, sub := range subs {
+	select {
+	case sub.ch <- ev:
+	default:
+		metrics.EventsDropped.WithLabelValues(sub.name).Inc()
+	}
+}
 
-> **Interview trap.** "Can't you use a separate goroutine per subscriber to decouple them?" Yes, and that's what pgcdc does — each subscriber gets a wrapper goroutine. But the goroutines must communicate through bounded channels. If the channel is full, the wrapper goroutine blocks. At that point you're back to the same choice: drop (fast) or block (reliable). The goroutine doesn't change the trade-off; it just isolates the blocking to the per-subscriber goroutine rather than the dispatch goroutine.
+// bus/bus.go — reliable mode (block on full, with context)
+for _, sub := range subs {
+	select {
+	case sub.ch <- ev:
+	default:
+		metrics.BusBackpressure.WithLabelValues(sub.name).Inc()
+		select {
+		case sub.ch <- ev:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+```
+
+```go
+// backpressure/backpressure.go — proportional throttle + hysteresis
+func (c *Controller) computeZone(lag int64, current Zone) Zone {
+	if lag >= c.criticalThreshold {
+		return ZoneRed
+	}
+	if current == ZoneRed && lag < c.warnThreshold {
+		return ZoneGreen // hysteresis: must drop below warn to exit red
+	}
+	if current == ZoneRed {
+		return ZoneRed
+	}
+	if lag >= c.warnThreshold {
+		return ZoneYellow
+	}
+	return ZoneGreen
+}
+
+func (c *Controller) computeThrottle(lag int64) time.Duration {
+	band := c.criticalThreshold - c.warnThreshold
+	ratio := float64(lag-c.warnThreshold) / float64(band)
+	return time.Duration(float64(c.maxThrottle) * min(ratio, 1.0))
+}
+```
+
+**Configuration.**
+
+```yaml
+# pgcdc.yaml — reliable bus with proportional backpressure
+bus:
+  mode: reliable     # block instead of drop (at cost of source)
+  buffer_size: 1000
+
+backpressure:
+  enabled: true
+  warn_threshold: 5000      # LSN lag — enter yellow zone
+  critical_threshold: 20000 # LSN lag — enter red zone, shed best-effort
+  max_throttle: 500ms       # max sleep per event in yellow zone
+  adapter_priorities:
+    stdout: best-effort   # shed first in red zone
+    kafka: critical       # never shed
+```
+
+> **⚡ The Principle.** *"Reliability is always at the cost of the source."*
+
+> **⚠️ Interview trap.** "Can't you use a separate goroutine per subscriber to decouple them?" Yes, and that's what pgcdc does — each subscriber gets a wrapper goroutine. But the goroutines must communicate through bounded channels. If the channel is full, the wrapper goroutine blocks. At that point you're back to the same choice: drop (fast) or block (reliable). The goroutine doesn't change the trade-off; it just isolates the blocking to the per-subscriber goroutine rather than the dispatch goroutine.
 
 ---
 
 ## Chapter 6: "You can restart quickly, or you can restart correctly. Pick one."
+
+**Category:** `Operations` · **Concepts:** Hot reload, graceful shutdown, structured concurrency, panic recovery · **Files:** [`pgcdc.go`](../pgcdc.go), [`cmd/listen.go`](../cmd/listen.go)
 
 **The failure.** You push a new version of a transform configuration. The deployment process stops the old pipeline and starts the new one. During the 8 seconds of downtime, 12 WAL events arrive that no consumer receives. When the new pipeline starts, it resumes from the last confirmed checkpoint LSN — which was 8 seconds ago. It re-delivers some events and misses others depending on exactly when the last checkpoint was confirmed before shutdown. Your downstream Kafka topic now has a 12-event gap and some duplicates from the re-delivery window.
 
@@ -220,17 +427,55 @@ Hysteresis prevents thrashing: you exit Red only when lag drops below the warn t
 
 > **Key insight.** Context cancellation is the only teardown mechanism you need. `errgroup.WithContext` creates a context that cancels the moment any goroutine returns a non-nil error. Every blocking operation — channel reads, HTTP requests, database queries — should respect `ctx.Done()`. If they do, cancellation propagates instantly to every part of the pipeline. If they don't, graceful shutdown hangs indefinitely.
 
-**How pgcdc does it.** `pgcdc.go` `wrapperConfigs map[string]*atomic.Pointer[wrapperConfig]`. `Reload()` iterates and stores. `safeGo()` wraps all goroutines. `drainAdapters()` runs post-`Wait()` with a timeout-bounded context. Hot reload is triggered by `cmd/listen.go`'s SIGHUP handler calling `pipeline.Reload(newConfig)`.
+**How pgcdc does it.** [`pgcdc.go`](../pgcdc.go) `wrapperConfigs map[string]*atomic.Pointer[wrapperConfig]`. `Reload()` iterates and stores. `safeGo()` wraps all goroutines. `drainAdapters()` runs post-`Wait()` with a timeout-bounded context. Hot reload is triggered by [`cmd/listen.go`](../cmd/listen.go)'s SIGHUP handler calling `pipeline.Reload(newConfig)`.
 
-> **The Principle.** *"You can restart quickly, or you can restart correctly. Pick one."*
+```go
+// pgcdc.go — lock-free config read on every event (hot path)
+func (p *Pipeline) wrapSubscription(name string, ch <-chan event.Event) {
+	cfgPtr := p.wrapperConfigs[name] // map never changes after New()
+	for ev := range ch {
+		cfg := cfgPtr.Load()         // atomic load — no lock
+		if !cfg.routes.matches(ev) {
+			continue
+		}
+		for _, fn := range cfg.transforms {
+			// ...
+		}
+	}
+}
+```
 
-> **Interview trap.** "What's the difference between `sync.Mutex` and `atomic.Pointer` for config swaps?" A mutex serializes access — readers wait while a writer holds the lock. `atomic.Pointer.Store()` and `Load()` are lock-free — readers never wait. For a hot path that reads config on every event, even a lightly-contended mutex creates measurable latency under load. The atomic pointer gives you the same memory safety guarantee without the contention.
+**Configuration.**
 
-> **Interview trap.** "Does SIGHUP reload break in-flight deliveries?" No, because route filtering happens in the per-adapter wrapper goroutine, not in the bus dispatch loop. The dispatch loop distributes events to all subscriber channels before any routing decisions. The wrapper goroutine makes the routing decision on each event using `cfgPtr.Load()`. An in-flight event sees the old config or the new config — both are valid complete configs, never a partially-swapped state.
+```bash
+# Hot reload: update transforms/routes in pgcdc.yaml then signal
+kill -HUP $(pidof pgcdc)
+```
+
+```yaml
+# pgcdc.yaml — what can be reloaded without restart
+transforms:
+  - type: mask
+    fields: [credit_card_number, ssn]
+  - type: cel_filter
+    expr: 'event.operation in ["INSERT", "UPDATE"]'
+
+routes:
+  webhook: [orders, payments]
+  kafka: [orders, inventory, audit]
+```
+
+> **⚡ The Principle.** *"You can restart quickly, or you can restart correctly. Pick one."*
+
+> **⚠️ Interview trap.** "What's the difference between `sync.Mutex` and `atomic.Pointer` for config swaps?" A mutex serializes access — readers wait while a writer holds the lock. `atomic.Pointer.Store()` and `Load()` are lock-free — readers never wait. For a hot path that reads config on every event, even a lightly-contended mutex creates measurable latency under load. The atomic pointer gives you the same memory safety guarantee without the contention.
+
+> **⚠️ Interview trap.** "Does SIGHUP reload break in-flight deliveries?" No, because route filtering happens in the per-adapter wrapper goroutine, not in the bus dispatch loop. The dispatch loop distributes events to all subscriber channels before any routing decisions. The wrapper goroutine makes the routing decision on each event using `cfgPtr.Load()`. An in-flight event sees the old config or the new config — both are valid complete configs, never a partially-swapped state.
 
 ---
 
 ## Chapter 7: "Arrival time is not event time. Confusing them means your windows are lying."
+
+**Category:** `Streaming` · **Concepts:** Event-time, watermarks, tumbling/sliding/session windows, interval joins · **Files:** [`view/engine.go`](../view/engine.go), [`view/window.go`](../view/window.go), [`view/join.go`](../view/join.go)
 
 **The failure.** You're aggregating CDC events to compute "orders placed per 5-minute window." A mobile app generates events while offline. When it reconnects at 14:35, it uploads 40 events with timestamps from 14:00–14:20. Your streaming pipeline processes them at 14:35 — processing time. Your "14:00–14:05 window" closed at 14:05 and emitted. The late events go into the "14:35–14:40 window." Your analytics dashboard shows 40 extra orders in a window where they don't belong and a 40-order deficit in the correct window. Nobody notices for 3 days.
 
@@ -254,17 +499,49 @@ Merging STDDEV across sliding window sub-periods requires **Welford's online alg
 
 > **Key insight.** Watermarks are the mechanism that makes event-time windows possible without waiting forever. A watermark is a monotonically-increasing assertion: "I believe all events with event time earlier than T have already arrived." `watermark = max(observed_event_time) - allowed_lateness`. When the watermark advances past a window's end time, the window closes and emits. Late events that arrive before `allowed_lateness` is exhausted re-trigger the window with updated results. Events beyond the lateness bound are dropped.
 
-**How pgcdc does it.** `view/window.go` (tumbling), `view/sliding_window.go` (sliding + Welford parallel STDDEV), `view/session_window.go` (session). Event-time watermarks: `view/engine.go` per-`viewInstance` `highWatermark time.Time` + mutex. On each event: `wm = eventTime - allowedLateness; if wm.After(highWatermark) { highWatermark = wm }`. Ticker loop calls `window.FlushUpTo(wm)`. Interval joins: `view/join.go` with `leftBuf`/`rightBuf` maps pruned on each new event arrival.
+**How pgcdc does it.** [`view/window.go`](../view/window.go) (tumbling), [`view/sliding_window.go`](../view/sliding_window.go) (sliding + Welford parallel STDDEV), [`view/session_window.go`](../view/session_window.go) (session). Event-time watermarks: [`view/engine.go`](../view/engine.go) per-`viewInstance` `highWatermark time.Time` + mutex. On each event: `wm = eventTime - allowedLateness; if wm.After(highWatermark) { highWatermark = wm }`. Ticker loop calls `window.FlushUpTo(wm)`. Interval joins: [`view/join.go`](../view/join.go) with `leftBuf`/`rightBuf` maps pruned on each new event arrival.
 
-> **The Principle.** *"Arrival time is not event time. Confusing them means your windows are lying."*
+```go
+// view/engine.go — watermark advance on each event
+func (vi *viewInstance) Process(ev event.Event, eventTime time.Time) {
+	if !eventTime.IsZero() {
+		wm := eventTime.Add(-vi.spec.AllowedLateness)
+		vi.watermarkMu.Lock()
+		if wm.After(vi.highWatermark) {
+			vi.highWatermark = wm
+		}
+		vi.watermarkMu.Unlock()
+	}
+	vi.window.Add(ev.Metadata, ev.Payload, eventTime)
+}
+```
 
-> **Interview trap.** "Do sliding windows store N copies of the data?" No. A sliding window with W=10m, S=1m stores `ceil(10/1) = 10` partial aggregates — one per slide period. Each partial aggregate maintains the sufficient statistics for that period (count, sum, sum-of-squares for STDDEV). Merging 10 partial aggregates to produce the full-window result is cheap. Storing 10 full copies of the raw data would be prohibitive.
+**Configuration.**
 
-> **Interview trap.** "What happens to events that arrive after the watermark has passed their window?" If they arrive within `allowed_lateness`, the window is re-emitted with the updated result. If they arrive after `allowed_lateness` is exhausted, they're dropped. Setting `allowed_lateness = 0` means windows close immediately when the watermark passes — maximum throughput, no late-event tolerance.
+```yaml
+# pgcdc.yaml — streaming SQL view with event-time watermarks
+views:
+  - name: orders_per_5m
+    query: >
+      SELECT window_start, COUNT(*) as order_count, SUM(payload.amount) as revenue
+      FROM pgcdc_events
+      WHERE table_name = 'orders'
+      GROUP BY TUMBLING(5m)
+      EVENT TIME BY payload.created_at ALLOWED LATENESS 30s
+    emit: row
+```
+
+> **⚡ The Principle.** *"Arrival time is not event time. Confusing them means your windows are lying."*
+
+> **⚠️ Interview trap.** "Do sliding windows store N copies of the data?" No. A sliding window with W=10m, S=1m stores `ceil(10/1) = 10` partial aggregates — one per slide period. Each partial aggregate maintains the sufficient statistics for that period (count, sum, sum-of-squares for STDDEV). Merging 10 partial aggregates to produce the full-window result is cheap. Storing 10 full copies of the raw data would be prohibitive.
+
+> **⚠️ Interview trap.** "What happens to events that arrive after the watermark has passed their window?" If they arrive within `allowed_lateness`, the window is re-emitted with the updated result. If they arrive after `allowed_lateness` is exhausted, they're dropped. Setting `allowed_lateness = 0` means windows close immediately when the watermark passes — maximum throughput, no late-event tolerance.
 
 ---
 
 ## Chapter 8: "Your checkpoint is only as advanced as your slowest adapter."
+
+**Category:** `Durability` · **Concepts:** Cooperative checkpointing, min-LSN, delivery guarantees · **Files:** [`ack/tracker.go`](../ack/tracker.go)
 
 **The failure.** You have a pipeline with three adapters: stdout (fast), webhook (medium), and S3 Iceberg (slow — batches 1000 events before flushing). The stdout and webhook adapters have processed up to LSN 5,000,000. The S3 adapter has only flushed up to LSN 4,800,000 — it's waiting for the current batch to fill. The pipeline crashes. On restart, it resumes from the last confirmed checkpoint LSN — which is 4,800,000, the minimum across all adapters. The stdout and webhook adapters re-deliver events 4,800,001 through 5,000,000. Your webhook endpoint receives 200,000 duplicate events.
 
@@ -286,15 +563,57 @@ This is the convoy model: the fleet speed is the speed of the slowest truck. The
 
 > **Key insight.** The `Ack()` hot path must be lock-free. Every adapter calls it after every event delivery. At high throughput (hundreds of thousands of events per second), a mutex on the ack path becomes a bottleneck. The tracker uses `sync.Map` for storage (optimized for read-heavy, many-keys maps) with `atomic.CompareAndSwap` per adapter position — a spin loop that completes in nanoseconds under no contention.
 
-**How pgcdc does it.** `ack/tracker.go`: `adapters sync.Map` of `*adapterPos` structs with `atomic.Uint64` LSN fields. `MinAckedLSN()` iterates all adapters (called every ~10s, not on hot path). `Register`/`Deregister` take a mutex (called at startup/shutdown only).
+**How pgcdc does it.** [`ack/tracker.go`](../ack/tracker.go): `adapters sync.Map` of `*adapterPos` structs with `atomic.Uint64` LSN fields. `MinAckedLSN()` iterates all adapters (called every ~10s, not on hot path). `Register`/`Deregister` take a mutex (called at startup/shutdown only).
 
-> **The Principle.** *"Your checkpoint is only as advanced as your slowest adapter."*
+```go
+// ack/tracker.go — lock-free LSN advance via CAS
+func (t *Tracker) Ack(name string, lsn uint64) {
+	val, ok := t.adapters.Load(name)
+	if !ok {
+		return
+	}
+	pos := val.(*adapterPos)
+	for {
+		cur := pos.lsn.Load()
+		if lsn <= cur {
+			return // already at or ahead of this LSN
+		}
+		if pos.lsn.CompareAndSwap(cur, lsn) {
+			return
+		}
+		// another goroutine advanced it concurrently — retry
+	}
+}
+```
 
-> **Interview trap.** "In Kafka, exactly-once means what exactly?" Exactly-once in Kafka means within a topic partition, using the idempotent producer + transactional API. For a Kafka producer sending to partition 3, exactly-once means each message appears in the partition log exactly once even if the producer retries. For your HTTP webhook endpoint receiving events from Kafka, exactly-once is not Kafka's problem — it's your endpoint's problem, solved by idempotency keys on the consumer side. These are different guarantees at different layers.
+**Configuration.**
+
+```yaml
+# pgcdc.yaml — cooperative checkpointing (all adapters must ack)
+detector:
+  type: wal
+  cooperative_checkpoint: true
+  persistent_slot: true
+  checkpoint_db: postgres://user:pass@localhost/mydb
+
+# S3 adapter with explicit flush interval (controls WAL retention window)
+adapters:
+  s3:
+    bucket: my-cdc-archive
+    flush_interval: 60s    # WAL retained for at least 60s
+    flush_size: 10000      # or flush at 10k events
+    format: parquet
+```
+
+> **⚡ The Principle.** *"Your checkpoint is only as advanced as your slowest adapter."*
+
+> **⚠️ Interview trap.** "In Kafka, exactly-once means what exactly?" Exactly-once in Kafka means within a topic partition, using the idempotent producer + transactional API. For a Kafka producer sending to partition 3, exactly-once means each message appears in the partition log exactly once even if the producer retries. For your HTTP webhook endpoint receiving events from Kafka, exactly-once is not Kafka's problem — it's your endpoint's problem, solved by idempotency keys on the consumer side. These are different guarantees at different layers.
 
 ---
 
 ## Chapter 9: "Cache invalidation is a distributed consistency problem with a friendly name."
+
+**Category:** `Caching` · **Concepts:** Cache-aside, write-through, CDC invalidation, Redis primitives · **Files:** *(standalone — no pgcdc files)*
 
 **The failure.** You cached a user's billing address when they loaded the checkout page. Three days later, they updated their address in their profile. The cache TTL is 24 hours. They place an order. The order goes to the old address. The cache was stale and nobody noticed — the stale-read rate metric only fires when a stale read causes an observable error, and a stale address isn't an observable error until the package arrives at the wrong place.
 
@@ -332,15 +651,17 @@ Pros: cleaner application code. Cons: same thundering herd problem as cache-asid
 
 > **Key insight.** Cache invalidation is not a caching problem. It's a distributed consistency problem: you have two systems (database and cache) that must agree on the current value of a record, and writes to one must propagate to the other reliably and in order. The friendly name obscures the complexity. CDC-driven invalidation is the correct architecture at scale — it decouples the write path from the invalidation mechanism and makes the propagation observable.
 
-> **The Principle.** *"Cache invalidation is a distributed consistency problem with a friendly name."*
+> **⚡ The Principle.** *"Cache invalidation is a distributed consistency problem with a friendly name."*
 
-> **Interview trap.** "Cache-aside vs read-through — what's the difference?" Both check the cache, fall back to the DB on a miss, and return the result. The difference is who populates the cache on a miss: the application (cache-aside) or the caching layer itself (read-through). That difference matters for two reasons: thundering herd (the caching layer can implement request coalescing on a miss, the application layer typically cannot) and coupling (read-through requires the caching layer to know how to query the database, which couples two layers that are usually kept separate).
+> **⚠️ Interview trap.** "Cache-aside vs read-through — what's the difference?" Both check the cache, fall back to the DB on a miss, and return the result. The difference is who populates the cache on a miss: the application (cache-aside) or the caching layer itself (read-through). That difference matters for two reasons: thundering herd (the caching layer can implement request coalescing on a miss, the application layer typically cannot) and coupling (read-through requires the caching layer to know how to query the database, which couples two layers that are usually kept separate).
 
-> **Interview trap.** "What is a cache stampede and how do you prevent it?" Cache stampede (thundering herd) occurs when a popular cache key expires and many concurrent requests all miss simultaneously, all hitting the database at once. Prevention: probabilistic early expiration (re-fetch the value before it expires, with probability proportional to proximity to expiry — `P(refetch) ∝ 1/ttl_remaining`). This trades occasional unnecessary refetches for dramatic reduction in simultaneous miss spikes.
+> **⚠️ Interview trap.** "What is a cache stampede and how do you prevent it?" Cache stampede (thundering herd) occurs when a popular cache key expires and many concurrent requests all miss simultaneously, all hitting the database at once. Prevention: probabilistic early expiration (re-fetch the value before it expires, with probability proportional to proximity to expiry — `P(refetch) ∝ 1/ttl_remaining`). This trades occasional unnecessary refetches for dramatic reduction in simultaneous miss spikes.
 
 ---
 
 ## Chapter 10: "Consensus is the price you pay for having more than one machine."
+
+**Category:** `Consensus` · **Concepts:** Raft, leader election, quorum, CAP, split-brain · **Files:** *(standalone — no pgcdc files)*
 
 **The failure.** You have a two-node cluster. One node is the leader — it processes writes. The other is the follower — it replicates. The network between them partitions. Both nodes are still running. Both can receive requests. The leader keeps processing writes. The follower, having lost contact with the leader and seeing itself as potentially isolated, runs a leader election. It wins — it's the only voter it can reach. Now you have two leaders. Both are accepting writes. The cluster is in split-brain. When the partition heals, you have two diverged histories to reconcile.
 
@@ -374,15 +695,17 @@ Pros: cleaner application code. Cons: same thundering herd problem as cache-asid
 
 **Real systems:** etcd (Kubernetes state store — uses Raft), ZooKeeper (Kafka metadata — uses ZAB, a Paxos derivative), Consul (service discovery — uses Raft), CockroachDB (distributed SQL — uses Raft per range), TiKV (distributed KV — uses Raft per region). All are consensus systems at their core. The Raft paper by Ongaro and Ousterhout (2014) is the most readable introduction to these concepts.
 
-> **The Principle.** *"Consensus is the price you pay for having more than one machine."*
+> **⚡ The Principle.** *"Consensus is the price you pay for having more than one machine."*
 
-> **Interview trap.** "With 5 nodes, can you tolerate 3 failures?" No. `floor((5-1)/2) = 2`. You need 3 nodes to form a majority in a 5-node cluster. If 3 nodes fail, the remaining 2 cannot form a majority and the cluster becomes unavailable. This is a hard mathematical limit, not a configuration issue.
+> **⚠️ Interview trap.** "With 5 nodes, can you tolerate 3 failures?" No. `floor((5-1)/2) = 2`. You need 3 nodes to form a majority in a 5-node cluster. If 3 nodes fail, the remaining 2 cannot form a majority and the cluster becomes unavailable. This is a hard mathematical limit, not a configuration issue.
 
-> **Interview trap.** "Can you use a distributed lock to coordinate idempotency?" You can, but you shouldn't. A distributed lock has the same failure modes as any distributed system: the lock holder can die after acquiring the lock and before releasing it (the lease TTL eventually expires, but now you've had unavailability). If you design your operation to be idempotent by default (check-then-act with an idempotency key stored in the database in the same transaction as the operation), you don't need the lock at all.
+> **⚠️ Interview trap.** "Can you use a distributed lock to coordinate idempotency?" You can, but you shouldn't. A distributed lock has the same failure modes as any distributed system: the lock holder can die after acquiring the lock and before releasing it (the lease TTL eventually expires, but now you've had unavailability). If you design your operation to be idempotent by default (check-then-act with an idempotency key stored in the database in the same transaction as the operation), you don't need the lock at all.
 
 ---
 
 ## Chapter 11: "Lock-free is not the same as wait-free. Both beat the mutex, but not equally."
+
+**Category:** `Concurrency` · **Concepts:** Lock-free, COW, wait-free, token bucket rate limiting · **Files:** [`bus/bus.go`](../bus/bus.go), [`internal/ratelimit/ratelimit.go`](../internal/ratelimit/ratelimit.go)
 
 **The failure.** You add a fifth adapter to a pipeline that was handling four adapters comfortably. The p99 event latency doubles. You add a sixth adapter and it doubles again. You look at profiling data and find that `sync.Mutex` contention in the bus subscriber list accounts for 40% of CPU time on the dispatch hot path. Every event dispatch acquires the mutex to read the subscriber list, even though the list almost never changes.
 
@@ -404,17 +727,46 @@ Token bucket allows bursts: if traffic was quiet, tokens accumulate, and a burst
 
 > **Key insight.** The dispatch hot path must never acquire a lock. Even a lightly-contended mutex adds microseconds of latency per event under load and creates false sharing between CPU cores. For a fanout system with millions of events per second, this is the difference between throughput scaling linearly with adapter count and throughput collapsing under contention.
 
-**How pgcdc does it.** `bus/bus.go`: `subsPtr atomic.Pointer[subscriberList]`. `Subscribe()` uses a mutex to build the new slice safely, then `Store()`s it atomically. The dispatch loop (inside `Start()`) does `subs := b.subsPtr.Load()` once per event cycle, then iterates with no lock. `internal/ratelimit/ratelimit.go` wraps `golang.org/x/time/rate` (token bucket). The rate limiter is wired into the middleware chain for `Deliverer` adapters.
+**How pgcdc does it.** [`bus/bus.go`](../bus/bus.go): `subsPtr atomic.Pointer[subscriberList]`. `Subscribe()` uses a mutex to build the new slice safely, then `Store()`s it atomically. The dispatch loop (inside `Start()`) does `subs := b.subsPtr.Load()` once per event cycle, then iterates with no lock. [`internal/ratelimit/ratelimit.go`](../internal/ratelimit/ratelimit.go) wraps `golang.org/x/time/rate` (token bucket). The rate limiter is wired into the middleware chain for `Deliverer` adapters.
 
-> **The Principle.** *"Lock-free is not the same as wait-free. Both beat the mutex, but not equally."*
+```go
+// bus/bus.go — copy-on-write subscribe (cold path, mutex ok)
+func (b *Bus) Subscribe(name string, ch chan event.Event) {
+	b.subsMu.Lock()
+	defer b.subsMu.Unlock()
+	old := b.subsPtr.Load()
+	newSubs := make([]subscriber, len(old.subs)+1)
+	copy(newSubs, old.subs)
+	newSubs[len(old.subs)] = subscriber{name: name, ch: ch}
+	b.subsPtr.Store(&subscriberList{subs: newSubs})
+}
 
-> **Interview trap.** "Is `sync.Map` always better than `map` + `sync.Mutex`?" No. `sync.Map` is optimized for two specific access patterns: (1) many goroutines reading the same stable set of keys, or (2) each goroutine reads/writes a disjoint set of keys. For a map with frequent writes to the same keys across goroutines, `sync.Map` can be slower than `map` + `RWMutex` due to the internal locking it uses for the "dirty" map. Read the documentation before reaching for it.
+// hot path — one atomic load, no lock
+subs := b.subsPtr.Load()
+for _, sub := range subs.subs { ... }
+```
 
-> **Interview trap.** "Rate limiting with a blocking call backs up the pipeline, right?" Yes. If the token bucket is empty, `Wait(ctx)` blocks until a token is available or the context cancels. That blocking propagates: the middleware goroutine blocks, the per-adapter channel fills, the bus dispatch goroutine blocks (reliable mode) or drops events (fast mode). Rate limiting is not free — it converts excess throughput into either latency (reliable) or loss (fast). Choose based on which you prefer.
+**Configuration.**
+
+```yaml
+# pgcdc.yaml — token bucket rate limiting per adapter
+adapters:
+  webhook:
+    rate_limit: 200         # 200 events/sec steady state
+    rate_limit_burst: 500   # allow bursts up to 500
+```
+
+> **⚡ The Principle.** *"Lock-free is not the same as wait-free. Both beat the mutex, but not equally."*
+
+> **⚠️ Interview trap.** "Is `sync.Map` always better than `map` + `sync.Mutex`?" No. `sync.Map` is optimized for two specific access patterns: (1) many goroutines reading the same stable set of keys, or (2) each goroutine reads/writes a disjoint set of keys. For a map with frequent writes to the same keys across goroutines, `sync.Map` can be slower than `map` + `RWMutex` due to the internal locking it uses for the "dirty" map. Read the documentation before reaching for it.
+
+> **⚠️ Interview trap.** "Rate limiting with a blocking call backs up the pipeline, right?" Yes. If the token bucket is empty, `Wait(ctx)` blocks until a token is available or the context cancels. That blocking propagates: the middleware goroutine blocks, the per-adapter channel fills, the bus dispatch goroutine blocks (reliable mode) or drops events (fast mode). Rate limiting is not free — it converts excess throughput into either latency (reliable) or loss (fast). Choose based on which you prefer.
 
 ---
 
 ## Chapter 12: "A schema change is a contract change. Treat it like one."
+
+**Category:** `Schema` · **Concepts:** Schema evolution, CloudEvents, Debezium, middleware composition, init() · **Files:** [`transform/cloudevents.go`](../transform/cloudevents.go), [`encoding/avro.go`](../encoding/avro.go), [`adapter/middleware/middleware.go`](../adapter/middleware/middleware.go)
 
 **The failure.** A backend team renames `user_id` to `userId` in their PostgreSQL schema. They update their application. WAL events start flowing with the new field name. Your downstream consumers — a Kafka consumer, a Redis adapter, a webhook endpoint — were written expecting `user_id`. They break silently: the field is missing, so they use a default value or null, and nobody notices until a monitoring alert fires 40 minutes later when a downstream aggregate goes to zero.
 
@@ -444,13 +796,48 @@ Adding a new cross-cutting concern means adding one middleware implementation an
 
 > **Key insight.** Schema changes are contract changes. A field rename is not a refactor — it's a breaking API change, the same as renaming a function in a public library. The tools that make schema changes non-breaking (Avro schema evolution, backward-compatible CloudEvents types, field addition with defaults) all require treating the schema as a versioned contract with explicit compatibility rules from the start.
 
-**How pgcdc does it.** `transform/cloudevents.go`, `transform/debezium.go` (envelope wrapping as transforms). `encoding/avro.go`, `encoding/registry/` (Confluent Schema Registry client). `adapter/middleware/middleware.go` `Stack()` function (compose in reverse). `registry/registry.go` + `cmd/register_*.go` (self-registration via `init()`). `registry/spec.go` `ParamSpec` + `ConnectorSpec` for `pgcdc describe` introspection — each adapter and detector can describe its own parameters.
+**How pgcdc does it.** [`transform/cloudevents.go`](../transform/cloudevents.go), [`transform/debezium.go`](../transform/debezium.go) (envelope wrapping as transforms). [`encoding/avro.go`](../encoding/avro.go), [`encoding/registry/`](../encoding/registry/) (Confluent Schema Registry client). [`adapter/middleware/middleware.go`](../adapter/middleware/middleware.go) `Stack()` function (compose in reverse). [`registry/registry.go`](../registry/registry.go) + [`cmd/register_*.go`](../cmd/) (self-registration via `init()`). [`registry/spec.go`](../registry/spec.go) `ParamSpec` + `ConnectorSpec` for `pgcdc describe` introspection — each adapter and detector can describe its own parameters.
 
-> **The Principle.** *"A schema change is a contract change. Treat it like one."*
+```go
+// adapter/middleware/middleware.go — Stack: reverse iteration = correct wrapping order
+func Stack(mws ...Middleware) Middleware {
+	return func(next DeliverFunc) DeliverFunc {
+		for i := len(mws) - 1; i >= 0; i-- {
+			next = mws[i](next)
+		}
+		return next
+		// result: mws[0](mws[1](mws[2](...(deliver)...)))
+		// mws[0] is called first on each event, mws[last] is closest to deliver
+	}
+}
+```
 
-> **Interview trap.** "Why does middleware composition iterate in reverse?" Because wrapping creates nesting. If you iterate `[A, B, C]` forward, you get `C(B(A(deliver)))` — C is outermost, A is closest to delivery. If you want A outermost (A sees the final outcome, including retries in B and C), you need to wrap in reverse. The end-to-end order — from first call to actual delivery — is the order of the original list. Reverse iteration means the first element in your list is the first to be called and the last to return.
+**Configuration.**
 
-> **Interview trap.** "Can Go `init()` order be controlled?" Within a single package, `init()` functions in multiple files run in the order the files are passed to the compiler (alphabetical by filename is the convention, but not guaranteed). Across packages, `init()` runs in import order — a package's `init()` runs after all its dependencies' `init()` functions. You cannot control `init()` order between sibling packages in the same binary. This is why the registry pattern works: each adapter's `init()` calls `registry.RegisterAdapter()`, and the registry is a simple append-to-slice operation that doesn't depend on the order registrations arrive.
+```yaml
+# pgcdc.yaml — Avro encoding with Confluent Schema Registry
+adapters:
+  kafka:
+    brokers: [kafka:9092]
+    topic: cdc-events
+    encoding: avro
+
+encoding:
+  schema_registry_url: http://schema-registry:8081
+  schema_registry_subject: cdc-events-value
+
+# Transform: wrap in CloudEvents envelope before delivery
+transforms:
+  - type: cloudevents
+    source: pgcdc/mydb
+    type_prefix: com.example.db
+```
+
+> **⚡ The Principle.** *"A schema change is a contract change. Treat it like one."*
+
+> **⚠️ Interview trap.** "Why does middleware composition iterate in reverse?" Because wrapping creates nesting. If you iterate `[A, B, C]` forward, you get `C(B(A(deliver)))` — C is outermost, A is closest to delivery. If you want A outermost (A sees the final outcome, including retries in B and C), you need to wrap in reverse. The end-to-end order — from first call to actual delivery — is the order of the original list. Reverse iteration means the first element in your list is the first to be called and the last to return.
+
+> **⚠️ Interview trap.** "Can Go `init()` order be controlled?" Within a single package, `init()` functions in multiple files run in the order the files are passed to the compiler (alphabetical by filename is the convention, but not guaranteed). Across packages, `init()` runs in import order — a package's `init()` runs after all its dependencies' `init()` functions. You cannot control `init()` order between sibling packages in the same binary. This is why the registry pattern works: each adapter's `init()` calls `registry.RegisterAdapter()`, and the registry is a simple append-to-slice operation that doesn't depend on the order registrations arrive.
 
 ---
 
@@ -513,35 +900,35 @@ Context ──> Pipeline (pgcdc.go orchestrates everything)
 
 | Concept | Primary file |
 |---|---|
-| Pipeline orchestration | `pgcdc.go` |
-| Structured concurrency | `pgcdc.go` (`safeGo`, `errgroup`) |
-| Graceful shutdown / Drainer | `pgcdc.go` (`drainAdapters`), `adapter/adapter.go` |
-| Hot reload (atomic pointer swap) | `pgcdc.go` (`Reload`, `wrapperConfigs`), `cmd/reload.go` |
-| Event bus fan-out (COW) | `bus/bus.go` |
-| Backpressure zones (proportional) | `backpressure/backpressure.go` |
-| Circuit breaker (3-state FSM) | `internal/circuitbreaker/circuitbreaker.go` |
-| Retry + full jitter | `adapter/middleware/retry.go` |
-| Token bucket rate limiting | `internal/ratelimit/ratelimit.go` |
-| Dead letter queue | `dlq/dlq.go`, `adapter/middleware/dlq.go` |
-| Sliding nack window | `dlq/window.go` |
-| Middleware chain (composition) | `adapter/middleware/middleware.go` |
-| Transform chain + JSON cache | `transform/transform.go` |
-| WAL logical replication | `detector/walreplication/walreplication.go` |
-| TOAST LRU cache | `detector/walreplication/toastcache/` |
-| Outbox (SKIP LOCKED) | `detector/outbox/outbox.go` |
-| Cooperative checkpointing | `ack/tracker.go` |
-| Tumbling windows | `view/window.go` |
-| Sliding windows (Welford STDDEV) | `view/sliding_window.go` |
-| Session windows | `view/session_window.go` |
-| Event-time watermarks | `view/engine.go` |
-| Interval joins | `view/join.go` |
-| CloudEvents / Debezium transforms | `transform/cloudevents.go`, `transform/debezium.go` |
-| Avro + Schema Registry | `encoding/avro.go`, `encoding/registry/` |
-| CEL filter | `cel/`, `transform/transform.go` |
+| Pipeline orchestration | [`pgcdc.go`](../pgcdc.go) |
+| Structured concurrency | [`pgcdc.go`](../pgcdc.go) (`safeGo`, `errgroup`) |
+| Graceful shutdown / Drainer | [`pgcdc.go`](../pgcdc.go) (`drainAdapters`), `adapter/adapter.go` |
+| Hot reload (atomic pointer swap) | [`pgcdc.go`](../pgcdc.go) (`Reload`, `wrapperConfigs`), `cmd/reload.go` |
+| Event bus fan-out (COW) | [`bus/bus.go`](../bus/bus.go) |
+| Backpressure zones (proportional) | [`backpressure/backpressure.go`](../backpressure/backpressure.go) |
+| Circuit breaker (3-state FSM) | [`internal/circuitbreaker/circuitbreaker.go`](../internal/circuitbreaker/circuitbreaker.go) |
+| Retry + full jitter | [`adapter/middleware/retry.go`](../adapter/middleware/retry.go) |
+| Token bucket rate limiting | [`internal/ratelimit/ratelimit.go`](../internal/ratelimit/ratelimit.go) |
+| Dead letter queue | [`dlq/dlq.go`](../dlq/dlq.go), [`adapter/middleware/dlq.go`](../adapter/middleware/dlq.go) |
+| Sliding nack window | [`dlq/window.go`](../dlq/window.go) |
+| Middleware chain (composition) | [`adapter/middleware/middleware.go`](../adapter/middleware/middleware.go) |
+| Transform chain + JSON cache | [`transform/transform.go`](../transform/transform.go) |
+| WAL logical replication | [`detector/walreplication/walreplication.go`](../detector/walreplication/walreplication.go) |
+| TOAST LRU cache | [`detector/walreplication/toastcache/`](../detector/walreplication/toastcache/) |
+| Outbox (SKIP LOCKED) | [`detector/outbox/outbox.go`](../detector/outbox/outbox.go) |
+| Cooperative checkpointing | [`ack/tracker.go`](../ack/tracker.go) |
+| Tumbling windows | [`view/window.go`](../view/window.go) |
+| Sliding windows (Welford STDDEV) | [`view/sliding_window.go`](../view/sliding_window.go) |
+| Session windows | [`view/session_window.go`](../view/session_window.go) |
+| Event-time watermarks | [`view/engine.go`](../view/engine.go) |
+| Interval joins | [`view/join.go`](../view/join.go) |
+| CloudEvents / Debezium transforms | [`transform/cloudevents.go`](../transform/cloudevents.go), [`transform/debezium.go`](../transform/debezium.go) |
+| Avro + Schema Registry | [`encoding/avro.go`](../encoding/avro.go), [`encoding/registry/`](../encoding/registry/) |
+| CEL filter | [`cel/`](../cel/), [`transform/transform.go`](../transform/transform.go) |
 | Wasm plugins (Extism) | `plugin/wasm/runtime.go` |
-| Ring buffer inspector | `inspect/` |
-| Self-registering registry | `registry/registry.go`, `cmd/register_*.go` |
-| Connector specs (describe) | `registry/spec.go` |
+| Ring buffer inspector | [`inspect/`](../inspect/) |
+| Self-registering registry | [`registry/registry.go`](../registry/registry.go), [`cmd/register_*.go`](../cmd/) |
+| Connector specs (describe) | [`registry/spec.go`](../registry/spec.go) |
 | Multi-pipeline server | `server/manager.go` |
 | Schema store | `schema/` |
 
