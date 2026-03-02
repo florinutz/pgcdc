@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/florinutz/pgcdc/internal/logcolor"
 	"github.com/florinutz/pgcdc/tracing"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -38,7 +39,7 @@ func init() {
 
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default: ./pgcdc.yaml)")
 	rootCmd.PersistentFlags().String("log-level", "info", "log level: debug, info, warn, error")
-	rootCmd.PersistentFlags().String("log-format", "text", "log format: text, json")
+	rootCmd.PersistentFlags().String("log-format", "auto", "log format: text, json, color, auto")
 
 	mustBindPFlag("log_level", rootCmd.PersistentFlags().Lookup("log-level"))
 	mustBindPFlag("log_format", rootCmd.PersistentFlags().Lookup("log-format"))
@@ -97,8 +98,16 @@ func setupLogger() error {
 		handler = slog.NewTextHandler(os.Stderr, opts)
 	case "json":
 		handler = slog.NewJSONHandler(os.Stderr, opts)
+	case "color":
+		handler = logcolor.NewHandler(os.Stderr, opts)
+	case "auto", "":
+		if logcolor.ShouldColor(os.Stderr.Fd(), format) {
+			handler = logcolor.NewHandler(os.Stderr, opts)
+		} else {
+			handler = slog.NewTextHandler(os.Stderr, opts)
+		}
 	default:
-		return fmt.Errorf("unknown log format: %q (expected text, json)", format)
+		return fmt.Errorf("unknown log format: %q (expected text, json, color, auto)", format)
 	}
 
 	slog.SetDefault(slog.New(tracing.NewTracingHandler(handler)))
