@@ -35,8 +35,8 @@ func TestScenario_Reconnection(t *testing.T) {
 	})
 
 	t.Run("events resume after reconnect", func(t *testing.T) {
-		// Kill the detector's PG connection.
-		terminateBackends(t, connStr)
+		// Kill the detector's LISTEN connection.
+		terminateListenBackend(t, connStr, "reconnect_test")
 
 		// Drain any leftover lines from previous subtest.
 		capture.drain()
@@ -70,17 +70,22 @@ func TestScenario_WALReconnection(t *testing.T) {
 	t.Parallel()
 	connStr := startPostgres(t)
 
-	createTable(t, connStr, "wal_reconnect_orders")
-	createPublication(t, connStr, "pgcdc_wal_reconnect", "wal_reconnect_orders")
+	table := "wal_reconnect_orders"
+	pubName := "pgcdc_wal_reconnect"
+	slotName := "pgcdc_wal_reconn_slot"
+
+	createTable(t, connStr, table)
+	createPublication(t, connStr, pubName, table)
+	t.Cleanup(func() { dropReplicationSlot(t, connStr, slotName) })
 
 	capture := newLineCapture()
-	startWALPipeline(t, connStr, "pgcdc_wal_reconnect", stdout.New(capture, testLogger()))
+	startWALPipelineWithSlot(t, connStr, pubName, slotName, stdout.New(capture, testLogger()))
 
 	// Wait for replication slot setup.
-	waitForWALDetector(t, connStr, "wal_reconnect_orders", capture)
+	waitForWALDetector(t, connStr, table, capture)
 
 	t.Run("happy path", func(t *testing.T) {
-		insertRow(t, connStr, "wal_reconnect_orders", map[string]any{"key": "value"})
+		insertRow(t, connStr, table, map[string]any{"key": "value"})
 
 		line := capture.waitLine(t, 10*time.Second)
 
@@ -97,7 +102,7 @@ func TestScenario_WALReconnection(t *testing.T) {
 	})
 
 	t.Run("events resume after WAL reconnect", func(t *testing.T) {
-		terminateBackends(t, connStr)
+		terminateSlotBackend(t, connStr, slotName)
 		capture.drain()
 
 		deadline := time.After(30 * time.Second)

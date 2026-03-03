@@ -32,6 +32,7 @@ func TestScenario_CooperativeCheckpoint(t *testing.T) {
 		pubName := "pgcdc_coop_happy"
 		slotName := "pgcdc_coop_happy_slot"
 
+		ensurePGCDCTables(t, connStr)
 		createTable(t, connStr, table)
 		createPublication(t, connStr, pubName, table)
 		t.Cleanup(func() { dropReplicationSlot(t, connStr, slotName) })
@@ -66,8 +67,10 @@ func TestScenario_CooperativeCheckpoint(t *testing.T) {
 		pipelineErr := make(chan error, 1)
 		go func() { pipelineErr <- p.Run(ctx) }()
 
-		// Wait for slot setup and replication to start.
-		time.Sleep(3 * time.Second)
+		// Wait for WAL detector to be ready, then drain leftover probe events.
+		waitForWALDetector(t, connStr, table, capture)
+		time.Sleep(500 * time.Millisecond)
+		capture.drain()
 
 		// Insert rows and verify events arrive with LSN set.
 		for i := range 3 {
@@ -85,11 +88,14 @@ func TestScenario_CooperativeCheckpoint(t *testing.T) {
 			}
 		}
 
-		// Wait for standby status interval + some buffer.
-		time.Sleep(12 * time.Second)
-
-		// Checkpoint should have advanced: stdout acked all events.
-		lsn := queryCheckpoint(t, connStr, slotName)
+		// Poll for the checkpoint to advance. The standby status interval is 10s,
+		// so we need to wait long enough for at least one cycle to fire.
+		// Under parallel load, the status cycle may be delayed.
+		var lsn uint64
+		waitFor(t, 45*time.Second, func() bool {
+			lsn = queryCheckpoint(t, connStr, slotName)
+			return lsn > 0
+		})
 		if lsn == 0 {
 			t.Error("cooperative checkpoint: expected checkpoint LSN > 0, got 0")
 		}
@@ -114,6 +120,7 @@ func TestScenario_CooperativeCheckpoint(t *testing.T) {
 		pubName := "pgcdc_coop_slow"
 		slotName := "pgcdc_coop_slow_slot"
 
+		ensurePGCDCTables(t, connStr)
 		createTable(t, connStr, table)
 		createPublication(t, connStr, pubName, table)
 		t.Cleanup(func() { dropReplicationSlot(t, connStr, slotName) })
@@ -156,7 +163,20 @@ func TestScenario_CooperativeCheckpoint(t *testing.T) {
 		pipelineErr := make(chan error, 1)
 		go func() { pipelineErr <- p.Run(ctx) }()
 
-		time.Sleep(3 * time.Second)
+		// Wait for WAL detector to be ready. We use reliable bus mode with a
+		// blocking slow adapter, so each probe event occupies a slot in the
+		// slow adapter's channel that never gets drained. Keep probes minimal
+		// to avoid filling the 64-slot buffer and deadlocking the bus.
+		waitFor(t, 30*time.Second, func() bool {
+			insertRow(t, connStr, table, map[string]any{"item": "__probe"})
+			time.Sleep(1 * time.Second)
+			select {
+			case <-capture.lines:
+				return true
+			default:
+				return false
+			}
+		})
 
 		// Insert rows.
 		for i := range 3 {
@@ -169,15 +189,22 @@ func TestScenario_CooperativeCheckpoint(t *testing.T) {
 		}
 
 		// Wait past standby interval; slow adapter hasn't acked yet.
-		time.Sleep(12 * time.Second)
+		// Wait past standby interval; slow adapter hasn't acked yet.
+		// The checkpoint might be 0 (slow adapter holds ack back).
+		time.Sleep(15 * time.Second)
 		lsnBefore := queryCheckpoint(t, connStr, slotName)
 
 		// Release slow adapter.
 		close(holdCh)
 
-		// Wait for another standby interval.
-		time.Sleep(12 * time.Second)
-		lsnAfter := queryCheckpoint(t, connStr, slotName)
+		// Poll for the checkpoint to advance beyond lsnBefore.
+		// The slow adapter needs time to process buffered events and at least
+		// one standby status cycle (10s) must fire to flush the ack to PG.
+		var lsnAfter uint64
+		waitFor(t, 45*time.Second, func() bool {
+			lsnAfter = queryCheckpoint(t, connStr, slotName)
+			return lsnAfter > lsnBefore
+		})
 
 		// After release: checkpoint should have advanced.
 		if lsnAfter <= lsnBefore {

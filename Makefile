@@ -1,7 +1,7 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X github.com/florinutz/pgcdc/cmd.Version=$(VERSION)
 
-.PHONY: build build-slim build-slim-stripped size test test-scenarios test-all lint vet fmt bench bench-unit bench-compare bench-save bench-debezium fuzz coverage coverage-gate test-smoke docker-build docker-up docker-down clean help
+.PHONY: build build-slim build-slim-stripped size test test-scenarios test-scenarios-fast test-scenarios-docker test-all lint vet fmt bench bench-unit bench-compare bench-save bench-debezium fuzz coverage coverage-gate test-smoke docker-build docker-up docker-down clean help
 
 SLIM_TAGS := no_kafka,no_grpc,no_iceberg,no_nats,no_redis,no_plugins,no_views
 
@@ -26,9 +26,21 @@ size: build build-slim
 test:
 	go test -race -count=1 -timeout=30s $$(go list ./... | grep -v /scenarios)
 
-## test-scenarios: Run scenario tests (requires Docker)
-test-scenarios:
-	go test -race -count=1 -timeout=600s -tags=integration -parallel 8 ./scenarios/...
+# Tests requiring external Docker containers (run at lower parallelism)
+DOCKER_SCENARIOS = TestScenario_KafkaAdapter|TestScenario_Encoding|TestScenario_MongoDB|TestScenario_MySQL|TestScenario_S3|TestScenario_Iceberg|TestScenario_Redis|TestScenario_Search|TestScenario_Nats
+
+## test-scenarios-fast: PG-only scenario tests (no external containers)
+test-scenarios-fast:
+	go test -race -count=1 -timeout=300s -tags=integration -parallel 8 \
+		-skip '$(DOCKER_SCENARIOS)' ./scenarios/...
+
+## test-scenarios-docker: Scenario tests with external containers
+test-scenarios-docker:
+	go test -race -count=1 -timeout=600s -tags=integration -parallel 4 \
+		-run '$(DOCKER_SCENARIOS)' ./scenarios/...
+
+## test-scenarios: All scenario tests (fast tier then docker tier)
+test-scenarios: test-scenarios-fast test-scenarios-docker
 
 ## test-all: Run unit + scenario tests
 test-all: test test-scenarios

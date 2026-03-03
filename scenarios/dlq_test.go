@@ -29,6 +29,7 @@ func TestScenario_DLQCommands(t *testing.T) {
 		channel := "dlq_happy"
 		dlqTable := "pgcdc_dlq_test_happy"
 
+		ensureDLQTable(t, connStr, dlqTable)
 		logger := testLogger()
 		pipelineCtx, pipelineCancel := context.WithCancel(context.Background())
 
@@ -87,7 +88,7 @@ func TestScenario_DLQCommands(t *testing.T) {
 		_ = g.Wait()
 
 		// 3. pgcdc dlq list → record visible.
-		listOut, listErr := runPGCDC("dlq", "list", "--db", connStr, "--dlq-table", dlqTable, "--format", "json")
+		listOut, listErr := runPGCDC("dlq", "list", "--db", connStr, "--dlq-table", dlqTable, "--output", "json")
 		if listErr != nil {
 			t.Fatalf("dlq list: %v\n%s", listErr, listOut)
 		}
@@ -126,7 +127,7 @@ func TestScenario_DLQCommands(t *testing.T) {
 		}
 
 		// 6. pgcdc dlq list --pending → no records.
-		pendingOut, pendingErr := runPGCDC("dlq", "list", "--db", connStr, "--dlq-table", dlqTable, "--pending", "--format", "json")
+		pendingOut, pendingErr := runPGCDC("dlq", "list", "--db", connStr, "--dlq-table", dlqTable, "--pending", "--output", "json")
 		if pendingErr != nil {
 			t.Fatalf("dlq list --pending: %v\n%s", pendingErr, pendingOut)
 		}
@@ -168,6 +169,7 @@ func TestScenario_DLQCommands(t *testing.T) {
 
 	t.Run("replay failure: adapter still failing", func(t *testing.T) {
 		dlqTable := "pgcdc_dlq_test_fail"
+		ensureDLQTable(t, connStr, dlqTable)
 
 		// Seed a DLQ record directly.
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

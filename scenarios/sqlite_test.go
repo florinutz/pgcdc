@@ -66,7 +66,7 @@ func TestScenario_SQLiteDetector(t *testing.T) {
 			_ = g.Wait()
 		})
 
-		line := capture.waitLine(t, 5*time.Second)
+		line := capture.waitLine(t, 15*time.Second)
 		var ev event.Event
 		if err := json.Unmarshal([]byte(line), &ev); err != nil {
 			t.Fatalf("invalid JSON: %v\nraw: %s", err, line)
@@ -144,17 +144,19 @@ func TestScenario_SQLiteDetector(t *testing.T) {
 			_ = g.Wait()
 		})
 
-		_ = capture.waitLine(t, 5*time.Second)
+		_ = capture.waitLine(t, 15*time.Second)
 
+		// The detector commits processed=1 after sending the event to the bus,
+		// so poll until the commit lands.
 		db2, err := sql.Open("sqlite", dbPath)
 		if err != nil {
 			t.Fatalf("reopen sqlite: %v", err)
 		}
 		defer db2.Close()
-		var processed int
-		db2.QueryRow("SELECT processed FROM pgcdc_changes WHERE table_name = 'users'").Scan(&processed)
-		if processed != 1 {
-			t.Errorf("expected processed=1, got %d", processed)
-		}
+		waitFor(t, 5*time.Second, func() bool {
+			var processed int
+			db2.QueryRow("SELECT processed FROM pgcdc_changes WHERE table_name = 'users'").Scan(&processed)
+			return processed == 1
+		})
 	})
 }

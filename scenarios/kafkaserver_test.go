@@ -51,8 +51,8 @@ func TestScenario_KafkaServer(t *testing.T) {
 			_ = g.Wait()
 		})
 
-		// Wait for the TCP server to start.
-		time.Sleep(500 * time.Millisecond)
+		// Wait for the TCP server to start and the LISTEN/NOTIFY detector to connect.
+		time.Sleep(2 * time.Second)
 
 		// Connect a franz-go consumer to our Kafka protocol server.
 		// The topic should be "ks_orders" (channel has no colon, so no replacement).

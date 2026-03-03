@@ -155,7 +155,7 @@ func TestScenario_Iceberg(t *testing.T) {
 
 		// Insert a row to trigger initial table creation.
 		insertRow(t, connStr, "iceberg_events", map[string]any{"item": "first"})
-		time.Sleep(2 * time.Second)
+		time.Sleep(4 * time.Second)
 
 		// Make the data directory read-only to force write failures.
 		dataDir := filepath.Join(warehouse, "pgcdc", "retry_test", "data")
@@ -165,14 +165,14 @@ func TestScenario_Iceberg(t *testing.T) {
 
 		// Insert more rows — these should fail to flush.
 		insertRow(t, connStr, "iceberg_events", map[string]any{"item": "blocked"})
-		time.Sleep(2 * time.Second)
+		time.Sleep(4 * time.Second)
 
 		// Restore write permissions — next flush should succeed.
 		if err := os.Chmod(dataDir, 0o755); err != nil {
 			t.Fatalf("restore chmod: %v", err)
 		}
 
-		time.Sleep(2 * time.Second)
+		time.Sleep(4 * time.Second)
 
 		// Verify the blocked event was eventually written.
 		entries, err := os.ReadDir(dataDir)

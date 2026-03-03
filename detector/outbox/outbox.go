@@ -152,8 +152,10 @@ func (d *Detector) poll(ctx context.Context, conn *pgx.Conn, safeTable string, e
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	// SELECT rows FOR UPDATE SKIP LOCKED — safe for concurrent pgcdc instances.
+	// Only pick up unprocessed rows (processed_at IS NULL). This is essential
+	// when keepProcessed=true because rows stay in the table after processing.
 	query := fmt.Sprintf(
-		"SELECT id, channel, operation, payload FROM %s ORDER BY created_at LIMIT $1 FOR UPDATE SKIP LOCKED",
+		"SELECT id, channel, operation, payload FROM %s WHERE processed_at IS NULL ORDER BY created_at LIMIT $1 FOR UPDATE SKIP LOCKED",
 		safeTable,
 	)
 	rows, err := tx.Query(ctx, query, d.batchSize)

@@ -106,10 +106,10 @@ func TestScenario_Search(t *testing.T) {
 		payload := `{"op":"INSERT","table":"articles","row":{"id":"42","title":"Hello World","body":"Test body"}}`
 		sendNotify(t, connStr, channel, payload)
 
-		// Wait for the search adapter to flush.
-		time.Sleep(2 * time.Second)
-
-		// Verify document exists in Typesense.
+		// Wait for the document to appear in Typesense.
+		waitFor(t, 10*time.Second, func() bool {
+			return docExists(t, tsURL, apiKey, indexName, "42")
+		})
 		doc := getTypesenseDocument(t, tsURL, apiKey, indexName, "42")
 		if doc["title"] != "Hello World" {
 			t.Errorf("title = %v, want %q", doc["title"], "Hello World")
@@ -119,13 +119,10 @@ func TestScenario_Search(t *testing.T) {
 		deletePayload := `{"op":"DELETE","table":"articles","row":{"id":"42","title":"Hello World","body":"Test body"}}`
 		sendNotify(t, connStr, channel, deletePayload)
 
-		// Wait for the delete to process.
-		time.Sleep(2 * time.Second)
-
-		// Verify document is removed.
-		if docExists(t, tsURL, apiKey, indexName, "42") {
-			t.Error("document should have been deleted from Typesense")
-		}
+		// Wait for the document to be removed.
+		waitFor(t, 10*time.Second, func() bool {
+			return !docExists(t, tsURL, apiKey, indexName, "42")
+		})
 	})
 }
 

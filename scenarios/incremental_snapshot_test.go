@@ -27,7 +27,7 @@ func TestScenario_IncrementalSnapshot(t *testing.T) {
 		signalTable := "incr_snap_signals"
 		pubName := "pgcdc_incr_snap"
 
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 		defer cancel()
 
 		// Create tables and publication.
@@ -111,8 +111,26 @@ func TestScenario_IncrementalSnapshot(t *testing.T) {
 		g.Go(func() error { return stdoutAdapter.Start(gCtx, sub) })
 		g.Go(func() error { return walDet.Start(gCtx, b.Ingest()) })
 
-		// Give WAL streaming time to start.
-		time.Sleep(3 * time.Second)
+		// Wait for WAL detector to be ready by inserting probe rows until one arrives.
+		// Can't use waitForWALDetector since this table has (id, name) not (data JSONB).
+		waitFor(t, 30*time.Second, func() bool {
+			func() {
+				c, err := pgx.Connect(ctx, connStr)
+				if err != nil {
+					return
+				}
+				defer c.Close(ctx)
+				_, _ = c.Exec(ctx, fmt.Sprintf("INSERT INTO %s (name) VALUES ($1)", pgx.Identifier{table}.Sanitize()), "__probe")
+			}()
+			time.Sleep(500 * time.Millisecond)
+			select {
+			case <-capture.lines:
+				return true
+			default:
+				return false
+			}
+		})
+		capture.drain()
 
 		// Insert a live row — verify WAL event arrives.
 		func() {
@@ -127,7 +145,7 @@ func TestScenario_IncrementalSnapshot(t *testing.T) {
 			}
 		}()
 
-		liveEvent := waitForEvent(t, capture, 10*time.Second, func(ev event.Event) bool {
+		liveEvent := waitForEvent(t, capture, 15*time.Second, func(ev event.Event) bool {
 			return ev.Operation == "INSERT" && ev.Channel == "pgcdc:"+table
 		})
 		if liveEvent.Source != "wal_replication" {
@@ -158,7 +176,7 @@ func TestScenario_IncrementalSnapshot(t *testing.T) {
 		var snapshotStarted bool
 		var snapshotCompleted bool
 		var snapshotDataCount int
-		deadline := time.After(30 * time.Second)
+		deadline := time.After(45 * time.Second)
 
 		for !snapshotCompleted {
 			select {
@@ -224,7 +242,7 @@ func TestScenario_IncrementalSnapshot(t *testing.T) {
 		signalTable := "incr_snap_resume_signals"
 		pubName := "pgcdc_incr_snap_resume"
 
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 		defer cancel()
 
 		// Create tables and publication.
@@ -309,7 +327,26 @@ func TestScenario_IncrementalSnapshot(t *testing.T) {
 		g1.Go(func() error { return stdoutAdapter1.Start(gCtx1, sub1) })
 		g1.Go(func() error { return walDet1.Start(gCtx1, b1.Ingest()) })
 
-		time.Sleep(3 * time.Second)
+		// Wait for WAL detector to be ready.
+		// Can't use waitForWALDetector since this table has (id, name) not (data JSONB).
+		waitFor(t, 30*time.Second, func() bool {
+			func() {
+				c, err := pgx.Connect(ctx, connStr)
+				if err != nil {
+					return
+				}
+				defer c.Close(ctx)
+				_, _ = c.Exec(ctx, fmt.Sprintf("INSERT INTO %s (name) VALUES ($1)", pgx.Identifier{table}.Sanitize()), "__probe")
+			}()
+			time.Sleep(500 * time.Millisecond)
+			select {
+			case <-capture1.lines:
+				return true
+			default:
+				return false
+			}
+		})
+		capture1.drain()
 
 		// Trigger snapshot.
 		func() {
@@ -407,7 +444,7 @@ func TestScenario_IncrementalSnapshot(t *testing.T) {
 		// The detector should auto-resume the snapshot. Wait for SNAPSHOT_COMPLETED.
 		var secondRunSnapEvents int
 		completedSeen := false
-		resumeDeadline := time.After(30 * time.Second)
+		resumeDeadline := time.After(45 * time.Second)
 
 	resumeLoop:
 		for {

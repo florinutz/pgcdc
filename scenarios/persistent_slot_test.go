@@ -27,6 +27,7 @@ func TestScenario_PersistentSlot(t *testing.T) {
 		pubName := "pgcdc_ps_happy"
 		slotName := "pgcdc_ps_happy_slot"
 
+		ensurePGCDCTables(t, connStr)
 		createTable(t, connStr, table)
 		createPublication(t, connStr, pubName, table)
 
@@ -66,8 +67,9 @@ func TestScenario_PersistentSlot(t *testing.T) {
 		g.Go(func() error { return stdoutAdapter.Start(gCtx, sub) })
 		g.Go(func() error { return walDet.Start(gCtx, b.Ingest()) })
 
-		// Wait for replication slot setup.
-		time.Sleep(3 * time.Second)
+		// Wait for replication slot to be ready.
+		waitForWALDetector(t, connStr, table, capture)
+		capture.drain()
 
 		// Insert rows and verify events arrive.
 		for i := range 3 {
@@ -75,7 +77,7 @@ func TestScenario_PersistentSlot(t *testing.T) {
 		}
 
 		for i := range 3 {
-			line := capture.waitLine(t, 10*time.Second)
+			line := capture.waitLine(t, 15*time.Second)
 			var ev event.Event
 			if err := json.Unmarshal([]byte(line), &ev); err != nil {
 				t.Fatalf("event %d: invalid JSON: %v\nraw: %s", i, err, line)
@@ -97,12 +99,14 @@ func TestScenario_PersistentSlot(t *testing.T) {
 			t.Errorf("replication slot %q is temporary, expected persistent (non-temporary)", slotName)
 		}
 
-		// Wait for at least one standby status update so checkpoint gets saved.
-		// The standby status interval is 10s; wait a bit longer.
-		time.Sleep(12 * time.Second)
-
-		// Verify the checkpoint table has a row with the correct slot name.
-		checkpointLSN := queryCheckpoint(t, connStr, slotName)
+		// Poll for the checkpoint to advance. The standby status interval is 10s,
+		// so we need to wait long enough for at least one cycle to fire.
+		// Under parallel load, give extra margin.
+		var checkpointLSN uint64
+		waitFor(t, 45*time.Second, func() bool {
+			checkpointLSN = queryCheckpoint(t, connStr, slotName)
+			return checkpointLSN > 0
+		})
 		if checkpointLSN == 0 {
 			t.Error("checkpoint table has no row for slot, or LSN is 0")
 		}
@@ -116,6 +120,7 @@ func TestScenario_PersistentSlot(t *testing.T) {
 		pubName := "pgcdc_ps_reconnect"
 		slotName := "pgcdc_ps_reconnect_slot"
 
+		ensurePGCDCTables(t, connStr)
 		createTable(t, connStr, table)
 		createPublication(t, connStr, pubName, table)
 
@@ -155,12 +160,13 @@ func TestScenario_PersistentSlot(t *testing.T) {
 		g.Go(func() error { return stdoutAdapter.Start(gCtx, sub) })
 		g.Go(func() error { return walDet.Start(gCtx, b.Ingest()) })
 
-		// Wait for replication slot setup.
-		time.Sleep(3 * time.Second)
+		// Wait for replication slot to be ready.
+		waitForWALDetector(t, connStr, table, capture)
+		capture.drain()
 
 		// Insert a row and verify it arrives.
 		insertRow(t, connStr, table, map[string]any{"phase": "before_disconnect"})
-		line := capture.waitLine(t, 10*time.Second)
+		line := capture.waitLine(t, 15*time.Second)
 
 		var ev event.Event
 		if err := json.Unmarshal([]byte(line), &ev); err != nil {
@@ -170,8 +176,8 @@ func TestScenario_PersistentSlot(t *testing.T) {
 			t.Errorf("pre-disconnect: operation = %q, want INSERT", ev.Operation)
 		}
 
-		// Terminate backends to force the detector to disconnect.
-		terminateBackends(t, connStr)
+		// Terminate the walsender for this specific slot to force disconnect.
+		terminateSlotBackend(t, connStr, slotName)
 		capture.drain()
 
 		// Wait for reconnect and then verify a new insert arrives.

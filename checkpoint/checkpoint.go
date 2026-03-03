@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -32,6 +33,8 @@ type PGStore struct {
 	logger        *slog.Logger
 	lastSavedLSN  uint64
 	lastSavedTime time.Time
+	closeOnce     sync.Once
+	closeErr      error
 }
 
 // NewPGStore connects to PostgreSQL and returns a checkpoint store.
@@ -100,9 +103,12 @@ func (s *PGStore) LastSavedLSN() (uint64, time.Time) {
 	return s.lastSavedLSN, s.lastSavedTime
 }
 
-// Close releases the underlying connection.
+// Close releases the underlying connection. Safe for concurrent calls.
 func (s *PGStore) Close() error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	return s.conn.Close(ctx)
+	s.closeOnce.Do(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		s.closeErr = s.conn.Close(ctx)
+	})
+	return s.closeErr
 }
