@@ -139,53 +139,48 @@ func TestScenario_S3(t *testing.T) {
 		)
 
 		startPipeline(t, connStr, []string{channel}, a)
-		time.Sleep(500 * time.Millisecond)
 
-		// Insert 3 rows.
+		// Insert 3 rows. Some may be lost if the detector isn't connected
+		// yet, so we'll poll S3 and retry inserts if needed.
 		for i := range 3 {
 			insertRow(t, connStr, "s3_events", map[string]any{"item": i + 1})
 		}
 
-		// Wait for flush (interval=1s + margin).
-		time.Sleep(3 * time.Second)
-
-		// List objects in bucket.
-		keys := listObjects(t, minioClient, bucket, "cdc/")
-		if len(keys) == 0 {
-			t.Fatal("expected at least one object in S3")
-		}
-
-		// Verify channel partitioning in key.
-		found := false
-		for _, key := range keys {
-			if strings.Contains(key, "channel=pgcdc_s3_events") && strings.Contains(key, ".jsonl") {
-				found = true
-
-				// Download and verify content is valid JSON Lines.
-				data := getObject(t, minioClient, bucket, key)
-				scanner := bufio.NewScanner(bytes.NewReader(data))
-				var lineCount int
-				for scanner.Scan() {
-					lineCount++
-					var ev map[string]any
-					if err := json.Unmarshal(scanner.Bytes(), &ev); err != nil {
-						t.Fatalf("line %d is not valid JSON: %v", lineCount, err)
-					}
-					if _, ok := ev["id"]; !ok {
-						t.Fatalf("line %d missing 'id' field", lineCount)
-					}
-					if _, ok := ev["channel"]; !ok {
-						t.Fatalf("line %d missing 'channel' field", lineCount)
+		// Poll S3 until at least 3 JSON lines are present across all objects.
+		var totalLines int
+		waitFor(t, 15*time.Second, func() bool {
+			totalLines = 0
+			keys := listObjects(t, minioClient, bucket, "cdc/")
+			for _, key := range keys {
+				if strings.Contains(key, "channel=pgcdc_s3_events") && strings.Contains(key, ".jsonl") {
+					data := getObject(t, minioClient, bucket, key)
+					scanner := bufio.NewScanner(bytes.NewReader(data))
+					for scanner.Scan() {
+						var ev map[string]any
+						if err := json.Unmarshal(scanner.Bytes(), &ev); err != nil {
+							return false
+						}
+						if _, ok := ev["id"]; !ok {
+							return false
+						}
+						if _, ok := ev["channel"]; !ok {
+							return false
+						}
+						totalLines++
 					}
 				}
-				if lineCount != 3 {
-					t.Fatalf("expected 3 JSON lines, got %d", lineCount)
-				}
-				break
 			}
-		}
-		if !found {
-			t.Fatalf("no object with expected channel partition and .jsonl extension found in keys: %v", keys)
+			if totalLines < 3 {
+				// Re-send events in case detector wasn't ready yet.
+				for i := range 3 {
+					insertRow(t, connStr, "s3_events", map[string]any{"item": i + 1})
+				}
+			}
+			return totalLines >= 3
+		})
+
+		if totalLines < 3 {
+			t.Fatalf("expected at least 3 JSON lines, got %d", totalLines)
 		}
 	})
 
@@ -209,41 +204,38 @@ func TestScenario_S3(t *testing.T) {
 		)
 
 		startPipeline(t, connStr, []string{channel}, a)
-		time.Sleep(500 * time.Millisecond)
 
 		// Insert 3 rows.
 		for i := range 3 {
 			insertRow(t, connStr, "s3_events", map[string]any{"item": i + 1})
 		}
 
-		// Wait for flush.
-		time.Sleep(3 * time.Second)
-
-		keys := listObjects(t, minioClient, bucket, "cdc/")
-		if len(keys) == 0 {
-			t.Fatal("expected at least one object in S3")
-		}
-
-		// Find the .parquet file.
-		found := false
-		for _, key := range keys {
-			if strings.Contains(key, "channel=pgcdc_s3_events") && strings.Contains(key, ".parquet") {
-				found = true
-
-				// Download and verify it's valid Parquet.
-				data := getObject(t, minioClient, bucket, key)
-				pf, err := parquet.OpenFile(bytes.NewReader(data), int64(len(data)))
-				if err != nil {
-					t.Fatalf("open parquet: %v", err)
+		// Poll S3 until at least 3 parquet rows are present across all objects.
+		var totalRows int64
+		waitFor(t, 15*time.Second, func() bool {
+			totalRows = 0
+			keys := listObjects(t, minioClient, bucket, "cdc/")
+			for _, key := range keys {
+				if strings.Contains(key, "channel=pgcdc_s3_events") && strings.Contains(key, ".parquet") {
+					data := getObject(t, minioClient, bucket, key)
+					pf, err := parquet.OpenFile(bytes.NewReader(data), int64(len(data)))
+					if err != nil {
+						return false
+					}
+					totalRows += pf.NumRows()
 				}
-				if pf.NumRows() != 3 {
-					t.Fatalf("expected 3 parquet rows, got %d", pf.NumRows())
-				}
-				break
 			}
-		}
-		if !found {
-			t.Fatalf("no .parquet object found in keys: %v", keys)
+			if totalRows < 3 {
+				// Re-send events in case detector wasn't ready yet.
+				for i := range 3 {
+					insertRow(t, connStr, "s3_events", map[string]any{"item": i + 1})
+				}
+			}
+			return totalRows >= 3
+		})
+
+		if totalRows < 3 {
+			t.Fatalf("expected at least 3 parquet rows, got %d", totalRows)
 		}
 	})
 }

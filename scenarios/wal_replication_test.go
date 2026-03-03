@@ -263,14 +263,19 @@ func TestScenario_WALReplication(t *testing.T) {
 
 		capture := newLineCapture()
 		startWALPipeline(t, connStr, pubName, stdout.New(capture, testLogger()))
-		time.Sleep(3 * time.Second)
+
+		// ALL TABLES publication receives events from all tests' tables,
+		// so use waitForWALDetector on at_orders to confirm streaming started,
+		// then drain any cross-test noise before inserting the real test rows.
+		waitForWALDetector(t, connStr, "at_orders", capture)
+		capture.drain()
 
 		insertRow(t, connStr, "at_orders", map[string]any{"item": "widget"})
 		insertRow(t, connStr, "at_customers", map[string]any{"name": "alice"})
 
 		seen := make(map[string]bool)
 		for !seen["pgcdc:at_orders"] || !seen["pgcdc:at_customers"] {
-			line := capture.waitLine(t, 10*time.Second)
+			line := capture.waitLine(t, 15*time.Second)
 			var ev event.Event
 			if err := json.Unmarshal([]byte(line), &ev); err != nil {
 				continue
@@ -289,11 +294,24 @@ func TestScenario_WALReplication(t *testing.T) {
 
 		capture := newLineCapture()
 		startWALPipelineWithToastCache(t, connStr, pub, 100000, stdout.New(capture, testLogger()))
-		time.Sleep(3 * time.Second)
 
+		// Wait for WAL detector to be ready by inserting a probe row.
+		// The TOAST table has (id, status, description) not (data JSONB).
 		largeText := strings.Repeat("x", 3000)
+		waitFor(t, 30*time.Second, func() bool {
+			insertToastRow(t, connStr, table, "__probe", "probe")
+			time.Sleep(500 * time.Millisecond)
+			select {
+			case <-capture.lines:
+				return true
+			default:
+				return false
+			}
+		})
+		capture.drain()
+
 		insertToastRow(t, connStr, table, "active", largeText)
-		insertLine := capture.waitLine(t, 10*time.Second)
+		insertLine := capture.waitLine(t, 15*time.Second)
 
 		var insertEv event.Event
 		if err := json.Unmarshal([]byte(insertLine), &insertEv); err != nil {
@@ -357,10 +375,22 @@ func TestScenario_WALReplication(t *testing.T) {
 
 		capture := newLineCapture()
 		startWALPipelineWithToastCache(t, connStr, pub, 100000, stdout.New(capture, testLogger()))
-		time.Sleep(3 * time.Second)
+
+		// Wait for WAL detector to be ready by inserting probe rows.
+		waitFor(t, 30*time.Second, func() bool {
+			insertToastRow(t, connStr, table, "__probe", "probe")
+			time.Sleep(500 * time.Millisecond)
+			select {
+			case <-capture.lines:
+				return true
+			default:
+				return false
+			}
+		})
+		capture.drain()
 
 		updateToastStatus(t, connStr, table, rowID, "shipped")
-		updateLine := capture.waitLine(t, 10*time.Second)
+		updateLine := capture.waitLine(t, 15*time.Second)
 
 		var updateEv event.Event
 		if err := json.Unmarshal([]byte(updateLine), &updateEv); err != nil {
@@ -401,6 +431,12 @@ func TestScenario_WALReplication(t *testing.T) {
 		capture := newLineCapture()
 		startWALPipelineWithTxMarkers(t, connStr, "pgcdc_wal_marker_orders", stdout.New(capture, testLogger()))
 		waitForWALDetector(t, connStr, "wal_marker_orders", capture)
+
+		// Drain leftover probe events: with txMarkers enabled, each probe INSERT
+		// generates BEGIN/INSERT/COMMIT (3 events) but waitForWALDetector only
+		// consumes one.
+		time.Sleep(500 * time.Millisecond)
+		capture.drain()
 
 		insertRowsInTx(t, connStr, "wal_marker_orders", []map[string]any{
 			{"item": "alpha"},

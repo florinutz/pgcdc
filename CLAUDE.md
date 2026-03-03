@@ -99,7 +99,7 @@ Direct deps (keep minimal): `pgx/v5` (PG driver), `pglogrepl` (WAL logical repli
 - **Unit tests** (`*_test.go` in package dirs): pure logic only — no I/O, no network, no goroutines.
 - **Scenario tests** (`scenarios/*_test.go`): full pipeline with real Postgres (testcontainers). One file per user journey. Primary regression barrier.
 
-**Makefile targets:** `make test` (unit, ~2s) | `make test-scenarios` (Docker, ~60-90s parallel) | `make test-all` | `make lint` | `make coverage` | `make coverage-gate` | `make test-smoke` (<15s) | `make fuzz`
+**Makefile targets:** `make test` (unit, ~2s) | `make test-scenarios-fast` (PG-only, `-parallel 8`, ~75s) | `make test-scenarios-docker` (external containers, `-parallel 4`, ~160s) | `make test-scenarios` (both tiers sequentially) | `make test-all` | `make lint` | `make coverage` | `make coverage-gate` | `make test-smoke` (<15s) | `make fuzz`
 
 **Agent workflow — after every change:**
 1. Run `make test-all` — all tests must pass before task is done.
@@ -116,7 +116,7 @@ Direct deps (keep minimal): `pgx/v5` (PG driver), `pglogrepl` (WAL logical repli
 
 **Max scenarios:** 42 — consolidate related ones before adding new ones. Currently at 42.
 
-**Parallel scenarios:** All `TestScenario_*` functions call `t.Parallel()`. The shared PG container supports concurrency: `max_replication_slots=60`, `max_wal_senders=60`, `max_connections=200`.
+**Parallel scenarios:** All `TestScenario_*` functions call `t.Parallel()`. The shared PG container supports concurrency: `max_replication_slots=60`, `max_wal_senders=60`, `max_connections=200`. **Never kill all PG backends** — use `terminateSlotBackend(t, connStr, slotName)` or `terminateListenBackend(t, connStr, channel)` to target a specific test's connection.
 
 **testutil/ package:** Pure-Go test helpers importable from any package (not a `_test.go` file). Use `testutil.NewLineCapture()`, `testutil.MakeEvent()`, `testutil.MakeEvents()`, `testutil.StartTestBus()`. Do not duplicate these in individual packages.
 

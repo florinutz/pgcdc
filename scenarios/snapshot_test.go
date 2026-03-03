@@ -71,31 +71,22 @@ func TestScenario_Snapshot(t *testing.T) {
 		g.Go(func() error { return b.Start(gCtx) })
 		g.Go(func() error { return stdoutAdapter.Start(gCtx, sub) })
 		g.Go(func() error {
-			err := snap.Run(gCtx, b.Ingest())
-			snapCancel()
-			return err
+			return snap.Run(gCtx, b.Ingest())
 		})
 
-		_ = g.Wait()
-
-		// Collect all lines.
+		// Collect all 100 events before shutting down.
 		var events []event.Event
-		for {
-			select {
-			case line := <-capture.lines:
-				var ev event.Event
-				if err := json.Unmarshal([]byte(line), &ev); err != nil {
-					t.Fatalf("invalid JSON: %v\nraw: %s", err, line)
-				}
-				events = append(events, ev)
-			default:
-				goto done
+		for range 100 {
+			line := capture.waitLine(t, 30*time.Second)
+			var ev event.Event
+			if err := json.Unmarshal([]byte(line), &ev); err != nil {
+				t.Fatalf("invalid JSON: %v\nraw: %s", err, line)
 			}
+			events = append(events, ev)
 		}
-	done:
-		if len(events) != 100 {
-			t.Fatalf("expected 100 events, got %d", len(events))
-		}
+
+		snapCancel()
+		_ = g.Wait()
 
 		// Verify event properties.
 		for i, ev := range events {
@@ -189,8 +180,9 @@ func TestScenario_Snapshot(t *testing.T) {
 			}
 		}
 
-		// Insert a new row — should arrive as a live WAL INSERT event.
-		time.Sleep(2 * time.Second)
+		// Brief pause for WAL detector to transition from snapshot to live mode.
+		time.Sleep(1 * time.Second)
+		capture.drain()
 		insertRow(t, connStr, table, map[string]any{"item": "live_insert"})
 
 		line := capture.waitLine(t, 15*time.Second)

@@ -120,8 +120,8 @@ func TestScenario_PGTableDelivery(t *testing.T) {
 			return countEventsRows(t, connStr, tableName) > 0
 		})
 
-		// Terminate all backends (simulates connection drop for both detector and adapter).
-		terminateBackends(t, connStr)
+		// Terminate the LISTEN backend for this channel (simulates connection drop for detector).
+		terminateListenBackend(t, connStr, "pgtable_test_reconn")
 
 		// Wait for both detector and adapter to reconnect.
 		// The detector reconnects with backoff (default 5s base), so we need to

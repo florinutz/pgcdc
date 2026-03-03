@@ -82,35 +82,51 @@ func TestScenario_View(t *testing.T) {
 			g.Wait()
 		})
 
-		time.Sleep(3 * time.Second)
+		// Wait for WAL detector readiness by inserting probe rows.
+		waitViewDetector(t, connStr, table, capture, func() {
+			insertViewOrderRow(t, connStr, table, "__probe", 0)
+		})
+		// Wait for the probe tumbling window to flush (VIEW_RESULT) so probe
+		// data doesn't contaminate real results.
+		waitForViewResult(t, capture, 10*time.Second)
+		time.Sleep(200 * time.Millisecond)
+		capture.drain()
 
 		// Insert test data.
 		insertViewOrderRow(t, connStr, table, "us-east", 100)
 		insertViewOrderRow(t, connStr, table, "us-east", 200)
 		insertViewOrderRow(t, connStr, table, "eu-west", 50)
 
-		// Consume the 3 INSERT events.
-		for i := 0; i < 3; i++ {
-			line := capture.waitLine(t, 10*time.Second)
+		// Consume the 3 INSERT events, skipping any stale VIEW_RESULTs from
+		// probe windows that may arrive after the drain.
+		inserts := 0
+		for inserts < 3 {
+			line := capture.waitLine(t, 15*time.Second)
 			var ev event.Event
 			if err := json.Unmarshal([]byte(line), &ev); err != nil {
-				t.Fatalf("unmarshal insert event %d: %v\nraw: %s", i, err, line)
+				t.Fatalf("unmarshal insert event %d: %v\nraw: %s", inserts, err, line)
+			}
+			if ev.Operation == "VIEW_RESULT" {
+				continue // stale probe window result
 			}
 			if ev.Operation != "INSERT" {
 				t.Fatalf("expected INSERT, got %s", ev.Operation)
 			}
+			inserts++
 		}
 
 		// Wait for the 2s tumbling window to fire and emit VIEW_RESULT events.
 		var viewResults []event.Event
-		deadline := time.After(10 * time.Second)
+		deadline := time.After(15 * time.Second)
 		for len(viewResults) < 2 {
 			select {
 			case line := <-capture.lines:
 				var ev event.Event
 				if err := json.Unmarshal([]byte(line), &ev); err != nil {
+					t.Logf("DEBUG: unparseable line: %s", line)
 					continue
 				}
+				t.Logf("DEBUG: got event op=%s ch=%s payload=%s", ev.Operation, ev.Channel, string(ev.Payload))
 				if ev.Operation == "VIEW_RESULT" {
 					viewResults = append(viewResults, ev)
 				}
@@ -202,18 +218,33 @@ func TestScenario_View(t *testing.T) {
 			g.Wait()
 		})
 
-		time.Sleep(3 * time.Second)
+		// Wait for WAL detector readiness by inserting probe rows.
+		waitViewDetector(t, connStr, table, capture, func() {
+			insertViewOrderRow(t, connStr, table, "__probe", 0)
+		})
+		// Wait for the probe tumbling window to flush (VIEW_RESULT), confirming
+		// a window boundary has passed. This replaces a fixed sleep and ensures
+		// both real inserts land in the same fresh window.
+		waitForViewResult(t, capture, 10*time.Second)
+		time.Sleep(200 * time.Millisecond)
+		capture.drain()
 
 		insertViewOrderRow(t, connStr, table, "us-east", 10)
 		insertViewOrderRow(t, connStr, table, "eu-west", 20)
 
-		// Consume INSERT events.
-		for i := 0; i < 2; i++ {
-			capture.waitLine(t, 10*time.Second)
+		// Consume INSERT events (skip any stale VIEW_RESULTs from probes).
+		inserts := 0
+		for inserts < 2 {
+			line := capture.waitLine(t, 15*time.Second)
+			var ev event.Event
+			if err := json.Unmarshal([]byte(line), &ev); err == nil && ev.Operation == "VIEW_RESULT" {
+				continue
+			}
+			inserts++
 		}
 
 		// Wait for batch VIEW_RESULT.
-		deadline := time.After(10 * time.Second)
+		deadline := time.After(15 * time.Second)
 		for {
 			select {
 			case line := <-capture.lines:
@@ -288,7 +319,12 @@ func TestScenario_View(t *testing.T) {
 			g.Wait()
 		})
 
-		time.Sleep(3 * time.Second)
+		// Wait for WAL detector readiness by inserting probe rows.
+		waitViewDetector(t, connStr, table, capture, func() {
+			insertViewWMRow(t, connStr, table, "__probe", 0, time.Now().UTC().Format(time.RFC3339Nano))
+		})
+		time.Sleep(500 * time.Millisecond)
+		capture.drain()
 
 		// Insert three events. The third event's ts is 10s ahead — its watermark
 		// (base+10s) will advance past the 2s window end, triggering a flush.
@@ -373,7 +409,12 @@ func TestScenario_View(t *testing.T) {
 			g.Wait()
 		})
 
-		time.Sleep(3 * time.Second)
+		// Wait for WAL detector readiness by inserting a probe row.
+		waitViewDetector(t, connStr, ordersTable, capture, func() {
+			insertJoinRow(t, connStr, ordersTable, "order_id, product", "__probe", "0")
+		})
+		time.Sleep(500 * time.Millisecond)
+		capture.drain()
 
 		// Insert a matching order + payment pair with the same order_id.
 		insertJoinRow(t, connStr, ordersTable, "order_id, product", "ORD-001", "widget")
@@ -410,6 +451,42 @@ func TestScenario_View(t *testing.T) {
 			}
 		}
 	})
+}
+
+// waitViewDetector waits until the WAL replication detector is streaming by
+// repeatedly calling insertFn (which inserts a probe row) and waiting for
+// any event to arrive on capture.
+func waitViewDetector(t *testing.T, connStr, table string, capture *lineCapture, insertFn func()) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		insertFn()
+		select {
+		case <-capture.lines:
+			return
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+	t.Fatalf("waitViewDetector: WAL detector for %s did not become ready within 30s", table)
+}
+
+// waitForViewResult waits until a VIEW_RESULT event arrives on capture,
+// discarding non-VIEW_RESULT events. Used to synchronize with tumbling window
+// boundaries so that subsequent inserts land in a fresh window.
+func waitForViewResult(t *testing.T, capture *lineCapture, timeout time.Duration) {
+	t.Helper()
+	deadline := time.After(timeout)
+	for {
+		select {
+		case line := <-capture.lines:
+			var ev event.Event
+			if err := json.Unmarshal([]byte(line), &ev); err == nil && ev.Operation == "VIEW_RESULT" {
+				return
+			}
+		case <-deadline:
+			t.Fatal("waitForViewResult: timed out waiting for VIEW_RESULT")
+		}
+	}
 }
 
 // createViewTable creates a table with explicit region and amount columns.

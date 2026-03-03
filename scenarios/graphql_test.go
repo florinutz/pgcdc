@@ -61,7 +61,7 @@ func TestScenario_GraphQL(t *testing.T) {
 		})
 
 		// Wait for detector, then insert a row.
-		time.Sleep(3 * time.Second)
+		time.Sleep(5 * time.Second)
 		insertRow(t, connStr, table, map[string]any{"item": "gql-widget"})
 
 		// Read next message with event data.

@@ -192,12 +192,13 @@ func TestScenario_Redis(t *testing.T) {
 		payload := `{"op":"INSERT","table":"items","row":{"id":"99","name":"gadget","price":19.99}}`
 		sendNotify(t, connStr, channel, payload)
 
-		time.Sleep(2 * time.Second)
-
-		val, err := rdb.Get(ctx, "sync:99").Result()
-		if err != nil {
-			t.Fatalf("expected key to exist after INSERT in sync mode, got: %v", err)
-		}
+		// Wait for the key to appear in Redis.
+		var val string
+		waitFor(t, 10*time.Second, func() bool {
+			var getErr error
+			val, getErr = rdb.Get(ctx, "sync:99").Result()
+			return getErr == nil
+		})
 
 		var row map[string]interface{}
 		if err := json.Unmarshal([]byte(val), &row); err != nil {
@@ -211,11 +212,10 @@ func TestScenario_Redis(t *testing.T) {
 		deletePayload := `{"op":"DELETE","table":"items","row":{"id":"99","name":"gadget","price":19.99}}`
 		sendNotify(t, connStr, channel, deletePayload)
 
-		time.Sleep(2 * time.Second)
-
-		_, err = rdb.Get(ctx, "sync:99").Result()
-		if err != goredis.Nil {
-			t.Errorf("expected key to be deleted after DELETE in sync mode, got err=%v", err)
-		}
+		// Wait for the key to be deleted.
+		waitFor(t, 10*time.Second, func() bool {
+			_, getErr := rdb.Get(ctx, "sync:99").Result()
+			return getErr == goredis.Nil
+		})
 	})
 }

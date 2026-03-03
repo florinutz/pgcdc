@@ -30,6 +30,13 @@ func TestScenario_MultiAdapterFanOut(t *testing.T) {
 		)
 		waitForDetector(t, connStr, "fanout_happy", capture)
 
+		// Drain probe requests accumulated in the webhook receiver during
+		// waitForDetector (probes go to both stdout and webhook, but only
+		// stdout is drained by waitForDetector). Sleep briefly to let
+		// in-flight webhook deliveries complete.
+		time.Sleep(500 * time.Millisecond)
+		drainWebhook(receiver)
+
 		sendNotify(t, connStr, "fanout_happy", `{"op":"INSERT","table":"orders","row":{"id":1}}`)
 
 		// Both adapters receive the same event.
@@ -85,4 +92,15 @@ func TestScenario_MultiAdapterFanOut(t *testing.T) {
 			capture.waitLine(t, 3*time.Second)
 		}
 	})
+}
+
+// drainWebhook discards all pending requests from a webhook receiver.
+func drainWebhook(wr *webhookReceiver) {
+	for {
+		select {
+		case <-wr.requests:
+		default:
+			return
+		}
+	}
 }

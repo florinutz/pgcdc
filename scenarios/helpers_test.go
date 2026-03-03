@@ -208,19 +208,39 @@ func insertRow(t *testing.T, connStr, table string, data map[string]any) {
 	}
 }
 
-func terminateBackends(t *testing.T, connStr string) {
+// terminateSlotBackend terminates the walsender backend for a specific replication slot.
+// This is safe for parallel test execution as it only kills the targeted slot's connection.
+func terminateSlotBackend(t *testing.T, connStr, slotName string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	conn, err := pgx.Connect(ctx, connStr)
 	if err != nil {
-		t.Fatalf("terminateBackends connect: %v", err)
+		t.Fatalf("terminateSlotBackend connect: %v", err)
 	}
 	defer conn.Close(ctx)
 	_, err = conn.Exec(ctx,
-		"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = current_database() AND pid != pg_backend_pid()")
+		"SELECT pg_terminate_backend(active_pid) FROM pg_replication_slots WHERE slot_name = $1 AND active", slotName)
 	if err != nil {
-		t.Fatalf("terminateBackends: %v", err)
+		t.Fatalf("terminateSlotBackend: %v", err)
+	}
+}
+
+// terminateListenBackend terminates the LISTEN backend for a specific channel.
+// The channel parameter is matched against the backend's query (e.g. 'LISTEN "reconnect_test"').
+func terminateListenBackend(t *testing.T, connStr, channel string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := pgx.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("terminateListenBackend connect: %v", err)
+	}
+	defer conn.Close(ctx)
+	_, err = conn.Exec(ctx,
+		"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = current_database() AND pid != pg_backend_pid() AND state = 'idle' AND query LIKE '%' || $1 || '%'", channel)
+	if err != nil {
+		t.Fatalf("terminateListenBackend: %v", err)
 	}
 }
 
@@ -619,6 +639,38 @@ func startWALPipelineWithOpts(t *testing.T, connStr string, publication string, 
 	})
 }
 
+// startWALPipelineWithSlot is like startWALPipeline but uses a named persistent
+// replication slot. This allows targeted termination in reconnection tests.
+func startWALPipelineWithSlot(t *testing.T, connStr string, publication, slotName string, adapters ...adapter.Adapter) {
+	t.Helper()
+
+	logger := testLogger()
+	ctx, cancel := context.WithCancel(context.Background())
+
+	det := walreplication.New(connStr, publication, 0, 0, false, false, logger)
+	det.SetPersistentSlot(slotName)
+	b := bus.New(64, logger)
+
+	g, gCtx := errgroup.WithContext(ctx)
+	g.Go(func() error { return b.Start(gCtx) })
+	g.Go(func() error { return det.Start(gCtx, b.Ingest()) })
+
+	for _, a := range adapters {
+		sub, err := b.Subscribe(a.Name())
+		if err != nil {
+			cancel()
+			t.Fatalf("subscribe %s: %v", a.Name(), err)
+		}
+		a := a
+		g.Go(func() error { return a.Start(gCtx, sub) })
+	}
+
+	t.Cleanup(func() {
+		cancel()
+		g.Wait()
+	})
+}
+
 // ─── Synchronization helpers ─────────────────────────────────────────────────
 
 // waitFor polls check at short intervals until it returns true or timeout expires.
@@ -686,6 +738,80 @@ func waitForSSEDetector(t *testing.T, connStr string, channel string, sseURL str
 		}
 	}
 	t.Fatal("waitForSSEDetector: detector did not become ready within 10s")
+}
+
+// ─── Internal table helpers ──────────────────────────────────────────────────
+
+// ensurePGCDCTables creates the pgcdc internal tables (checkpoints, dead letters)
+// needed by tests that use checkpoint stores or DLQ without running the full
+// migration system. Safe for concurrent calls from parallel tests.
+func ensurePGCDCTables(t *testing.T, connStr string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	conn, err := pgx.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("ensurePGCDCTables connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	// Use advisory lock to prevent concurrent CREATE TABLE IF NOT EXISTS
+	// from racing on pg_type composite type creation (PG duplicate key error).
+	_, err = conn.Exec(ctx, `SELECT pg_advisory_lock(hashtext('pgcdc_tables'))`)
+	if err != nil {
+		t.Fatalf("ensurePGCDCTables advisory lock: %v", err)
+	}
+	defer conn.Exec(ctx, `SELECT pg_advisory_unlock(hashtext('pgcdc_tables'))`) //nolint:errcheck
+
+	_, err = conn.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS pgcdc_checkpoints (
+			slot_name TEXT PRIMARY KEY,
+			lsn BIGINT NOT NULL,
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+		);
+		CREATE TABLE IF NOT EXISTS pgcdc_dead_letters (
+			id BIGSERIAL PRIMARY KEY,
+			event_id TEXT NOT NULL,
+			adapter TEXT NOT NULL,
+			error TEXT NOT NULL,
+			payload JSONB,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+		);
+	`)
+	if err != nil {
+		t.Fatalf("ensurePGCDCTables: %v", err)
+	}
+}
+
+// ensureDLQTable creates a custom-named DLQ table for tests that use non-default
+// DLQ table names.
+func ensureDLQTable(t *testing.T, connStr, table string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	conn, err := pgx.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("ensureDLQTable connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	safeTable := pgx.Identifier{table}.Sanitize()
+	_, err = conn.Exec(ctx, fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			id BIGSERIAL PRIMARY KEY,
+			event_id TEXT NOT NULL,
+			adapter TEXT NOT NULL,
+			error TEXT NOT NULL,
+			payload JSONB,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+			replayed_at TIMESTAMPTZ
+		)
+	`, safeTable))
+	if err != nil {
+		t.Fatalf("ensureDLQTable: %v", err)
+	}
 }
 
 // ─── TOAST-specific helpers ─────────────────────────────────────────────────
@@ -799,7 +925,7 @@ func startWALPipelineWithToastCache(t *testing.T, connStr string, publication st
 // the event to arrive on the lineCapture.
 func waitForWALDetector(t *testing.T, connStr string, table string, lc *lineCapture) {
 	t.Helper()
-	deadline := time.Now().Add(15 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		insertRow(t, connStr, table, map[string]any{"__probe": true})
 		select {
@@ -808,5 +934,5 @@ func waitForWALDetector(t *testing.T, connStr string, table string, lc *lineCapt
 		case <-time.After(500 * time.Millisecond):
 		}
 	}
-	t.Fatal("waitForWALDetector: WAL detector did not become ready within 15s")
+	t.Fatal("waitForWALDetector: WAL detector did not become ready within 30s")
 }

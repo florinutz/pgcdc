@@ -259,6 +259,9 @@ func TestScenario_Outbox(t *testing.T) {
 		}()
 		lc.waitLine(t, 10*time.Second)
 
+		// Let the detector finish processing the probe row before inserting real data.
+		time.Sleep(500 * time.Millisecond)
+
 		// Insert a row into the outbox table.
 		func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

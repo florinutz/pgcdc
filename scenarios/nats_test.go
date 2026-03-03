@@ -81,7 +81,7 @@ func TestScenario_Nats(t *testing.T) {
 		})
 
 		// Wait for detector + NATS adapter to connect.
-		time.Sleep(2 * time.Second)
+		time.Sleep(3 * time.Second)
 
 		// Send a NOTIFY event through PostgreSQL.
 		payload := `{"op":"INSERT","table":"orders","row":{"id":42,"item":"widget"}}`

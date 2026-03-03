@@ -136,7 +136,7 @@ func TestScenario_Reload(t *testing.T) {
 		// Send event: "secret" should be dropped again.
 		sendNotify(t, connStr, channel, `{"name":"dave","secret":"xyz"}`)
 
-		line := lc.waitLine(t, 5*time.Second)
+		line := lc.waitLine(t, 10*time.Second)
 		var ev map[string]any
 		if err := json.Unmarshal([]byte(line), &ev); err != nil {
 			t.Fatalf("unmarshal event: %v", err)

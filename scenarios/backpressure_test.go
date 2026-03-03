@@ -31,6 +31,7 @@ func TestScenario_Backpressure(t *testing.T) {
 		pubName := "pgcdc_bp_happy"
 		slotName := "pgcdc_bp_happy_slot"
 
+		ensurePGCDCTables(t, connStr)
 		createTable(t, connStr, table)
 		createPublication(t, connStr, pubName, table)
 		t.Cleanup(func() { dropReplicationSlot(t, connStr, slotName) })
@@ -77,8 +78,9 @@ func TestScenario_Backpressure(t *testing.T) {
 		pipelineErr := make(chan error, 1)
 		go func() { pipelineErr <- p.Run(ctx) }()
 
-		// Wait for replication to start.
-		time.Sleep(3 * time.Second)
+		// Wait for replication to start using probe-based readiness.
+		waitForWALDetector(t, connStr, table, capture)
+		capture.drain()
 
 		// Insert rows — with low thresholds the controller should detect lag
 		// and transition zones. Even if throttled, events must arrive.
@@ -118,6 +120,7 @@ func TestScenario_Backpressure(t *testing.T) {
 		pubName := "pgcdc_bp_shed"
 		slotName := "pgcdc_bp_shed_slot"
 
+		ensurePGCDCTables(t, connStr)
 		createTable(t, connStr, table)
 		createPublication(t, connStr, pubName, table)
 		t.Cleanup(func() { dropReplicationSlot(t, connStr, slotName) })
@@ -179,9 +182,10 @@ func TestScenario_Backpressure(t *testing.T) {
 		pipelineErr := make(chan error, 1)
 		go func() { pipelineErr <- p.Run(ctx) }()
 
-		// Wait for replication to start. After p.Run wires
-		// SetBackpressureController, we override lagFn with our fake.
-		time.Sleep(3 * time.Second)
+		// Wait for replication to start using probe-based readiness.
+		// After p.Run wires SetBackpressureController, we override lagFn with our fake.
+		waitForWALDetector(t, connStr, table, criticalCapture)
+		criticalCapture.drain()
 
 		// Override lagFn AFTER pipeline wiring to simulate high lag.
 		bpCtrl.SetLagFunc(func() int64 { return fakeLag.Load() })

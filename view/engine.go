@@ -81,13 +81,21 @@ func (e *Engine) Process(ev event.Event) {
 	}
 
 	// Parse payload once for all views. Prefer structured record (zero JSON parsing).
+	// Build the legacy-compatible format (op, table, row, old) so field paths like
+	// "payload.row.region" work consistently regardless of event origin.
 	var payload map[string]any
 	if rec := ev.Record(); rec != nil && rec.Operation != 0 &&
 		(rec.Change.After != nil || rec.Change.Before != nil) {
+		payload = make(map[string]any, 4)
+		payload["op"] = rec.Operation.String()
+		if table, ok := rec.Metadata[event.MetaTable]; ok {
+			payload["table"] = table
+		}
 		if rec.Change.After != nil {
-			payload = rec.Change.After.ToMap()
-		} else {
-			payload = rec.Change.Before.ToMap()
+			payload["row"] = rec.Change.After.ToMap()
+		}
+		if rec.Change.Before != nil {
+			payload["old"] = rec.Change.Before.ToMap()
 		}
 	} else if len(ev.Payload) > 0 {
 		if err := json.Unmarshal(ev.Payload, &payload); err != nil {

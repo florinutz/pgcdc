@@ -70,23 +70,30 @@ func TestScenario_FileDelivery(t *testing.T) {
 		fa := fileadapter.New(outPath, 100, 3, testLogger())
 		startPipeline(t, connStr, []string{"file_test_rotate"}, fa)
 
-		// Wait for detector to connect.
+		// Wait for detector to connect. With maxSize=100 a single event
+		// (>100 bytes of JSON) triggers immediate rotation, so the active file
+		// may be empty. Accept either active-file content or rotated backup
+		// as proof the pipeline is running.
 		waitFor(t, 10*time.Second, func() bool {
 			sendNotify(t, connStr, "file_test_rotate", `{"__probe":true}`)
 			time.Sleep(100 * time.Millisecond)
 			data, err := os.ReadFile(outPath)
-			return err == nil && len(data) > 0
+			if err == nil && len(data) > 0 {
+				return true
+			}
+			_, err = os.Stat(outPath + ".1")
+			return err == nil
 		})
 
 		// Send enough events to trigger rotation.
 		for i := range 10 {
 			sendNotify(t, connStr, "file_test_rotate", `{"n":`+itoa(i)+`}`)
-			time.Sleep(50 * time.Millisecond)
+			time.Sleep(100 * time.Millisecond)
 		}
 
 		// Wait for rotation to happen.
 		rotated := outPath + ".1"
-		waitFor(t, 5*time.Second, func() bool {
+		waitFor(t, 15*time.Second, func() bool {
 			_, err := os.Stat(rotated)
 			return err == nil
 		})

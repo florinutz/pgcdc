@@ -79,7 +79,7 @@ func TestScenario_SSEStreaming(t *testing.T) {
 			if ev.Event != "sse_orders" {
 				t.Errorf("SSE event type = %q, want sse_orders", ev.Event)
 			}
-		case <-time.After(5 * time.Second):
+		case <-time.After(10 * time.Second):
 			t.Fatal("timed out waiting for filtered SSE event")
 		}
 

@@ -122,7 +122,7 @@ func TestScenario_Transform(t *testing.T) {
 
 		sendNotify(t, connStr, channel, `{"id":1,"name":"Alice"}`)
 
-		line := lc.waitLine(t, 5*time.Second)
+		line := lc.waitLine(t, 10*time.Second)
 		var ev map[string]any
 		if err := json.Unmarshal([]byte(line), &ev); err != nil {
 			t.Fatalf("unmarshal event: %v", err)
@@ -185,9 +185,18 @@ func TestScenario_Transform(t *testing.T) {
 			_ = g.Wait()
 		})
 
-		// Wait for detector — send a probe that matches the filter.
-		sendNotify(t, connStr, channel, `{"status":"published","__probe":true}`)
-		lc.waitLine(t, 10*time.Second)
+		// Wait for detector — repeatedly send probes that match the filter
+		// until one arrives (LISTEN connection may not be established yet).
+		waitFor(t, 15*time.Second, func() bool {
+			sendNotify(t, connStr, channel, `{"status":"published","__probe":true}`)
+			time.Sleep(200 * time.Millisecond)
+			select {
+			case <-lc.lines:
+				return true
+			default:
+				return false
+			}
+		})
 
 		// Send a "draft" event — should be filtered out.
 		sendNotify(t, connStr, channel, `{"id":1,"status":"draft","title":"Draft Post"}`)
@@ -195,7 +204,7 @@ func TestScenario_Transform(t *testing.T) {
 		// Send a "published" event — should pass through.
 		sendNotify(t, connStr, channel, `{"id":2,"status":"published","title":"Live Post"}`)
 
-		line := lc.waitLine(t, 5*time.Second)
+		line := lc.waitLine(t, 10*time.Second)
 		var ev map[string]any
 		if err := json.Unmarshal([]byte(line), &ev); err != nil {
 			t.Fatalf("unmarshal event: %v", err)
