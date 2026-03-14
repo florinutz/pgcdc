@@ -84,17 +84,18 @@ func TestScenario_SQLiteDetector(t *testing.T) {
 			t.Error("event ID is empty")
 		}
 
-		// Verify row was deleted (default mode).
+		// Verify row was deleted (default mode). Poll because the DELETE may
+		// land slightly after the event is forwarded to the bus.
 		db2, err := sql.Open("sqlite", dbPath)
 		if err != nil {
 			t.Fatalf("reopen sqlite: %v", err)
 		}
 		defer db2.Close()
-		var count int
-		db2.QueryRow("SELECT COUNT(*) FROM pgcdc_changes").Scan(&count)
-		if count != 0 {
-			t.Errorf("expected 0 remaining rows, got %d", count)
-		}
+		waitFor(t, 5*time.Second, func() bool {
+			var count int
+			db2.QueryRow("SELECT COUNT(*) FROM pgcdc_changes").Scan(&count)
+			return count == 0
+		})
 	})
 
 	t.Run("keep-processed marks instead of deleting", func(t *testing.T) {

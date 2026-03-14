@@ -59,8 +59,10 @@ func TestScenario_HealthEndpoint(t *testing.T) {
 		}
 
 		var body struct {
-			Status     string            `json:"status"`
-			Components map[string]string `json:"components"`
+			Status     string `json:"status"`
+			Components map[string]struct {
+				Status string `json:"status"`
+			} `json:"components"`
 		}
 		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 			t.Fatalf("decode response: %v", err)
@@ -68,11 +70,11 @@ func TestScenario_HealthEndpoint(t *testing.T) {
 		if body.Status != "up" {
 			t.Errorf("status = %q, want up", body.Status)
 		}
-		if body.Components["detector"] != "up" {
-			t.Errorf("detector component = %q, want up", body.Components["detector"])
+		if body.Components["detector"].Status != "up" {
+			t.Errorf("detector component = %q, want up", body.Components["detector"].Status)
 		}
-		if body.Components["bus"] != "up" {
-			t.Errorf("bus component = %q, want up", body.Components["bus"])
+		if body.Components["bus"].Status != "up" {
+			t.Errorf("bus component = %q, want up", body.Components["bus"].Status)
 		}
 	})
 
