@@ -526,6 +526,20 @@ func (p *Pipeline) Run(ctx context.Context) error {
 		return p.bus.Start(gCtx)
 	})
 
+	// Report per-adapter queue depths every 5 seconds.
+	p.safeGo(g, "queue-depth-reporter", func() error {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-gCtx.Done():
+				return gCtx.Err()
+			case <-ticker.C:
+				p.bus.ReportQueueDepths()
+			}
+		}
+	})
+
 	// Start the detector.
 	p.safeGo(g, p.detector.Name(), func() error {
 		p.logger.Info("detector started", "detector", p.detector.Name())

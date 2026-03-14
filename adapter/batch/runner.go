@@ -117,6 +117,8 @@ func (r *Runner) flushBatch(ctx context.Context, batch []event.Event) {
 			for _, ev := range batch {
 				_ = r.dlq.Record(ctx, ev, r.name, result.Err)
 			}
+		} else {
+			metrics.BatchEventsLost.WithLabelValues(r.name).Add(float64(len(batch)))
 		}
 		// Ack all events (they're handled — either successfully or DLQ'd).
 		r.ackBatch(batch)

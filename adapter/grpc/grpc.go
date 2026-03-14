@@ -51,6 +51,14 @@ func New(addr string, logger *slog.Logger) *Adapter {
 
 func (a *Adapter) Name() string { return "grpc" }
 
+// Validate checks that the listen address is a valid host:port.
+func (a *Adapter) Validate(_ context.Context) error {
+	if _, _, err := net.SplitHostPort(a.addr); err != nil {
+		return fmt.Errorf("invalid grpc address %q: %w", a.addr, err)
+	}
+	return nil
+}
+
 // Start consumes events from the bus and broadcasts them to connected gRPC
 // clients. It also starts the gRPC server. Blocks until ctx is cancelled.
 func (a *Adapter) Start(ctx context.Context, events <-chan event.Event) error {

@@ -40,6 +40,6 @@ func FuzzParse(f *testing.F) {
 
 	f.Fuzz(func(t *testing.T, query string) {
 		// Must never panic; errors are expected for bad input.
-		Parse("fuzz", query, EmitRow, 0)
+		_, _ = Parse("fuzz", query, EmitRow, 0)
 	})
 }

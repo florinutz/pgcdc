@@ -62,6 +62,23 @@ func (a *Adapter) Name() string {
 	return "pg_table"
 }
 
+// Validate checks PostgreSQL connectivity by connecting and pinging.
+func (a *Adapter) Validate(ctx context.Context) error {
+	conn, err := pgx.Connect(ctx, a.dbURL)
+	if err != nil {
+		return fmt.Errorf("connect: %w", err)
+	}
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = conn.Close(closeCtx)
+	}()
+	if err := conn.Ping(ctx); err != nil {
+		return fmt.Errorf("ping: %w", err)
+	}
+	return nil
+}
+
 // Start blocks, consuming events and inserting them into the PostgreSQL table.
 // It reconnects with backoff on connection errors.
 func (a *Adapter) Start(ctx context.Context, events <-chan event.Event) error {

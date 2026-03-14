@@ -20,8 +20,10 @@ go install github.com/florinutz/pgcdc/cmd/pgcdc@latest
 │  • Outbox table  │    │ CloudEvents envelope  │    │ S3, Redis, Typesense     │
 │ MySQL binlog     │    │ Streaming SQL views   │    │ pgvector embeddings      │
 │ MongoDB streams  │    │ Wasm plugins          │    │ Kafka wire protocol svr  │
-└──────────────────┘    └──────────────────────┘    └──────────────────────────┘
- 5 detectors               7 built-in transforms       17 adapters
+│ SQLite changes   │    └──────────────────────┘    │ GraphQL subscriptions    │
+│ Webhook gateway  │                                │ Arrow Flight, DuckDB     │
+└──────────────────┘                                └──────────────────────────┘
+ 7 detectors               7 built-in transforms       20 adapters
 ```
 
 pgcdc is the only single-binary CDC tool combining multi-source capture, a built-in Kafka wire protocol server, streaming SQL analytics, and real-time pgvector embedding sync — with zero external dependencies.

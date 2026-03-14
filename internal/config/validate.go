@@ -188,6 +188,29 @@ func (c Config) Validate() error {
 		checkDur("kafkaserver.session_timeout", c.KafkaServer.SessionTimeout)
 	}
 
+	if adapterSet["graphql"] {
+		checkDur("graphql.keepalive_interval", c.GraphQL.KeepaliveInterval)
+		if c.GraphQL.BufferSize <= 0 {
+			errs = append(errs, fmt.Sprintf("graphql.buffer_size must be > 0, got %d", c.GraphQL.BufferSize))
+		}
+	}
+
+	if adapterSet["arrow"] {
+		if c.Arrow.Addr == "" {
+			errs = append(errs, "arrow.addr is required")
+		}
+		if c.Arrow.BufferSize <= 0 {
+			errs = append(errs, fmt.Sprintf("arrow.buffer_size must be > 0, got %d", c.Arrow.BufferSize))
+		}
+	}
+
+	if adapterSet["duckdb"] {
+		checkDur("duckdb.flush_interval", c.DuckDB.FlushInterval)
+		if c.DuckDB.FlushSize <= 0 {
+			errs = append(errs, fmt.Sprintf("duckdb.flush_size must be > 0, got %d", c.DuckDB.FlushSize))
+		}
+	}
+
 	// --- Outbox detector durations ---
 	if c.Detector.Type == "outbox" {
 		checkDur("outbox.poll_interval", c.Outbox.PollInterval)

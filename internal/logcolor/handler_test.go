@@ -2,6 +2,7 @@ package logcolor
 
 import (
 	"bytes"
+	"context"
 	"log/slog"
 	"os"
 	"strings"
@@ -29,7 +30,7 @@ func TestColorHandler_LevelColors(t *testing.T) {
 			h := NewHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})
 			logger := slog.New(h)
 
-			logger.Log(nil, tt.level, "test message")
+			logger.Log(context.Background(), tt.level, "test message")
 
 			out := buf.String()
 			if !strings.Contains(out, tt.contains) {

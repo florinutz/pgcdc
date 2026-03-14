@@ -87,8 +87,8 @@ func runPluginInit(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	fmt.Fprintf(cmd.OutOrStdout(), "Plugin scaffolded in ./%s/\n", name)
-	fmt.Fprintf(cmd.OutOrStdout(), "  cd %s && make build\n", name)
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Plugin scaffolded in ./%s/\n", name)
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  cd %s && make build\n", name)
 	return nil
 }
 

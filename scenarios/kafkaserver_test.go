@@ -52,7 +52,7 @@ func TestScenario_KafkaServer(t *testing.T) {
 		})
 
 		// Wait for the TCP server to start and the LISTEN/NOTIFY detector to connect.
-		time.Sleep(2 * time.Second)
+		waitForTCP(t, addr, 5*time.Second)
 
 		// Connect a franz-go consumer to our Kafka protocol server.
 		// The topic should be "ks_orders" (channel has no colon, so no replacement).
@@ -67,17 +67,18 @@ func TestScenario_KafkaServer(t *testing.T) {
 		}
 		defer consumer.Close()
 
-		// Send a NOTIFY event through PostgreSQL.
+		// Send NOTIFY events through PostgreSQL, retrying until the detector is ready.
 		payload := `{"id":"order-1","status":"shipped","item":"widget"}`
-		sendNotify(t, connStr, channel, payload)
 
-		// Poll for the message.
-		readCtx, readCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer readCancel()
-
+		// Poll for the message, resending NOTIFY if the detector wasn't ready.
+		deadline := time.Now().Add(15 * time.Second)
 		var received *kgo.Record
-		for received == nil && readCtx.Err() == nil {
-			fetches := consumer.PollFetches(readCtx)
+		for received == nil && time.Now().Before(deadline) {
+			sendNotify(t, connStr, channel, payload)
+			// Use a short poll timeout so we can retry sendNotify if the detector wasn't ready.
+			pollCtx, pollCancel := context.WithTimeout(context.Background(), 2*time.Second)
+			fetches := consumer.PollFetches(pollCtx)
+			pollCancel()
 			fetches.EachRecord(func(r *kgo.Record) {
 				if received == nil {
 					received = r

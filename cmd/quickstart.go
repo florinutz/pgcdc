@@ -85,14 +85,14 @@ func runQuickstart(cmd *cobra.Command, args []string) error {
 	if err := writeQuickstartFile(filepath.Join(qc.OutDir, "pgcdc.yaml"), qsConfigTemplate, qc); err != nil {
 		return err
 	}
-	fmt.Fprintln(cmd.OutOrStdout(), "Wrote pgcdc.yaml")
+	_, _ = fmt.Fprintln(cmd.OutOrStdout(), "Wrote pgcdc.yaml")
 
 	// Generate init.sql (postgres only).
 	if qc.DB == "postgres" {
 		if err := writeQuickstartFile(filepath.Join(qc.OutDir, "init.sql"), qsInitSQLTemplate, qc); err != nil {
 			return err
 		}
-		fmt.Fprintln(cmd.OutOrStdout(), "Wrote init.sql")
+		_, _ = fmt.Fprintln(cmd.OutOrStdout(), "Wrote init.sql")
 	}
 
 	// Generate docker-compose.yml.
@@ -100,19 +100,19 @@ func runQuickstart(cmd *cobra.Command, args []string) error {
 		if err := writeQuickstartFile(filepath.Join(qc.OutDir, "docker-compose.yml"), qsDockerComposeTemplate, qc); err != nil {
 			return err
 		}
-		fmt.Fprintln(cmd.OutOrStdout(), "Wrote docker-compose.yml")
+		_, _ = fmt.Fprintln(cmd.OutOrStdout(), "Wrote docker-compose.yml")
 	}
 
-	fmt.Fprintln(cmd.OutOrStdout())
-	fmt.Fprintln(cmd.OutOrStdout(), "Next steps:")
-	fmt.Fprintf(cmd.OutOrStdout(), "  1. Edit pgcdc.yaml with your database credentials\n")
+	_, _ = fmt.Fprintln(cmd.OutOrStdout())
+	_, _ = fmt.Fprintln(cmd.OutOrStdout(), "Next steps:")
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  1. Edit pgcdc.yaml with your database credentials\n")
 	if qc.DB == "postgres" {
-		fmt.Fprintf(cmd.OutOrStdout(), "  2. Run init.sql against your database\n")
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  2. Run init.sql against your database\n")
 	}
 	if qc.Docker {
-		fmt.Fprintf(cmd.OutOrStdout(), "  3. docker compose up\n")
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  3. docker compose up\n")
 	} else {
-		fmt.Fprintf(cmd.OutOrStdout(), "  3. pgcdc listen\n")
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  3. pgcdc listen\n")
 	}
 	return nil
 }

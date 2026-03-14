@@ -180,8 +180,8 @@ func TestScenario_Snapshot(t *testing.T) {
 			}
 		}
 
-		// Brief pause for WAL detector to transition from snapshot to live mode.
-		time.Sleep(1 * time.Second)
+		// Wait for WAL detector to transition from snapshot to live streaming.
+		waitForWALDetector(t, connStr, table, capture)
 		capture.drain()
 		insertRow(t, connStr, table, map[string]any{"item": "live_insert"})
 

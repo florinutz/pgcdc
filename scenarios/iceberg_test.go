@@ -47,11 +47,20 @@ func TestScenario_Iceberg(t *testing.T) {
 			insertRow(t, connStr, "iceberg_events", map[string]any{"item": i + 1})
 		}
 
-		// Wait for flush (interval=1s + some margin).
-		time.Sleep(3 * time.Second)
-
-		// Verify Parquet data files exist.
+		// Wait for flush to produce parquet files.
 		dataDir := filepath.Join(warehouse, "pgcdc", "orders_cdc", "data")
+		waitFor(t, 10*time.Second, func() bool {
+			entries, err := os.ReadDir(dataDir)
+			if err != nil {
+				return false
+			}
+			for _, e := range entries {
+				if filepath.Ext(e.Name()) == ".parquet" {
+					return true
+				}
+			}
+			return false
+		})
 		entries, err := os.ReadDir(dataDir)
 		if err != nil {
 			t.Fatalf("read data dir: %v", err)
@@ -155,57 +164,71 @@ func TestScenario_Iceberg(t *testing.T) {
 
 		// Insert a row to trigger initial table creation.
 		insertRow(t, connStr, "iceberg_events", map[string]any{"item": "first"})
-		time.Sleep(4 * time.Second)
+
+		// Wait for initial flush to create the data directory with parquet files.
+		dataDir := filepath.Join(warehouse, "pgcdc", "retry_test", "data")
+		waitFor(t, 10*time.Second, func() bool {
+			entries, err := os.ReadDir(dataDir)
+			if err != nil {
+				return false
+			}
+			for _, e := range entries {
+				if filepath.Ext(e.Name()) == ".parquet" {
+					return true
+				}
+			}
+			return false
+		})
 
 		// Make the data directory read-only to force write failures.
-		dataDir := filepath.Join(warehouse, "pgcdc", "retry_test", "data")
 		if err := os.Chmod(dataDir, 0o444); err != nil {
 			t.Fatalf("chmod data dir: %v", err)
 		}
 
 		// Insert more rows — these should fail to flush.
 		insertRow(t, connStr, "iceberg_events", map[string]any{"item": "blocked"})
-		time.Sleep(4 * time.Second)
+		// Allow time for at least one failed flush attempt (flush interval = 500ms).
+		time.Sleep(2 * time.Second)
 
 		// Restore write permissions — next flush should succeed.
 		if err := os.Chmod(dataDir, 0o755); err != nil {
 			t.Fatalf("restore chmod: %v", err)
 		}
 
-		time.Sleep(4 * time.Second)
-
-		// Verify the blocked event was eventually written.
-		entries, err := os.ReadDir(dataDir)
-		if err != nil {
-			t.Fatalf("read data dir: %v", err)
-		}
-
-		var totalRows int64
-		for _, entry := range entries {
-			if filepath.Ext(entry.Name()) != ".parquet" {
-				continue
-			}
-			pqPath := filepath.Join(dataDir, entry.Name())
-			f, err := os.Open(pqPath)
+		// Wait for the retried flush to write the blocked event.
+		countParquetRows := func() int64 {
+			entries, err := os.ReadDir(dataDir)
 			if err != nil {
-				t.Fatalf("open parquet: %v", err)
+				return 0
 			}
-			fi, err := f.Stat()
-			if err != nil {
+			var total int64
+			for _, entry := range entries {
+				if filepath.Ext(entry.Name()) != ".parquet" {
+					continue
+				}
+				pqPath := filepath.Join(dataDir, entry.Name())
+				f, err := os.Open(pqPath)
+				if err != nil {
+					continue
+				}
+				fi, err := f.Stat()
+				if err != nil {
+					f.Close()
+					continue
+				}
+				pf, err := parquet.OpenFile(f, fi.Size())
+				if err != nil {
+					f.Close()
+					continue
+				}
+				total += pf.NumRows()
 				f.Close()
-				t.Fatalf("stat parquet: %v", err)
 			}
-			pf, err := parquet.OpenFile(f, fi.Size())
-			if err != nil {
-				f.Close()
-				t.Fatalf("open parquet file: %v", err)
-			}
-			totalRows += pf.NumRows()
-			f.Close()
+			return total
 		}
 
-		if totalRows < 2 {
-			t.Fatalf("expected at least 2 rows (initial + retried), got %d", totalRows)
-		}
+		waitFor(t, 10*time.Second, func() bool {
+			return countParquetRows() >= 2
+		})
 	})
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"sync"
 
 	"github.com/florinutz/pgcdc/event"
@@ -57,6 +58,19 @@ func New(path string, maxSize int64, maxFiles int, logger *slog.Logger) *Adapter
 // Name returns the adapter name.
 func (a *Adapter) Name() string {
 	return "file"
+}
+
+// Validate checks that the parent directory exists and is writable.
+func (a *Adapter) Validate(_ context.Context) error {
+	dir := filepath.Dir(a.path)
+	info, err := os.Stat(dir)
+	if err != nil {
+		return fmt.Errorf("stat parent directory %q: %w", dir, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("parent path %q is not a directory", dir)
+	}
+	return nil
 }
 
 // Deliver writes a single event as a JSON line. Implements adapter.Deliverer.

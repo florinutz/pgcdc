@@ -36,6 +36,6 @@ func FuzzCompile(f *testing.F) {
 
 	f.Fuzz(func(t *testing.T, expr string) {
 		// Must never panic; errors are expected for bad input.
-		Compile(expr)
+		_, _ = Compile(expr)
 	})
 }

@@ -23,15 +23,15 @@ func New(r io.Reader, w io.Writer) *Prompter {
 // zero-based index of the selected option. def is the default index used
 // when the user presses Enter without typing a number.
 func (p *Prompter) Select(label string, opts []string, def int) (int, error) {
-	fmt.Fprintf(p.w, "%s:\n", label)
+	_, _ = fmt.Fprintf(p.w, "%s:\n", label)
 	for i, opt := range opts {
 		defMark := ""
 		if i == def {
 			defMark = " (default)"
 		}
-		fmt.Fprintf(p.w, "  %d) %s%s\n", i+1, opt, defMark)
+		_, _ = fmt.Fprintf(p.w, "  %d) %s%s\n", i+1, opt, defMark)
 	}
-	fmt.Fprintf(p.w, "Enter 1-%d: ", len(opts))
+	_, _ = fmt.Fprintf(p.w, "Enter 1-%d: ", len(opts))
 
 	if !p.r.Scan() {
 		if err := p.r.Err(); err != nil {
@@ -55,11 +55,11 @@ func (p *Prompter) Select(label string, opts []string, def int) (int, error) {
 // MultiSelect prints numbered options and reads space-separated choices.
 // Returns zero-based indices of selected options.
 func (p *Prompter) MultiSelect(label string, opts []string) ([]int, error) {
-	fmt.Fprintf(p.w, "%s (space-separated numbers):\n", label)
+	_, _ = fmt.Fprintf(p.w, "%s (space-separated numbers):\n", label)
 	for i, opt := range opts {
-		fmt.Fprintf(p.w, "  %d) %s\n", i+1, opt)
+		_, _ = fmt.Fprintf(p.w, "  %d) %s\n", i+1, opt)
 	}
-	fmt.Fprintf(p.w, "Enter choices: ")
+	_, _ = fmt.Fprintf(p.w, "Enter choices: ")
 
 	if !p.r.Scan() {
 		if err := p.r.Err(); err != nil {
@@ -92,7 +92,7 @@ func (p *Prompter) Confirm(label string, def bool) (bool, error) {
 	if def {
 		hint = "[Y/n]"
 	}
-	fmt.Fprintf(p.w, "%s %s: ", label, hint)
+	_, _ = fmt.Fprintf(p.w, "%s %s: ", label, hint)
 
 	if !p.r.Scan() {
 		if err := p.r.Err(); err != nil {

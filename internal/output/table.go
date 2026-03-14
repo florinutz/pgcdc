@@ -12,32 +12,32 @@ func (p *Printer) Table(headers []string, rows [][]string) error {
 	// Print header row.
 	for i, h := range headers {
 		if i > 0 {
-			fmt.Fprint(w, "\t")
+			_, _ = fmt.Fprint(w, "\t")
 		}
-		fmt.Fprint(w, h)
+		_, _ = fmt.Fprint(w, h)
 	}
-	fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w)
 
 	// Print separator row.
 	for i, h := range headers {
 		if i > 0 {
-			fmt.Fprint(w, "\t")
+			_, _ = fmt.Fprint(w, "\t")
 		}
 		for range len(h) {
-			fmt.Fprint(w, "-")
+			_, _ = fmt.Fprint(w, "-")
 		}
 	}
-	fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w)
 
 	// Print data rows.
 	for _, row := range rows {
 		for i, cell := range row {
 			if i > 0 {
-				fmt.Fprint(w, "\t")
+				_, _ = fmt.Fprint(w, "\t")
 			}
-			fmt.Fprint(w, cell)
+			_, _ = fmt.Fprint(w, cell)
 		}
-		fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w)
 	}
 
 	return w.Flush()

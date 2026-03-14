@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	natsclient "github.com/nats-io/nats.go"
@@ -40,6 +41,8 @@ type Adapter struct {
 	ackFn         adapter.AckFunc
 	tracer        trace.Tracer
 	subjectCache  map[string]string
+	mu            sync.Mutex
+	nc            *natsclient.Conn
 }
 
 // SetTracer implements adapter.Traceable.
@@ -130,6 +133,10 @@ func (a *Adapter) run(ctx context.Context, events <-chan event.Event) error {
 	if err != nil {
 		return fmt.Errorf("nats connect: %w", err)
 	}
+	a.mu.Lock()
+	a.nc = nc
+	a.mu.Unlock()
+	defer func() { a.mu.Lock(); a.nc = nil; a.mu.Unlock() }()
 	defer nc.Close()
 
 	js, err := jetstream.New(nc)
@@ -237,6 +244,17 @@ func (a *Adapter) run(ctx context.Context, events <-chan event.Event) error {
 			}
 		}
 	}
+}
+
+// Drain flushes pending NATS publishes during graceful shutdown.
+func (a *Adapter) Drain(ctx context.Context) error {
+	a.mu.Lock()
+	nc := a.nc
+	a.mu.Unlock()
+	if nc != nil {
+		return nc.FlushWithContext(ctx)
+	}
+	return nil
 }
 
 // eventSubject converts an event channel to a NATS subject.

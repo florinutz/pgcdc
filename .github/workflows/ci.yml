@@ -70,3 +70,13 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build Docker image
         run: docker build -t pgcdc:ci .
+
+  build-slim:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build slim binary
+        run: go build -tags "no_kafka,no_grpc,no_iceberg,no_nats,no_redis,no_plugins,no_kafkaserver,no_views,no_s3,no_graphql,no_arrow,no_duckdb,no_sqlite" -o /dev/null ./cmd/pgcdc

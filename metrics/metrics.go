@@ -757,4 +757,33 @@ var (
 		Name: "pgcdc_toast_cache_entries",
 		Help: "Current number of entries in the TOAST cache.",
 	})
+
+	// Event delivery lag.
+
+	EventDeliveryLag = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "pgcdc_event_delivery_lag_seconds",
+		Help:    "Time from event creation to successful delivery.",
+		Buckets: []float64{0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 10, 30},
+	}, []string{"adapter"})
+
+	// DLQ depth.
+
+	DLQDepth = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "pgcdc_dlq_depth",
+		Help: "Current number of unprocessed DLQ records (PG-backed DLQ only).",
+	})
+
+	// Per-adapter queue depth.
+
+	AdapterQueueDepth = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "pgcdc_adapter_queue_depth",
+		Help: "Current number of events in an adapter's subscriber channel.",
+	}, []string{"adapter"})
+
+	// Batch events lost.
+
+	BatchEventsLost = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "pgcdc_batch_events_lost_total",
+		Help: "Total events lost due to fatal batch flush error with no DLQ configured.",
+	}, []string{"adapter"})
 )

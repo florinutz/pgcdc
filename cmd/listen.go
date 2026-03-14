@@ -21,6 +21,7 @@ import (
 	"github.com/florinutz/pgcdc"
 	"github.com/go-chi/chi/v5"
 
+	"github.com/florinutz/pgcdc/adapter"
 	"github.com/florinutz/pgcdc/adapter/middleware"
 	"github.com/florinutz/pgcdc/adapter/sse"
 	"github.com/florinutz/pgcdc/adapter/ws"
@@ -852,7 +853,7 @@ func setupAdapters(ctx context.Context, cfg config.Config, cmd *cobra.Command, w
 		if result.WSBroker != nil {
 			wsBroker = result.WSBroker
 		}
-		if m, ok := result.Adapter.(detector.HTTPMountable); ok {
+		if m, ok := result.Adapter.(adapter.HTTPMountable); ok {
 			httpMountFns = append(httpMountFns, m.MountHTTP)
 		}
 	}

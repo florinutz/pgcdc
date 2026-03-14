@@ -140,7 +140,7 @@ func PrintSummary(w io.Writer, cfg *config.Config, useColor bool) {
 		topPadding = 0
 	}
 	topLine := "+--" + title + strings.Repeat("-", topPadding) + "+"
-	fmt.Fprintln(w, border(topLine))
+	_, _ = fmt.Fprintln(w, border(topLine))
 
 	// Content lines.
 	for _, l := range lines {
@@ -160,11 +160,11 @@ func PrintSummary(w io.Writer, cfg *config.Config, useColor bool) {
 		}
 		padded := content + strings.Repeat(" ", contentWidth-len(content))
 
-		fmt.Fprintf(w, "%s %s %s\n",
+		_, _ = fmt.Fprintf(w, "%s %s %s\n",
 			border("|"), padded, border("|"))
 	}
 
 	// Bottom border.
 	bottomLine := "+" + strings.Repeat("-", summaryWidth-2) + "+"
-	fmt.Fprintln(w, border(bottomLine))
+	_, _ = fmt.Fprintln(w, border(bottomLine))
 }

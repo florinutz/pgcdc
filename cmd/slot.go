@@ -212,13 +212,13 @@ func runSlotStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	w := printer.Writer()
-	fmt.Fprintf(w, "Slot:                %s\n", info.Slot)
-	fmt.Fprintf(w, "Plugin:              %s\n", info.Plugin)
-	fmt.Fprintf(w, "Type:                %s\n", info.Type)
-	fmt.Fprintf(w, "Active:              %v\n", info.Active)
-	fmt.Fprintf(w, "Restart LSN:         %s\n", info.RestartLSN)
-	fmt.Fprintf(w, "Confirmed Flush LSN: %s\n", info.ConfirmedFlushLSN)
-	fmt.Fprintf(w, "WAL Retained:        %s\n", info.WALRetained)
+	_, _ = fmt.Fprintf(w, "Slot:                %s\n", info.Slot)
+	_, _ = fmt.Fprintf(w, "Plugin:              %s\n", info.Plugin)
+	_, _ = fmt.Fprintf(w, "Type:                %s\n", info.Type)
+	_, _ = fmt.Fprintf(w, "Active:              %v\n", info.Active)
+	_, _ = fmt.Fprintf(w, "Restart LSN:         %s\n", info.RestartLSN)
+	_, _ = fmt.Fprintf(w, "Confirmed Flush LSN: %s\n", info.ConfirmedFlushLSN)
+	_, _ = fmt.Fprintf(w, "WAL Retained:        %s\n", info.WALRetained)
 
 	return nil
 }

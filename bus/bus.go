@@ -148,6 +148,14 @@ func (b *Bus) Start(ctx context.Context) error {
 	}
 }
 
+// ReportQueueDepths sets the per-adapter queue depth gauge for all subscribers.
+func (b *Bus) ReportQueueDepths() {
+	subs := b.subsPtr.Load().subs
+	for _, sub := range subs {
+		metrics.AdapterQueueDepth.WithLabelValues(sub.name).Set(float64(len(sub.ch)))
+	}
+}
+
 // closeSubscribers closes all subscriber channels and marks the bus as closed.
 func (b *Bus) closeSubscribers() {
 	b.mu.Lock()

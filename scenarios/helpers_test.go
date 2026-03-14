@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -935,4 +936,17 @@ func waitForWALDetector(t *testing.T, connStr string, table string, lc *lineCapt
 		}
 	}
 	t.Fatal("waitForWALDetector: WAL detector did not become ready within 30s")
+}
+
+// waitForTCP polls until a TCP connection to addr succeeds or timeout expires.
+func waitForTCP(t *testing.T, addr string, timeout time.Duration) {
+	t.Helper()
+	waitFor(t, timeout, func() bool {
+		conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
+		if err != nil {
+			return false
+		}
+		conn.Close()
+		return true
+	})
 }

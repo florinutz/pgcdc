@@ -191,8 +191,10 @@ func TestScenario_Backpressure(t *testing.T) {
 		bpCtrl.SetLagFunc(func() int64 { return fakeLag.Load() })
 		fakeLag.Store(200) // above warn (100), below critical (500) → yellow
 
-		// Give controller time to detect and enter yellow zone.
-		time.Sleep(2 * time.Second)
+		// Wait for controller to detect and enter yellow zone.
+		waitFor(t, 5*time.Second, func() bool {
+			return bpCtrl.Zone() == backpressure.ZoneYellow
+		})
 
 		if bpCtrl.Zone() != backpressure.ZoneYellow {
 			t.Fatalf("expected yellow zone, got %v", bpCtrl.Zone())
@@ -216,7 +218,7 @@ func TestScenario_Backpressure(t *testing.T) {
 		}
 
 		// Give time for potential shed events to be processed.
-		time.Sleep(2 * time.Second)
+		time.Sleep(500 * time.Millisecond)
 
 		// In yellow zone, best-effort should be shed — it should receive
 		// at most 1-2 events (grace for zone transition timing), not all 5.
@@ -228,7 +230,9 @@ func TestScenario_Backpressure(t *testing.T) {
 
 		// Exit yellow zone.
 		fakeLag.Store(0)
-		time.Sleep(2 * time.Second)
+		waitFor(t, 5*time.Second, func() bool {
+			return bpCtrl.Zone() == backpressure.ZoneGreen
+		})
 
 		if bpCtrl.Zone() != backpressure.ZoneGreen {
 			t.Errorf("expected green zone after lag drop, got %v", bpCtrl.Zone())

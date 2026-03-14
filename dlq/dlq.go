@@ -158,6 +158,31 @@ func (d *PGTableDLQ) Close() error {
 	return nil
 }
 
+// DepthReporter is optionally implemented by DLQ backends that can report the
+// current number of unprocessed records. Pipeline uses this to set the
+// pgcdc_dlq_depth gauge.
+type DepthReporter interface {
+	Depth(ctx context.Context) (int64, error)
+}
+
+// Depth returns the number of unprocessed DLQ records (replayed_at IS NULL).
+func (d *PGTableDLQ) Depth(ctx context.Context) (int64, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if err := d.ensureConn(ctx); err != nil {
+		return 0, err
+	}
+
+	safeTable := pgx.Identifier{d.table}.Sanitize()
+	var count int64
+	err := d.conn.QueryRow(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE replayed_at IS NULL", safeTable)).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("dlq depth query: %w", err)
+	}
+	return count, nil
+}
+
 // ── NopDLQ ──────────────────────────────────────────────────────────────────
 
 // NopDLQ discards all failed events (--dlq none).

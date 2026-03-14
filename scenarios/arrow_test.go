@@ -46,7 +46,6 @@ func TestScenario_ArrowFlight(t *testing.T) {
 		})
 
 		// Insert rows via trigger to generate events.
-		time.Sleep(1 * time.Second)
 		for i := range 3 {
 			insertRow(t, connStr, table, map[string]any{"item": fmt.Sprintf("arrow_%d", i)})
 		}

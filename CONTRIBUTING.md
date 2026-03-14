@@ -112,7 +112,7 @@ make test-all
 3. **Must NOT close** the events channel (the bus owns its lifecycle).
 4. **Use `pgx.Connect`** (not pool) for PostgreSQL detectors -- LISTEN requires a dedicated connection.
 5. **Add selection logic** in `cmd/listen.go`.
-6. **Register with health checker**: `checker.Register("<name>")`, `checker.SetStatus(...)`.
+6. **Health checker registration** is handled by the pipeline (`pgcdc.go`) — no manual `checker.Register` call needed.
 7. **Add scenario test**, register in `SCENARIOS.md`.
 
 ## Adding a CLI Command

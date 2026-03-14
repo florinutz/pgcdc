@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"sync"
+	"time"
 )
 
 // Status represents the health state of a component.
@@ -15,16 +16,23 @@ const (
 	StatusDegraded Status = "degraded"
 )
 
+// componentInfo holds the internal health state of a single component.
+type componentInfo struct {
+	Status    Status
+	LastError string
+	LastSeen  time.Time
+}
+
 // Checker tracks the health of registered components.
 type Checker struct {
 	mu         sync.RWMutex
-	components map[string]Status
+	components map[string]componentInfo
 }
 
 // NewChecker creates a Checker with no registered components.
 func NewChecker() *Checker {
 	return &Checker{
-		components: make(map[string]Status),
+		components: make(map[string]componentInfo),
 	}
 }
 
@@ -32,19 +40,44 @@ func NewChecker() *Checker {
 func (c *Checker) Register(name string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.components[name] = StatusDown
+	c.components[name] = componentInfo{Status: StatusDown}
 }
 
 // SetStatus updates the health status of a named component.
+// LastSeen is set to the current time. LastError is cleared when status is Up.
 func (c *Checker) SetStatus(name string, status Status) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.components[name] = status
+	info := c.components[name]
+	info.Status = status
+	info.LastSeen = time.Now().UTC()
+	if status == StatusUp {
+		info.LastError = ""
+	}
+	c.components[name] = info
+}
+
+// SetStatusDetail updates the health status, last error, and last-seen time of a named component.
+func (c *Checker) SetStatusDetail(name string, status Status, lastErr string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.components[name] = componentInfo{
+		Status:    status,
+		LastError: lastErr,
+		LastSeen:  time.Now().UTC(),
+	}
+}
+
+// componentDetail is the per-component JSON representation in health responses.
+type componentDetail struct {
+	Status    Status    `json:"status"`
+	LastError string    `json:"last_error,omitempty"`
+	LastSeen  time.Time `json:"last_seen,omitempty"`
 }
 
 type response struct {
-	Status     Status            `json:"status"`
-	Components map[string]Status `json:"components"`
+	Status     Status                     `json:"status"`
+	Components map[string]componentDetail `json:"components"`
 }
 
 // ServeHTTP responds with the aggregated health status.
@@ -52,10 +85,10 @@ type response struct {
 func (c *Checker) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
 	c.mu.RLock()
 	overall := StatusUp
-	comps := make(map[string]Status, len(c.components))
-	for name, status := range c.components {
-		comps[name] = status
-		switch status {
+	comps := make(map[string]componentDetail, len(c.components))
+	for name, info := range c.components {
+		comps[name] = componentDetail(info)
+		switch info.Status {
 		case StatusDown:
 			overall = StatusDown
 		case StatusDegraded:

@@ -55,12 +55,13 @@ Context ──> Pipeline (pgcdc.go orchestrates everything)
 2. Optionally implement `adapter.Acknowledger` (`SetAckFunc(fn AckFunc)`) for cooperative checkpointing support — ack after fully handling each event (success, DLQ, or intentional skip)
 3. Optionally implement `adapter.Validator` (`Validate(ctx) error`) for startup pre-flight checks (DNS, connectivity, bucket existence)
 4. Optionally implement `adapter.Drainer` (`Drain(ctx) error`) for graceful shutdown flush (bounded by `shutdown_timeout`)
-5. Create `adapter/<name>/` package
-6. Create `cmd/register_<name>.go` and register via `registry.RegisterAdapter(registry.AdapterEntry{...})` in `init()`, including `BindFlags` and `ViperKeys` callbacks
-7. Add config struct in `internal/config/adapter_config.go`
-8. Add defaults in `Default()` in `internal/config/config.go`
-9. Add metrics instrumentation (`metrics.EventsDelivered.WithLabelValues("<name>").Inc()`)
-10. Add scenario test, register in SCENARIOS.md
+5. Optionally implement `adapter.HTTPMountable` (`MountHTTP(r chi.Router)`) if the adapter serves HTTP routes
+6. Create `adapter/<name>/` package
+7. Create `cmd/register_<name>.go` and register via `registry.RegisterAdapter(registry.AdapterEntry{...})` in `init()`, including `BindFlags` and `ViperKeys` callbacks
+8. Add config struct in `internal/config/adapter_config.go`
+9. Add defaults in `Default()` in `internal/config/config.go`
+10. Add metrics instrumentation (`metrics.EventsDelivered.WithLabelValues("<name>").Inc()`)
+11. Add scenario test, register in SCENARIOS.md
 
 ### New detector
 
@@ -70,7 +71,7 @@ Context ──> Pipeline (pgcdc.go orchestrates everything)
 4. **Use `pgx.Connect`** not pool — LISTEN requires a dedicated connection
 5. Create `cmd/register_detector_<name>.go` and register via `registry.RegisterDetector(registry.DetectorEntry{...})` in `init()`
 6. Add config struct in `internal/config/detector_config.go` and defaults in `Default()`
-7. Register with health checker (`checker.Register("<name>")`, `checker.SetStatus(...)`)
+7. Health checker registration is handled by the pipeline (`pgcdc.go`) — no manual `checker.Register` call needed
 8. Add scenario test, register in SCENARIOS.md
 
 ### New CLI command
@@ -88,6 +89,10 @@ Context ──> Pipeline (pgcdc.go orchestrates everything)
 - Put raw SQL identifiers in Go strings — use `pgx.Identifier{}.Sanitize()`
 - Add dependencies without justification — prefer stdlib (exceptions: `nats.go` for NATS adapter, `twmb/franz-go` for Kafka adapter)
 - Hardcode timeouts or backoff values — put them in config with defaults
+
+## Build Tags for Slim Binary
+
+`no_kafka`, `no_grpc`, `no_iceberg`, `no_nats`, `no_redis`, `no_plugins`, `no_kafkaserver`, `no_views`, `no_s3`, `no_graphql`, `no_arrow`, `no_duckdb`, `no_sqlite`
 
 ## Dependencies
 
@@ -134,7 +139,7 @@ Direct deps (keep minimal): `pgx/v5` (PG driver), `pglogrepl` (WAL logical repli
 pgcdc.go        Pipeline type (library entry point)
 cmd/            CLI commands (cobra); register_*.go files wire adapters/detectors into registry
 adapter/
-  adapter.go    Adapter, Deliverer, Acknowledger, Validator, Drainer, Reinjector interfaces
+  adapter.go    Adapter, Deliverer, Acknowledger, Validator, Drainer, Reinjector, HTTPMountable, Batcher interfaces
   middleware/   Middleware chain for Deliverer adapters (CB, rate-limit, retry, DLQ, tracing, metrics)
   chain/        Link-based preprocessing (compress, encrypt links)
   stdout/ webhook/ sse/ file/ exec/ pgtable/ ws/ embedding/ nats/ kafka/

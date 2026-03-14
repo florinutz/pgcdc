@@ -55,7 +55,7 @@ func TestScenario_GRPC(t *testing.T) {
 		})
 
 		// Wait for the gRPC server to start.
-		time.Sleep(2 * time.Second)
+		waitForTCP(t, grpcAddr, 5*time.Second)
 
 		// Connect a gRPC client.
 		conn, err := grpc.NewClient(grpcAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -73,12 +73,26 @@ func TestScenario_GRPC(t *testing.T) {
 			t.Fatalf("subscribe: %v", err)
 		}
 
-		// Send a NOTIFY event.
+		// Send NOTIFY events periodically until one arrives on the gRPC stream.
+		// The detector may not be ready immediately after TCP listen.
 		payload := `{"op":"INSERT","table":"orders","row":{"id":1,"item":"widget"}}`
-		sendNotify(t, connStr, channel, payload)
+		done := make(chan struct{})
+		go func() {
+			ticker := time.NewTicker(500 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				sendNotify(t, connStr, channel, payload)
+				select {
+				case <-done:
+					return
+				case <-ticker.C:
+				}
+			}
+		}()
 
 		// Receive the event via gRPC stream.
 		ev, err := stream.Recv()
+		close(done)
 		if err != nil {
 			t.Fatalf("recv: %v", err)
 		}
@@ -138,7 +152,7 @@ func TestScenario_GRPC(t *testing.T) {
 			g.Wait()
 		})
 
-		time.Sleep(2 * time.Second)
+		waitForTCP(t, grpcAddr, 5*time.Second)
 
 		// Connect a client that only subscribes to "grpc_orders".
 		conn, err := grpc.NewClient(grpcAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -158,16 +172,27 @@ func TestScenario_GRPC(t *testing.T) {
 			t.Fatalf("subscribe with filter: %v", err)
 		}
 
-		// Send an event on grpc_users first (should be filtered out).
+		// Send events periodically until the orders event arrives on the gRPC stream.
 		usersPayload := `{"op":"INSERT","table":"users","row":{"id":1,"name":"alice"}}`
-		sendNotify(t, connStr, "grpc_users", usersPayload)
-
-		// Then send an event on grpc_orders (should be received).
 		ordersPayload := `{"op":"INSERT","table":"orders","row":{"id":1,"item":"widget"}}`
-		sendNotify(t, connStr, "grpc_orders", ordersPayload)
+		done := make(chan struct{})
+		go func() {
+			ticker := time.NewTicker(500 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				sendNotify(t, connStr, "grpc_users", usersPayload)
+				sendNotify(t, connStr, "grpc_orders", ordersPayload)
+				select {
+				case <-done:
+					return
+				case <-ticker.C:
+				}
+			}
+		}()
 
 		// We should receive the orders event (not users).
 		ev, err := stream.Recv()
+		close(done)
 		if err != nil {
 			t.Fatalf("recv: %v", err)
 		}

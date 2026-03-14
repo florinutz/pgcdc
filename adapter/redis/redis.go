@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/florinutz/pgcdc/dlq"
@@ -33,6 +34,8 @@ type Adapter struct {
 	backoffCap  time.Duration
 	logger      *slog.Logger
 	dlq         dlq.DLQ
+	mu          sync.Mutex
+	rdb         *goredis.Client
 }
 
 // SetDLQ sets the dead letter queue for failed deliveries.
@@ -100,6 +103,10 @@ func (a *Adapter) run(ctx context.Context, events <-chan event.Event) error {
 		return fmt.Errorf("parse redis url: %w", err)
 	}
 	rdb := goredis.NewClient(opts)
+	a.mu.Lock()
+	a.rdb = rdb
+	a.mu.Unlock()
+	defer func() { a.mu.Lock(); a.rdb = nil; a.mu.Unlock() }()
 	defer func() { _ = rdb.Close() }()
 
 	// Verify connectivity.
@@ -198,6 +205,17 @@ func (a *Adapter) run(ctx context.Context, events <-chan event.Event) error {
 			metrics.EventsDelivered.WithLabelValues("redis").Inc()
 		}
 	}
+}
+
+// Drain closes the Redis connection during graceful shutdown.
+func (a *Adapter) Drain(_ context.Context) error {
+	a.mu.Lock()
+	rdb := a.rdb
+	a.mu.Unlock()
+	if rdb != nil {
+		return rdb.Close()
+	}
+	return nil
 }
 
 type payload struct {

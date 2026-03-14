@@ -6,6 +6,7 @@ import (
 
 	"github.com/florinutz/pgcdc/dlq"
 	"github.com/florinutz/pgcdc/event"
+	"github.com/go-chi/chi/v5"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -62,6 +63,12 @@ type Drainer interface {
 // bus ingest channel before starting adapters.
 type Reinjector interface {
 	SetIngestChan(ch chan<- event.Event)
+}
+
+// HTTPMountable is optionally implemented by adapters that serve HTTP routes
+// (e.g., graphql, duckdb). The pipeline mounts their routes on the shared HTTP server.
+type HTTPMountable interface {
+	MountHTTP(r chi.Router)
 }
 
 // DLQAware is implemented by adapters that can record failed events to a DLQ.

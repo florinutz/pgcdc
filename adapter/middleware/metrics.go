@@ -20,6 +20,9 @@ func Metrics(adapterName string) Middleware {
 			metrics.MiddlewareDeliveryDuration.WithLabelValues(adapterName).Observe(duration)
 			if err == nil {
 				metrics.EventsDelivered.WithLabelValues(adapterName).Inc()
+				if !ev.CreatedAt.IsZero() {
+					metrics.EventDeliveryLag.WithLabelValues(adapterName).Observe(time.Since(ev.CreatedAt).Seconds())
+				}
 			}
 			return err
 		}

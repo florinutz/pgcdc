@@ -35,6 +35,11 @@ builds:
       - no_plugins
       - no_kafkaserver
       - no_views
+      - no_s3
+      - no_graphql
+      - no_arrow
+      - no_duckdb
+      - no_sqlite
     ldflags:
       - -s -w -X github.com/florinutz/pgcdc/cmd.Version={{.Version}}-slim -X github.com/florinutz/pgcdc/cmd.Commit={{.ShortCommit}} -X github.com/florinutz/pgcdc/cmd.BuildDate={{.Date}}
 

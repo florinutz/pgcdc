@@ -87,10 +87,11 @@ func TestScenario_Embedding(t *testing.T) {
 		)
 		startPipeline(t, connStr, []string{channel}, adapter)
 
-		// Give the pipeline a moment to start.
+		// Brief pause for LISTEN/NOTIFY detector to connect before the initial INSERT.
 		time.Sleep(200 * time.Millisecond)
 
 		// INSERT a row: triggers NOTIFY with {"op":"INSERT","table":"...","row":{"id":1,"data":{"text":"hello"}}}
+		// waitForEmbedding below polls until the embedding appears.
 		insertRow(t, connStr, table, map[string]any{"text": "hello"})
 
 		// Wait for vector to appear.
@@ -116,8 +117,13 @@ func TestScenario_Embedding(t *testing.T) {
 		// UPDATE the row: should re-embed and update the row.
 		updateRow(t, connStr, table, 1, map[string]any{"text": "hello world updated"})
 
-		// Wait for updated_at to change (allow a second for the upsert to land).
-		time.Sleep(500 * time.Millisecond)
+		// Wait for the upsert to land (row count should still be 1 after UPDATE).
+		waitFor(t, 10*time.Second, func() bool {
+			var count int
+			_ = conn2.QueryRow(context.Background(),
+				fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE source_id = '1'`, safeEmb)).Scan(&count)
+			return count == 1
+		})
 		var count int
 		_ = conn2.QueryRow(context.Background(),
 			fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE source_id = '1'`, safeEmb)).Scan(&count)
@@ -127,7 +133,12 @@ func TestScenario_Embedding(t *testing.T) {
 
 		// DELETE the row: vector should be removed.
 		deleteRow(t, connStr, table, 1)
-		time.Sleep(500 * time.Millisecond)
+		waitFor(t, 10*time.Second, func() bool {
+			var c int
+			_ = conn2.QueryRow(context.Background(),
+				fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE source_id = '1'`, safeEmb)).Scan(&c)
+			return c == 0
+		})
 		_ = conn2.QueryRow(context.Background(),
 			fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE source_id = '1'`, safeEmb)).Scan(&count)
 		if count != 0 {
@@ -195,8 +206,12 @@ func TestScenario_Embedding(t *testing.T) {
 			testLogger(),
 		)
 		startPipeline(t, connStr, []string{channel}, adapter)
+
+		// Brief pause for LISTEN/NOTIFY detector to connect before sending the
+		// single INSERT that drives the retry test.
 		time.Sleep(200 * time.Millisecond)
 
+		// Insert row — waitForEmbedding below polls until the embedding appears.
 		insertRow(t, connStr, table, map[string]any{"text": "retry test"})
 
 		// Wait for embedding to appear (retry takes time due to backoff).

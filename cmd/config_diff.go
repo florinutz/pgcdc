@@ -42,11 +42,11 @@ func runConfigDiff(cmd *cobra.Command, args []string) error {
 
 	diffs := diffMaps("", oldMap, newMap)
 	if len(diffs) == 0 {
-		fmt.Fprintln(cmd.OutOrStdout(), "No differences found.")
+		_, _ = fmt.Fprintln(cmd.OutOrStdout(), "No differences found.")
 		return nil
 	}
 	for _, d := range diffs {
-		fmt.Fprintln(cmd.OutOrStdout(), d)
+		_, _ = fmt.Fprintln(cmd.OutOrStdout(), d)
 	}
 	return nil
 }
@@ -129,11 +129,12 @@ func diffSlices(path string, old, new []any) []string {
 
 	for i := 0; i < maxLen; i++ {
 		elemPath := fmt.Sprintf("%s[%d]", path, i)
-		if i >= len(old) {
+		switch {
+		case i >= len(old):
 			diffs = append(diffs, fmt.Sprintf("+ %s: %s", elemPath, formatValue(new[i])))
-		} else if i >= len(new) {
+		case i >= len(new):
 			diffs = append(diffs, fmt.Sprintf("- %s: %s", elemPath, formatValue(old[i])))
-		} else {
+		default:
 			oldElem := fmt.Sprintf("%v", old[i])
 			newElem := fmt.Sprintf("%v", new[i])
 			if oldElem != newElem {

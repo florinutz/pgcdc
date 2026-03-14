@@ -102,14 +102,11 @@ func TestScenario_Redis(t *testing.T) {
 		payload := `{"op":"INSERT","table":"items","row":{"id":"42","name":"widget"}}`
 		sendNotify(t, connStr, channel, payload)
 
-		// Wait for the Redis adapter to process.
-		time.Sleep(2 * time.Second)
-
-		// Verify the key was deleted (invalidated).
-		_, err = rdb.Get(ctx, "test:42").Result()
-		if err != goredis.Nil {
-			t.Errorf("expected key to be deleted (invalidated), got err=%v", err)
-		}
+		// Wait for the Redis adapter to process the invalidation.
+		waitFor(t, 10*time.Second, func() bool {
+			_, getErr := rdb.Get(ctx, "test:42").Result()
+			return getErr == goredis.Nil
+		})
 
 		// Also test that a DELETE event works the same way — first set the key again.
 		if err := rdb.Set(ctx, "test:42", `{"cached":"again"}`, 0).Err(); err != nil {
@@ -119,12 +116,11 @@ func TestScenario_Redis(t *testing.T) {
 		deletePayload := `{"op":"DELETE","table":"items","row":{"id":"42","name":"widget"}}`
 		sendNotify(t, connStr, channel, deletePayload)
 
-		time.Sleep(2 * time.Second)
-
-		_, err = rdb.Get(ctx, "test:42").Result()
-		if err != goredis.Nil {
-			t.Errorf("expected key to be deleted after DELETE event, got err=%v", err)
-		}
+		// Wait for the Redis adapter to process the DELETE invalidation.
+		waitFor(t, 10*time.Second, func() bool {
+			_, getErr := rdb.Get(ctx, "test:42").Result()
+			return getErr == goredis.Nil
+		})
 	})
 
 	t.Run("sync mode", func(t *testing.T) {

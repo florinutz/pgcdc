@@ -22,6 +22,7 @@ type Config struct {
 	Retry          *RetryConfig
 	CircuitBreaker *CircuitBreakerConfig
 	RateLimit      *RateLimitConfig
+	Timeout        time.Duration
 }
 
 // RetryConfig controls exponential backoff retry behavior.
@@ -86,6 +87,11 @@ func Build(name string, cfg Config, opts ...Option) DeliverFunc {
 	if cfg.RateLimit != nil && cfg.RateLimit.EventsPerSecond > 0 {
 		lim := ratelimit.New(cfg.RateLimit.EventsPerSecond, cfg.RateLimit.Burst, name, o.logger)
 		mws = append(mws, RateLimit(lim))
+	}
+
+	// Timeout (when configured).
+	if cfg.Timeout > 0 {
+		mws = append(mws, Timeout(cfg.Timeout))
 	}
 
 	// Retry (when configured).

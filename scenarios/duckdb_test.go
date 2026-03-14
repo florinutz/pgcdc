@@ -32,8 +32,7 @@ func TestScenario_DuckDB(t *testing.T) {
 
 		startPipeline(t, connStr, []string{channel}, adapter)
 
-		// Wait for LISTEN/NOTIFY detector + insert row.
-		time.Sleep(3 * time.Second)
+		// Insert row — the polling loop below re-inserts if the detector wasn't ready.
 		insertRow(t, connStr, table, map[string]any{"item": "widget"})
 
 		// Poll query endpoint until event appears in DuckDB.
@@ -82,7 +81,7 @@ func TestScenario_DuckDB(t *testing.T) {
 
 		startPipeline(t, connStr, []string{channel}, adapter)
 
-		time.Sleep(3 * time.Second)
+		// Insert rows — the polling loop below re-inserts if the detector wasn't ready.
 		insertRow(t, connStr, table, map[string]any{"item": "alpha"})
 		insertRow(t, connStr, table, map[string]any{"item": "beta"})
 

@@ -60,8 +60,7 @@ func TestScenario_GraphQL(t *testing.T) {
 			},
 		})
 
-		// Wait for detector, then insert a row.
-		time.Sleep(5 * time.Second)
+		// Insert a row — the retry loop below re-inserts if the detector wasn't ready.
 		insertRow(t, connStr, table, map[string]any{"item": "gql-widget"})
 
 		// Read next message with event data.
@@ -154,9 +153,8 @@ func TestScenario_GraphQL(t *testing.T) {
 			},
 		})
 
-		time.Sleep(3 * time.Second)
-
 		// Insert into channel2 (should not match), then channel1 (should match).
+		// The retry loop below re-inserts if the detector wasn't ready.
 		insertRow(t, connStr, table2, map[string]any{"name": "bob"})
 		time.Sleep(500 * time.Millisecond)
 		insertRow(t, connStr, table1, map[string]any{"item": "filtered"})

@@ -120,10 +120,10 @@ func checkGolden(t *testing.T, got []byte) {
 	t.Helper()
 	golden := filepath.Join("testdata", "golden", t.Name()+".json")
 	if *update {
-		if err := os.MkdirAll(filepath.Dir(golden), 0755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(golden), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(golden, got, 0644); err != nil {
+		if err := os.WriteFile(golden, got, 0o644); err != nil {
 			t.Fatal(err)
 		}
 		return
