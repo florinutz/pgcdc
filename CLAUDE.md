@@ -1,6 +1,6 @@
 # pgcdc
 
-PostgreSQL, MySQL, MongoDB, and SQLite change data capture (LISTEN/NOTIFY, WAL logical replication, outbox pattern, MySQL binlog, MongoDB Change Streams, SQLite change tables, or inbound webhook gateway) streaming to webhooks, SSE, stdout, files, exec processes, PG tables, WebSockets, pgvector embeddings, NATS JetStream, Kafka, Typesense/Meilisearch, Redis, gRPC, S3-compatible object storage, a built-in Kafka protocol server (speak Kafka wire protocol directly — no Kafka cluster needed), GraphQL subscriptions, Apache Arrow Flight, DuckDB in-process analytics, and streaming SQL views (tumbling, sliding, and session window aggregation over CDC events).
+PostgreSQL, MySQL, MongoDB, and SQLite change data capture (LISTEN/NOTIFY, WAL logical replication, outbox pattern, MySQL binlog, MongoDB Change Streams, SQLite change tables, inbound webhook gateway, Kafka consumer, or NATS consumer) streaming to webhooks, SSE, stdout, files, exec processes, PG tables, WebSockets, pgvector embeddings, NATS JetStream, Kafka, Typesense/Meilisearch, Redis, gRPC, S3-compatible object storage, a built-in Kafka protocol server (speak Kafka wire protocol directly — no Kafka cluster needed), GraphQL subscriptions, Apache Arrow Flight, DuckDB in-process analytics, ClickHouse, and streaming SQL views (tumbling, sliding, and session window aggregation over CDC events).
 
 ## Architecture
 
@@ -17,7 +17,9 @@ Context ──> Pipeline (pgcdc.go orchestrates everything)
    mysql            |                   ──> Adapter (SSE/WS)      ──> HTTP server
    mongodb          |                   ──> Adapter (nats/kafka/search/redis/grpc/s3)
    webhookgw        |                   ──> Adapter (embedding)   ──> DLQ
-   or sqlite)       |                   ──> Adapter (graphql)     ──> HTTP server
+   kafka_consumer   |                   ──> Adapter (graphql)     ──> HTTP server
+   nats_consumer    |                   ──> Adapter (clickhouse)
+   or sqlite)       |
                     |                   ──> Adapter (arrow)       ──> gRPC Flight server
                     |                   ──> Adapter (duckdb)      ──> HTTP query endpoint
               ingest chan               ──> Adapter (view)        ──> re-inject to bus
@@ -92,11 +94,11 @@ Context ──> Pipeline (pgcdc.go orchestrates everything)
 
 ## Build Tags for Slim Binary
 
-`no_kafka`, `no_grpc`, `no_iceberg`, `no_nats`, `no_redis`, `no_plugins`, `no_kafkaserver`, `no_views`, `no_s3`, `no_graphql`, `no_arrow`, `no_duckdb`, `no_sqlite`
+`no_kafka`, `no_grpc`, `no_iceberg`, `no_nats`, `no_redis`, `no_plugins`, `no_kafkaserver`, `no_views`, `no_s3`, `no_graphql`, `no_arrow`, `no_duckdb`, `no_sqlite`, `no_clickhouse`
 
 ## Dependencies
 
-Direct deps (keep minimal): `pgx/v5` (PG driver), `pglogrepl` (WAL logical replication protocol), `cobra` + `viper` (CLI/config), `chi/v5` (HTTP router), `google/uuid` (UUIDv7), `errgroup` (concurrency), `prometheus/client_golang` (metrics), `coder/websocket` (WebSocket adapter), `nats-io/nats.go` (NATS JetStream adapter), `twmb/franz-go` (Kafka adapter), `redis/go-redis/v9` (Redis adapter), `google.golang.org/grpc` + `google.golang.org/protobuf` (gRPC adapter), `aws/aws-sdk-go-v2` (S3 adapter), `parquet-go/parquet-go` (Parquet writer for S3/Iceberg), `hamba/avro/v2` (Avro encoding), `go.opentelemetry.io/otel` (OpenTelemetry tracing), `extism/go-sdk` (Wasm plugin runtime), `go-mysql-org/go-mysql` (MySQL binlog replication), `go-sql-driver/mysql` (MySQL driver for schema queries), `go.mongodb.org/mongo-driver/v2` (MongoDB Change Streams detector), `pingcap/tidb/pkg/parser` (SQL parsing for view adapter), `apache/arrow-go` (Arrow Flight adapter), `modernc.org/sqlite` (SQLite detector), `duckdb/duckdb-go/v2` (DuckDB analytics adapter, CGO), `testcontainers-go` (test only).
+Direct deps (keep minimal): `pgx/v5` (PG driver), `pglogrepl` (WAL logical replication protocol), `cobra` + `viper` (CLI/config), `chi/v5` (HTTP router), `google/uuid` (UUIDv7), `errgroup` (concurrency), `prometheus/client_golang` (metrics), `coder/websocket` (WebSocket adapter), `nats-io/nats.go` (NATS JetStream adapter + consumer detector), `twmb/franz-go` (Kafka adapter + consumer detector), `redis/go-redis/v9` (Redis adapter), `google.golang.org/grpc` + `google.golang.org/protobuf` (gRPC adapter), `aws/aws-sdk-go-v2` (S3 adapter), `parquet-go/parquet-go` (Parquet writer for S3/Iceberg), `hamba/avro/v2` (Avro encoding), `go.opentelemetry.io/otel` (OpenTelemetry tracing), `extism/go-sdk` (Wasm plugin runtime), `go-mysql-org/go-mysql` (MySQL binlog replication), `go-sql-driver/mysql` (MySQL driver for schema queries), `go.mongodb.org/mongo-driver/v2` (MongoDB Change Streams detector), `pingcap/tidb/pkg/parser` (SQL parsing for view adapter), `apache/arrow-go` (Arrow Flight adapter), `modernc.org/sqlite` (SQLite detector), `duckdb/duckdb-go/v2` (DuckDB analytics adapter, CGO), `ClickHouse/clickhouse-go/v2` (ClickHouse adapter), `testcontainers-go` (test only).
 
 ## Testing
 
@@ -143,16 +145,16 @@ adapter/
   middleware/   Middleware chain for Deliverer adapters (CB, rate-limit, retry, DLQ, tracing, metrics)
   chain/        Link-based preprocessing (compress, encrypt links)
   stdout/ webhook/ sse/ file/ exec/ pgtable/ ws/ embedding/ nats/ kafka/
-  search/ redis/ grpc/ s3/ iceberg/ kafkaserver/ view/ graphql/ arrow/ duckdb/
+  search/ redis/ grpc/ s3/ iceberg/ kafkaserver/ view/ graphql/ arrow/ duckdb/ clickhouse/
 view/           Streaming SQL engine (parser, AST, tumbling/sliding/session windows, aggregators)
 registry/       Self-registering component registry (AdapterEntry, DetectorEntry, ParamSpec)
 detector/
-  listennotify/ walreplication/ outbox/ mysql/ mongodb/ multi/ webhookgw/ sqlite/
+  listennotify/ walreplication/ outbox/ mysql/ mongodb/ multi/ webhookgw/ sqlite/ kafka/ nats/
   walreplication/toastcache/  LRU cache for unchanged TOAST column resolution
 ack/            Cooperative checkpoint LSN tracker (min across all adapter ack positions)
 backpressure/   WAL lag backpressure: green/yellow/red zones, throttle/pause/shed
 bus/            Event fan-out (fast-drop or reliable-block mode)
-transform/      TransformFunc chain; built-ins: drop_columns, rename_fields, mask, filter, debezium, cloudevents, cel_filter
+transform/      TransformFunc chain; built-ins: drop_columns, rename_fields, mask, filter, debezium, cloudevents, cel_filter, dedup
 cel/            CEL expression compiler/evaluator for event filtering
 snapshot/       Table snapshot (COPY-based + incremental chunk-based)
 inspect/        Ring-buffer event tap (post-detector, post-transform, pre-adapter) + HTTP handlers
@@ -211,6 +213,9 @@ testutil/       Test utilities
 - `adapter/duckdb/duckdb.go` — DuckDB in-process analytics adapter (buffered ingest + SQL query endpoint)
 - `detector/webhookgw/webhookgw.go` — Webhook gateway detector (HTTP ingest endpoint)
 - `detector/sqlite/sqlite.go` — SQLite CDC detector (poll-based change table)
+- `adapter/clickhouse/clickhouse.go` — ClickHouse batch INSERT adapter (ReplacingMergeTree, auto-create, batch.Runner, async inserts, custom query settings, in-batch dedup)
+- `detector/kafka/kafka.go` — Kafka consumer group detector (franz-go, reconnect loop)
+- `detector/nats/nats.go` — NATS JetStream durable consumer detector
 - `cmd/doctor.go` — System health checker (docker, config, DB, slots, WAL, adapters)
 - `cmd/quickstart.go` — Interactive project generator (config, SQL, docker-compose)
 - `cmd/plugin_scaffold.go` — Wasm plugin project scaffolding

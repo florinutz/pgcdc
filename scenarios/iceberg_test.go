@@ -98,40 +98,42 @@ func TestScenario_Iceberg(t *testing.T) {
 			t.Fatalf("expected 3 rows in parquet, got %d", totalRows)
 		}
 
-		// Verify metadata.json exists and is valid Iceberg v2.
+		// Verify metadata.json exists and is valid Iceberg v2 with at least one snapshot.
 		// v1.metadata.json is the initial table creation (no snapshots).
 		// v2.metadata.json is written after the first flush (with snapshot).
+		// Poll because parquet data appears before metadata is updated.
 		metaDir := filepath.Join(warehouse, "pgcdc", "orders_cdc", "metadata")
 
-		// Find the highest version metadata file.
 		var latestMeta string
-		for v := 100; v >= 1; v-- {
-			candidate := filepath.Join(metaDir, "v"+strconv.Itoa(v)+".metadata.json")
-			if _, err := os.Stat(candidate); err == nil {
-				latestMeta = candidate
-				break
-			}
-		}
-		if latestMeta == "" {
-			t.Fatal("no versioned metadata.json found")
-		}
-
-		data, err := os.ReadFile(latestMeta)
-		if err != nil {
-			t.Fatalf("read metadata: %v", err)
-		}
 		var meta map[string]any
-		if err := json.Unmarshal(data, &meta); err != nil {
-			t.Fatalf("parse metadata: %v", err)
-		}
+		waitFor(t, 10*time.Second, func() bool {
+			latestMeta = ""
+			for v := 100; v >= 1; v-- {
+				candidate := filepath.Join(metaDir, "v"+strconv.Itoa(v)+".metadata.json")
+				if _, err := os.Stat(candidate); err == nil {
+					latestMeta = candidate
+					break
+				}
+			}
+			if latestMeta == "" {
+				return false
+			}
+			data, err := os.ReadFile(latestMeta)
+			if err != nil {
+				return false
+			}
+			meta = nil
+			if json.Unmarshal(data, &meta) != nil {
+				return false
+			}
+			snapshots, ok := meta["snapshots"].([]any)
+			return ok && len(snapshots) > 0
+		})
+
 		if fv, ok := meta["format-version"]; !ok {
 			t.Fatal("missing format-version in metadata")
 		} else if fv != float64(2) {
 			t.Fatalf("expected format-version 2, got %v", fv)
-		}
-		snapshots, ok := meta["snapshots"].([]any)
-		if !ok || len(snapshots) == 0 {
-			t.Fatalf("expected at least one snapshot in metadata at %s", latestMeta)
 		}
 
 		// Verify version-hint.text exists.

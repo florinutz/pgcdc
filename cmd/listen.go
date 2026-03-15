@@ -208,6 +208,11 @@ func init() {
 	// CEL filter CLI shortcut.
 	f.String("filter-cel", "", "global CEL filter expression (e.g. 'operation == \"INSERT\"')")
 
+	// Dedup CLI shortcut.
+	f.String("dedup-key", "", "dedup key path (e.g. payload.id; empty = event ID)")
+	f.Duration("dedup-window", 0, "dedup time window (e.g. 1h)")
+	f.Int("dedup-max-keys", 100000, "dedup LRU cache max keys")
+
 	// TLS flags.
 	f.String("sse-tls-cert", "", "path to TLS certificate file for HTTP server")
 	f.String("sse-tls-key", "", "path to TLS private key file for HTTP server")
@@ -302,6 +307,11 @@ func bindListenFlags(cmd *cobra.Command, _ []string) error {
 		{"sqlite-batch-size", "sqlite.batch_size"},
 		{"sqlite-keep-processed", "sqlite.keep_processed"},
 
+		// NATS consumer.
+		{"nats-consumer-stream", "nats_consumer.stream"},
+		{"nats-consumer-subjects", "nats_consumer.subjects"},
+		{"nats-consumer-durable", "nats_consumer.durable"},
+
 		// Shared encoding / Schema Registry.
 		{"schema-registry-url", "encoding.schema_registry_url"},
 		{"schema-registry-username", "encoding.schema_registry_username"},
@@ -323,6 +333,11 @@ func bindListenFlags(cmd *cobra.Command, _ []string) error {
 		// Nack window.
 		{"dlq-window-size", "dlq.window_size"},
 		{"dlq-window-threshold", "dlq.window_threshold"},
+
+		// Kafka consumer detector.
+		{"kafka-consumer-topics", "kafka_consumer.topics"},
+		{"kafka-consumer-group", "kafka_consumer.group"},
+		{"kafka-consumer-offset", "kafka_consumer.offset"},
 
 		// Webhook gateway.
 		{"webhookgw-max-body", "webhook_gateway.max_body_size"},
@@ -517,6 +532,15 @@ func runListen(cmd *cobra.Command, args []string) error {
 		opts = append(opts, pgcdc.WithTransform(celFn))
 		// Include in immutable CLI transforms for SIGHUP reload.
 		immutableCLI = append(immutableCLI, celFn)
+	}
+
+	// Dedup CLI shortcut.
+	if dedupWindow, _ := cmd.Flags().GetDuration("dedup-window"); dedupWindow > 0 {
+		dedupKey, _ := cmd.Flags().GetString("dedup-key")
+		dedupMax, _ := cmd.Flags().GetInt("dedup-max-keys")
+		dedupFn := transform.Dedup(dedupKey, dedupWindow, dedupMax)
+		opts = append(opts, pgcdc.WithTransform(dedupFn))
+		immutableCLI = append(immutableCLI, dedupFn)
 	}
 
 	// Inspector.

@@ -13,6 +13,7 @@ var knownAdapters = map[string]bool{
 	"iceberg": true, "nats": true, "search": true, "redis": true,
 	"kafka": true, "kafkaserver": true, "s3": true, "grpc": true,
 	"view": true, "graphql": true, "arrow": true, "duckdb": true,
+	"clickhouse": true,
 }
 
 // Validate performs structural validation on the config.
@@ -20,7 +21,7 @@ func (c Config) Validate() error {
 	var errs []string
 
 	// --- Top-level ---
-	if c.DatabaseURL == "" && c.Detector.Type != "mysql" && c.Detector.Type != "mongodb" {
+	if c.DatabaseURL == "" && c.Detector.Type != "mysql" && c.Detector.Type != "mongodb" && c.Detector.Type != "kafka_consumer" && c.Detector.Type != "nats_consumer" {
 		errs = append(errs, "database_url is required")
 	}
 	if c.Bus.BufferSize <= 0 {
@@ -204,6 +205,16 @@ func (c Config) Validate() error {
 		}
 	}
 
+	if adapterSet["clickhouse"] {
+		if c.ClickHouse.DSN == "" {
+			errs = append(errs, "clickhouse.dsn is required")
+		}
+		if c.ClickHouse.BatchSize <= 0 {
+			errs = append(errs, fmt.Sprintf("clickhouse.batch_size must be > 0, got %d", c.ClickHouse.BatchSize))
+		}
+		checkDur("clickhouse.flush_interval", c.ClickHouse.FlushInterval)
+	}
+
 	if adapterSet["duckdb"] {
 		checkDur("duckdb.flush_interval", c.DuckDB.FlushInterval)
 		if c.DuckDB.FlushSize <= 0 {
@@ -228,6 +239,20 @@ func (c Config) Validate() error {
 		}
 		checkDur("mysql.backoff_base", c.MySQL.BackoffBase)
 		checkDur("mysql.backoff_cap", c.MySQL.BackoffCap)
+	}
+
+	// --- NATS consumer detector ---
+	if c.Detector.Type == "nats_consumer" {
+		if c.Nats.URL == "" {
+			errs = append(errs, "nats.url is required for nats_consumer detector")
+		}
+	}
+
+	// --- Kafka consumer detector ---
+	if c.Detector.Type == "kafka_consumer" {
+		if len(c.KafkaConsumer.Topics) == 0 {
+			errs = append(errs, "kafka_consumer.topics must not be empty")
+		}
 	}
 
 	// --- MongoDB detector ---

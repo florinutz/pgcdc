@@ -6,7 +6,7 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -ldflags "-s -w -X github.com/florinutz/pgcdc/cmd.Version=${VERSION}" -o /pgcdc ./cmd/pgcdc
+RUN CGO_ENABLED=0 go build -tags "no_duckdb,no_sqlite" -ldflags "-s -w -X github.com/florinutz/pgcdc/cmd.Version=${VERSION}" -o /pgcdc ./cmd/pgcdc
 
 FROM alpine:3.21
 RUN apk add --no-cache ca-certificates

@@ -223,4 +223,57 @@ func TestScenario_Transform(t *testing.T) {
 			t.Errorf("title = %v, want Live Post", payload["title"])
 		}
 	})
+
+	t.Run("dedup drops duplicates", func(t *testing.T) {
+		logger := testLogger()
+		lc := newLineCapture()
+
+		det := listennotify.New(connStr, []string{channel}, 0, 0, logger)
+		p := pgcdc.NewPipeline(det,
+			pgcdc.WithBusBuffer(64),
+			pgcdc.WithLogger(logger),
+			pgcdc.WithAdapter(stdout.New(lc, logger)),
+			pgcdc.WithTransform(transform.Dedup("id", 5*time.Second, 1000)),
+		)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		g, gCtx := errgroup.WithContext(ctx)
+		g.Go(func() error { return p.Run(gCtx) })
+		t.Cleanup(func() {
+			cancel()
+			_ = g.Wait()
+		})
+
+		waitForDetector(t, connStr, channel, lc)
+
+		// Send a payload with id "dup-1".
+		sendNotify(t, connStr, channel, `{"id":"dup-1","name":"Alice"}`)
+		lc.waitLine(t, 5*time.Second)
+
+		// Send the same payload again — should be deduped.
+		sendNotify(t, connStr, channel, `{"id":"dup-1","name":"Alice"}`)
+
+		// Wait briefly, then send a different payload.
+		time.Sleep(200 * time.Millisecond)
+		sendNotify(t, connStr, channel, `{"id":"dup-2","name":"Bob"}`)
+
+		// The next event should be "Bob" (the duplicate "Alice" was dropped).
+		line := lc.waitLine(t, 5*time.Second)
+		var ev map[string]any
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			t.Fatalf("unmarshal event: %v", err)
+		}
+
+		payload, ok := ev["payload"].(map[string]any)
+		if !ok {
+			t.Fatal("payload is not a map")
+		}
+
+		if payload["name"] != "Bob" {
+			t.Errorf("expected Bob (dedup should have dropped second Alice), got name=%v", payload["name"])
+		}
+		if payload["id"] != "dup-2" {
+			t.Errorf("expected id=dup-2, got %v", payload["id"])
+		}
+	})
 }

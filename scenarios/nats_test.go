@@ -11,8 +11,10 @@ import (
 	"time"
 
 	natsadapter "github.com/florinutz/pgcdc/adapter/nats"
+	"github.com/florinutz/pgcdc/adapter/stdout"
 	"github.com/florinutz/pgcdc/bus"
 	"github.com/florinutz/pgcdc/detector/listennotify"
+	natsdetector "github.com/florinutz/pgcdc/detector/nats"
 	"github.com/florinutz/pgcdc/event"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -178,5 +180,120 @@ func TestScenario_Nats(t *testing.T) {
 		// Print to test log for debugging when run with -v.
 		fmt.Fprintf(os.Stderr, "NATS message received: subject=%s dedup_id=%s event_id=%s\n",
 			msg.Subject(), dedupID, ev.ID)
+	})
+
+	t.Run("consumer round-trip", func(t *testing.T) {
+		ctx := context.Background()
+
+		// Start a NATS server with JetStream enabled.
+		req := testcontainers.ContainerRequest{
+			Image:        "nats:latest",
+			ExposedPorts: []string{"4222/tcp"},
+			Cmd:          []string{"-js"},
+			WaitingFor:   wait.ForLog("Server is ready"),
+		}
+		natsContainer, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+			ContainerRequest: req,
+			Started:          true,
+		})
+		if err != nil {
+			t.Fatalf("start nats container: %v", err)
+		}
+		t.Cleanup(func() { _ = natsContainer.Terminate(context.Background()) })
+
+		host, err := natsContainer.Host(ctx)
+		if err != nil {
+			t.Fatalf("get nats host: %v", err)
+		}
+		port, err := natsContainer.MappedPort(ctx, "4222")
+		if err != nil {
+			t.Fatalf("get nats mapped port: %v", err)
+		}
+		natsURL := fmt.Sprintf("nats://%s:%s", host, port.Port())
+
+		// Connect to NATS, create JetStream stream, and publish a message.
+		nc, err := nats.Connect(natsURL)
+		if err != nil {
+			t.Fatalf("connect to nats: %v", err)
+		}
+		defer nc.Close()
+
+		js, err := jetstream.New(nc)
+		if err != nil {
+			t.Fatalf("jetstream init: %v", err)
+		}
+
+		streamCtx, streamCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer streamCancel()
+		_, err = js.CreateOrUpdateStream(streamCtx, jetstream.StreamConfig{
+			Name:     "test-stream",
+			Subjects: []string{"test.>"},
+		})
+		if err != nil {
+			t.Fatalf("create stream: %v", err)
+		}
+
+		// Publish a message to subject "test.events".
+		pubCtx, pubCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer pubCancel()
+		_, err = js.Publish(pubCtx, "test.events", []byte(`{"id":1,"name":"nats-event"}`))
+		if err != nil {
+			t.Fatalf("publish message: %v", err)
+		}
+
+		// Wire nats consumer detector -> bus -> stdout.
+		logger := testLogger()
+		det := natsdetector.New(natsURL, "test-stream", []string{"test.>"}, "test-durable", "", 0, 0, logger)
+		b := bus.New(64, logger)
+		lc := newLineCapture()
+		stdoutAdapter := stdout.New(lc, logger)
+
+		pipelineCtx, pipelineCancel := context.WithCancel(context.Background())
+		g, gCtx := errgroup.WithContext(pipelineCtx)
+		g.Go(func() error { return b.Start(gCtx) })
+		g.Go(func() error { return det.Start(gCtx, b.Ingest()) })
+		sub, err := b.Subscribe(stdoutAdapter.Name())
+		if err != nil {
+			pipelineCancel()
+			t.Fatalf("subscribe stdout: %v", err)
+		}
+		g.Go(func() error { return stdoutAdapter.Start(gCtx, sub) })
+
+		t.Cleanup(func() {
+			pipelineCancel()
+			_ = g.Wait()
+		})
+
+		// Wait for the event to arrive at stdout.
+		line := lc.waitLine(t, 15*time.Second)
+		var ev event.Event
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			t.Fatalf("unmarshal event: %v\nraw: %s", err, line)
+		}
+
+		// Verify event metadata.
+		// NATS detector converts "test.events" -> "pgcdc:test:events".
+		expectedChannel := "pgcdc:test:events"
+		if ev.Channel != expectedChannel {
+			t.Errorf("channel = %q, want %q", ev.Channel, expectedChannel)
+		}
+		if ev.Operation != "NATS_CONSUME" {
+			t.Errorf("operation = %q, want NATS_CONSUME", ev.Operation)
+		}
+		if ev.Source != "nats_consumer" {
+			t.Errorf("source = %q, want nats_consumer", ev.Source)
+		}
+
+		// Verify the payload contains the original data.
+		var payloadData map[string]any
+		if err := json.Unmarshal(ev.Payload, &payloadData); err != nil {
+			t.Fatalf("unmarshal payload: %v", err)
+		}
+		if payloadData["name"] != "nats-event" {
+			t.Errorf("payload name = %v, want nats-event", payloadData["name"])
+		}
+
+		fmt.Fprintf(os.Stderr, "NATS consumer round-trip: channel=%s op=%s source=%s\n",
+			ev.Channel, ev.Operation, ev.Source)
 	})
 }

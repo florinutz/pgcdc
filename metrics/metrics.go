@@ -225,6 +225,18 @@ var (
 		Help: "Total number of NATS publish errors.",
 	})
 
+	// NATS consumer detector metrics.
+
+	NatsConsumerReceived = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "pgcdc_nats_consumer_received_total",
+		Help: "Total number of events received from NATS consumer.",
+	})
+
+	NatsConsumerErrors = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "pgcdc_nats_consumer_errors_total",
+		Help: "Total number of NATS consumer errors.",
+	})
+
 	// Kafka adapter metrics.
 
 	KafkaPublished = promauto.NewCounter(prometheus.CounterOpts{
@@ -251,6 +263,18 @@ var (
 	KafkaTransactionErrors = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "pgcdc_kafka_transaction_errors_total",
 		Help: "Total number of Kafka transaction errors (aborts).",
+	})
+
+	// Kafka consumer detector metrics.
+
+	KafkaConsumerReceived = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "pgcdc_kafka_consumer_received_total",
+		Help: "Total number of events received from Kafka consumer.",
+	})
+
+	KafkaConsumerErrors = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "pgcdc_kafka_consumer_errors_total",
+		Help: "Total number of Kafka consumer errors.",
 	})
 
 	// Listen/Notify detector metrics.
@@ -786,4 +810,45 @@ var (
 		Name: "pgcdc_batch_events_lost_total",
 		Help: "Total events lost due to fatal batch flush error with no DLQ configured.",
 	}, []string{"adapter"})
+
+	// ClickHouse adapter metrics.
+
+	ClickHouseFlushes = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "pgcdc_clickhouse_flushes_total",
+		Help: "Total number of ClickHouse flush operations.",
+	}, []string{"status"})
+
+	ClickHouseFlushSize = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "pgcdc_clickhouse_flush_size",
+		Help:    "Number of events per ClickHouse flush.",
+		Buckets: []float64{10, 100, 500, 1000, 5000, 10000, 50000},
+	})
+
+	ClickHouseFlushDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "pgcdc_clickhouse_flush_duration_seconds",
+		Help:    "Duration of ClickHouse flush operations.",
+		Buckets: prometheus.DefBuckets,
+	})
+
+	ClickHouseRows = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "pgcdc_clickhouse_rows_inserted_total",
+		Help: "Total number of rows inserted into ClickHouse.",
+	})
+
+	ClickHouseDedupSkipped = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "pgcdc_clickhouse_dedup_skipped_total",
+		Help: "Total number of duplicate events skipped within a ClickHouse batch flush.",
+	})
+
+	// Dedup transform metrics.
+
+	DedupDropped = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "pgcdc_dedup_dropped_total",
+		Help: "Total number of events dropped by dedup transform.",
+	})
+
+	DedupCacheSize = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "pgcdc_dedup_cache_size",
+		Help: "Current number of entries in the dedup LRU cache.",
+	})
 )

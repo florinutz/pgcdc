@@ -26,6 +26,7 @@ type Config struct {
 	Embedding           EmbeddingConfig             `mapstructure:"embedding"`
 	Iceberg             IcebergConfig               `mapstructure:"iceberg"`
 	Nats                NatsConfig                  `mapstructure:"nats"`
+	NatsConsumer        NatsConsumerConfig          `mapstructure:"nats_consumer"`
 	Outbox              OutboxConfig                `mapstructure:"outbox"`
 	DLQ                 DLQConfig                   `mapstructure:"dlq"`
 	Search              SearchConfig                `mapstructure:"search"`
@@ -48,9 +49,11 @@ type Config struct {
 	GraphQL             GraphQLConfig               `mapstructure:"graphql"`
 	KafkaServer         KafkaServerConfig           `mapstructure:"kafkaserver"`
 	Views               []ViewConfig                `mapstructure:"views"`
+	ClickHouse          ClickHouseConfig            `mapstructure:"clickhouse"`
 	Middleware          map[string]MiddlewareConfig `mapstructure:"middleware"` // adapter name -> middleware config
 	Inspector           InspectorConfig             `mapstructure:"inspector"`
 	Schema              SchemaConfig                `mapstructure:"schema"`
+	KafkaConsumer       KafkaConsumerConfig         `mapstructure:"kafka_consumer"`
 	WebhookGateway      WebhookGatewayConfig        `mapstructure:"webhook_gateway"`
 	DetectorMode        string                      `mapstructure:"detector_mode"` // sequential, parallel, or failover (for multi-detector)
 	PipelineName        string                      `mapstructure:"pipeline_name"` // per-pipeline metric label
@@ -91,7 +94,7 @@ type TransformConfig struct {
 }
 
 type TransformSpec struct {
-	Type        string            `mapstructure:"type"`        // drop_columns, rename_fields, mask, filter, debezium, cloudevents, cel_filter
+	Type        string            `mapstructure:"type"`        // drop_columns, rename_fields, mask, filter, debezium, cloudevents, cel_filter, dedup
 	Columns     []string          `mapstructure:"columns"`     // for drop_columns
 	Mapping     map[string]string `mapstructure:"mapping"`     // for rename_fields
 	Fields      []MaskFieldSpec   `mapstructure:"fields"`      // for mask
@@ -99,6 +102,13 @@ type TransformSpec struct {
 	Debezium    DebeziumSpec      `mapstructure:"debezium"`    // for debezium
 	CloudEvents CloudEventsSpec   `mapstructure:"cloudevents"` // for cloudevents
 	Expression  string            `mapstructure:"expression"`  // for cel_filter
+	Dedup       DedupSpec         `mapstructure:"dedup"`       // for dedup
+}
+
+type DedupSpec struct {
+	KeyPath string        `mapstructure:"key_path"`
+	Window  time.Duration `mapstructure:"window"`
+	MaxKeys int           `mapstructure:"max_keys"`
 }
 
 type CloudEventsSpec struct {
@@ -266,6 +276,14 @@ func Default() Config {
 			BackoffBase:  5 * time.Second,
 			BackoffCap:   60 * time.Second,
 		},
+		NatsConsumer: NatsConsumerConfig{
+			Stream:  "pgcdc",
+			Durable: "pgcdc",
+		},
+		KafkaConsumer: KafkaConsumerConfig{
+			Group:  "pgcdc",
+			Offset: "earliest",
+		},
 		SQLite: SQLiteConfig{
 			PollInterval: 500 * time.Millisecond,
 			BatchSize:    100,
@@ -304,6 +322,13 @@ func Default() Config {
 		},
 		WebhookGateway: WebhookGatewayConfig{
 			MaxBodySize: 1024 * 1024, // 1MB
+		},
+		ClickHouse: ClickHouseConfig{
+			Table:         "pgcdc_events",
+			BatchSize:     10000,
+			FlushInterval: 1 * time.Second,
+			BackoffBase:   5 * time.Second,
+			BackoffCap:    60 * time.Second,
 		},
 		Embedding: EmbeddingConfig{
 			Model:       "text-embedding-3-small",

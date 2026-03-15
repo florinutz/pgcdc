@@ -86,6 +86,18 @@ type IncrementalSnapshotConfig struct {
 	ProgressDB  string        `mapstructure:"progress_db"`
 }
 
+type NatsConsumerConfig struct {
+	Stream   string   `mapstructure:"stream"`
+	Subjects []string `mapstructure:"subjects"`
+	Durable  string   `mapstructure:"durable"`
+}
+
+type KafkaConsumerConfig struct {
+	Topics []string `mapstructure:"topics"`
+	Group  string   `mapstructure:"group"`
+	Offset string   `mapstructure:"offset"` // "earliest" or "latest"
+}
+
 type WebhookGatewayConfig struct {
 	MaxBodySize int64                          `mapstructure:"max_body_size"`
 	Sources     map[string]WebhookSourceConfig `mapstructure:"sources"`

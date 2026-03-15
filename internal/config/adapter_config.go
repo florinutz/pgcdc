@@ -189,6 +189,18 @@ type DuckDBConfig struct {
 	FlushSize     int           `mapstructure:"flush_size"`
 }
 
+type ClickHouseConfig struct {
+	DSN           string            `mapstructure:"dsn"`
+	Table         string            `mapstructure:"table"`
+	AutoCreate    bool              `mapstructure:"auto_create"`
+	AsyncInsert   bool              `mapstructure:"async_insert"`
+	Settings      map[string]string `mapstructure:"settings"`
+	BatchSize     int               `mapstructure:"batch_size"`
+	FlushInterval time.Duration     `mapstructure:"flush_interval"`
+	BackoffBase   time.Duration     `mapstructure:"backoff_base"`
+	BackoffCap    time.Duration     `mapstructure:"backoff_cap"`
+}
+
 type MiddlewareConfig struct {
 	Retry          *MiddlewareRetryConfig          `mapstructure:"retry"`
 	CircuitBreaker *MiddlewareCircuitBreakerConfig `mapstructure:"circuit_breaker"`

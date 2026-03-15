@@ -115,4 +115,15 @@ func init() {
 			return fn
 		},
 	})
+
+	registry.RegisterTransform(registry.TransformEntry{
+		Name:        "dedup",
+		Description: "Drop duplicate events by key within a time window",
+		Create: func(spec config.TransformSpec) transform.TransformFunc {
+			if spec.Dedup.Window <= 0 {
+				return nil
+			}
+			return transform.Dedup(spec.Dedup.KeyPath, spec.Dedup.Window, spec.Dedup.MaxKeys)
+		},
+	})
 }

@@ -165,6 +165,18 @@ func (e *S3UploadError) Unwrap() error {
 	return e.Err
 }
 
+// ClickHouseFlushError indicates that the ClickHouse adapter failed to flush.
+type ClickHouseFlushError struct {
+	Table string
+	Err   error
+}
+
+func (e *ClickHouseFlushError) Error() string {
+	return fmt.Sprintf("clickhouse flush failed for table %s: %v", e.Table, e.Err)
+}
+
+func (e *ClickHouseFlushError) Unwrap() error { return e.Err }
+
 // MySQLReplicationError indicates that the MySQL binlog detector encountered an error.
 type MySQLReplicationError struct {
 	Addr string

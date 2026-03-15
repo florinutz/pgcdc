@@ -12,7 +12,9 @@ import (
 	"time"
 
 	kafkaadapter "github.com/florinutz/pgcdc/adapter/kafka"
+	"github.com/florinutz/pgcdc/adapter/stdout"
 	"github.com/florinutz/pgcdc/bus"
+	kafkadetector "github.com/florinutz/pgcdc/detector/kafka"
 	"github.com/florinutz/pgcdc/detector/listennotify"
 	"github.com/florinutz/pgcdc/dlq"
 	"github.com/florinutz/pgcdc/event"
@@ -354,5 +356,82 @@ func TestScenario_KafkaAdapter(t *testing.T) {
 
 		fmt.Fprintf(os.Stderr, "Transactional Kafka message received: topic=%s key=%s\n",
 			msg.Topic, string(msg.Key))
+	})
+
+	t.Run("consumer round-trip", func(t *testing.T) {
+		brokers := startKafka(t)
+
+		// Create topic and produce a message.
+		topic := "consumer_test_topic"
+		ensureKafkaTopic(t, brokers, topic)
+
+		producer, err := kgo.NewClient(kgo.SeedBrokers(brokers...))
+		if err != nil {
+			t.Fatalf("create kafka producer: %v", err)
+		}
+		defer producer.Close()
+
+		produceCtx, produceCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer produceCancel()
+		results := producer.ProduceSync(produceCtx, &kgo.Record{
+			Topic: topic,
+			Value: []byte(`{"id":1,"name":"test-event"}`),
+		})
+		if err := results.FirstErr(); err != nil {
+			t.Fatalf("produce message: %v", err)
+		}
+
+		// Wire kafka consumer detector -> bus -> stdout.
+		logger := testLogger()
+		det := kafkadetector.New(brokers, []string{topic}, "test-group", "earliest", "", "", "", "", false, 0, 0, logger)
+		b := bus.New(64, logger)
+		lc := newLineCapture()
+		stdoutAdapter := stdout.New(lc, logger)
+
+		pipelineCtx, pipelineCancel := context.WithCancel(context.Background())
+		g, gCtx := errgroup.WithContext(pipelineCtx)
+		g.Go(func() error { return b.Start(gCtx) })
+		g.Go(func() error { return det.Start(gCtx, b.Ingest()) })
+		sub, err := b.Subscribe(stdoutAdapter.Name())
+		if err != nil {
+			pipelineCancel()
+			t.Fatalf("subscribe stdout: %v", err)
+		}
+		g.Go(func() error { return stdoutAdapter.Start(gCtx, sub) })
+
+		t.Cleanup(func() {
+			pipelineCancel()
+			_ = g.Wait()
+		})
+
+		// Wait for the event to arrive at stdout.
+		line := lc.waitLine(t, 15*time.Second)
+		var ev event.Event
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			t.Fatalf("unmarshal event: %v\nraw: %s", err, line)
+		}
+
+		// Verify event metadata.
+		if ev.Channel != "pgcdc:"+topic {
+			t.Errorf("channel = %q, want %q", ev.Channel, "pgcdc:"+topic)
+		}
+		if ev.Operation != "KAFKA_CONSUME" {
+			t.Errorf("operation = %q, want KAFKA_CONSUME", ev.Operation)
+		}
+		if ev.Source != "kafka_consumer" {
+			t.Errorf("source = %q, want kafka_consumer", ev.Source)
+		}
+
+		// Verify the payload contains the original data.
+		var payloadData map[string]any
+		if err := json.Unmarshal(ev.Payload, &payloadData); err != nil {
+			t.Fatalf("unmarshal payload: %v", err)
+		}
+		if payloadData["name"] != "test-event" {
+			t.Errorf("payload name = %v, want test-event", payloadData["name"])
+		}
+
+		fmt.Fprintf(os.Stderr, "Kafka consumer round-trip: channel=%s op=%s source=%s\n",
+			ev.Channel, ev.Operation, ev.Source)
 	})
 }

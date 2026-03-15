@@ -19,7 +19,7 @@ jobs:
           go-version-file: go.mod
       - uses: golangci/golangci-lint-action@v6
         with:
-          version: latest
+          version: v2.11.3
 
   test:
     runs-on: ubuntu-latest
@@ -58,7 +58,8 @@ jobs:
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
-        run: go build -ldflags "-s -w -X github.com/florinutz/pgcdc/cmd.Version=${{ github.sha }}" -o pgcdc-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/pgcdc
+          CGO_ENABLED: "0"
+        run: go build -tags "no_duckdb,no_sqlite" -ldflags "-s -w -X github.com/florinutz/pgcdc/cmd.Version=${{ github.sha }}" -o pgcdc-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/pgcdc
       - uses: actions/upload-artifact@v4
         with:
           name: pgcdc-${{ matrix.goos }}-${{ matrix.goarch }}
