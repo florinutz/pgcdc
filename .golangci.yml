@@ -17,6 +17,11 @@ linters:
     - nolintlint
     - gocritic
     - revive
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - errcheck
   settings:
     revive:
       rules:
@@ -26,9 +31,3 @@ linters:
           disabled: true
         - name: unused-parameter
           disabled: true
-
-issues:
-  exclude-rules:
-    - path: _test\.go
-      linters:
-        - errcheck

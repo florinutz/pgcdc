@@ -123,6 +123,11 @@ func (d *Detector) run(ctx context.Context, events chan<- event.Event) error {
 	if err != nil {
 		return &pgcdcerr.NatsConsumeError{Stream: d.stream, Err: fmt.Errorf("start message iterator: %w", err)}
 	}
+	// Stop the iterator when context is cancelled so iter.Next() unblocks.
+	go func() {
+		<-ctx.Done()
+		iter.Stop()
+	}()
 	defer iter.Stop()
 
 	d.logger.Info("nats consumer started",
