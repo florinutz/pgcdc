@@ -1,7 +1,10 @@
 package cmd
 
 import (
+	"time"
+
 	"github.com/florinutz/pgcdc/detector/listennotify"
+	"github.com/florinutz/pgcdc/internal/config"
 	"github.com/florinutz/pgcdc/registry"
 )
 
@@ -9,6 +12,7 @@ func init() {
 	registry.RegisterDetector(registry.DetectorEntry{
 		Name:        "listen_notify",
 		Description: "PostgreSQL LISTEN/NOTIFY",
+		RequiresDB:  true,
 		ViperKeys: [][2]string{
 			{"db", "database_url"},
 			{"channel", "channels"},
@@ -26,6 +30,14 @@ func init() {
 				Required:    true,
 				Description: "PG channels to listen on (repeatable)",
 			},
+		},
+		ConfigKey: "detector",
+		DefaultConfig: func() any {
+			return &config.DetectorConfig{
+				Type:        "listen_notify",
+				BackoffBase: 5 * time.Second,
+				BackoffCap:  60 * time.Second,
+			}
 		},
 		Create: func(ctx registry.DetectorContext) (registry.DetectorResult, error) {
 			cfg := ctx.Cfg

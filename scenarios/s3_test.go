@@ -123,20 +123,18 @@ func TestScenario_S3(t *testing.T) {
 		bucket := "test-jsonl"
 		createBucket(t, minioClient, bucket)
 
-		a := s3adapter.New(
-			bucket,
-			"cdc/",
-			endpoint,
-			"us-east-1",
-			"minioadmin",
-			"minioadmin",
-			"jsonl",
-			1*time.Second, // flush interval (fast for test)
-			100,           // flush size
-			30*time.Second,
-			0, 0,
-			testLogger(),
-		)
+		a := s3adapter.New(s3adapter.Config{
+			Bucket:          bucket,
+			Prefix:          "cdc/",
+			Endpoint:        endpoint,
+			Region:          "us-east-1",
+			AccessKeyID:     "minioadmin",
+			SecretAccessKey: "minioadmin",
+			Format:          "jsonl",
+			FlushInterval:   1 * time.Second,
+			FlushSize:       100,
+			DrainTimeout:    30 * time.Second,
+		}, testLogger())
 
 		startPipeline(t, connStr, []string{channel}, a)
 
@@ -188,20 +186,18 @@ func TestScenario_S3(t *testing.T) {
 		bucket := "test-parquet"
 		createBucket(t, minioClient, bucket)
 
-		a := s3adapter.New(
-			bucket,
-			"cdc/",
-			endpoint,
-			"us-east-1",
-			"minioadmin",
-			"minioadmin",
-			"parquet",
-			1*time.Second,
-			100,
-			30*time.Second,
-			0, 0,
-			testLogger(),
-		)
+		a := s3adapter.New(s3adapter.Config{
+			Bucket:          bucket,
+			Prefix:          "cdc/",
+			Endpoint:        endpoint,
+			Region:          "us-east-1",
+			AccessKeyID:     "minioadmin",
+			SecretAccessKey: "minioadmin",
+			Format:          "parquet",
+			FlushInterval:   1 * time.Second,
+			FlushSize:       100,
+			DrainTimeout:    30 * time.Second,
+		}, testLogger())
 
 		startPipeline(t, connStr, []string{channel}, a)
 

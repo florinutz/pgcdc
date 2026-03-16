@@ -52,6 +52,18 @@ func New(name string, terminal TerminalAdapter, logger *slog.Logger, links ...Li
 
 func (a *Adapter) Name() string { return a.name }
 
+// Validate implements adapter.Validator: delegates to the terminal adapter's
+// Validate if it implements adapter.Validator.
+func (a *Adapter) Validate(ctx context.Context) error {
+	type validator interface {
+		Validate(ctx context.Context) error
+	}
+	if v, ok := a.terminal.(validator); ok {
+		return v.Validate(ctx)
+	}
+	return nil
+}
+
 // Start consumes events, passes each through the link chain, and forwards
 // the result to the terminal adapter.
 func (a *Adapter) Start(ctx context.Context, events <-chan event.Event) error {

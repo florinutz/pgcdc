@@ -52,7 +52,7 @@ func TestScenario_Redis(t *testing.T) {
 
 		// Create the Redis adapter in invalidate mode.
 		logger := testLogger()
-		a := redisadapter.New(redisURL, "invalidate", "test:", "id", 0, 0, logger)
+		a := redisadapter.New(redisadapter.Config{URL: redisURL, Mode: "invalidate", KeyPrefix: "test:", IDColumn: "id"}, logger)
 
 		// Wire pipeline: LISTEN/NOTIFY detector -> bus -> Redis adapter.
 		pipelineCtx, pipelineCancel := context.WithCancel(context.Background())
@@ -153,7 +153,7 @@ func TestScenario_Redis(t *testing.T) {
 
 		// Create the Redis adapter in sync mode.
 		logger := testLogger()
-		a := redisadapter.New(redisURL, "sync", "sync:", "id", 0, 0, logger)
+		a := redisadapter.New(redisadapter.Config{URL: redisURL, Mode: "sync", KeyPrefix: "sync:", IDColumn: "id"}, logger)
 
 		// Wire pipeline.
 		pipelineCtx, pipelineCancel := context.WithCancel(context.Background())

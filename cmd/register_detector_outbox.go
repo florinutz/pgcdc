@@ -1,3 +1,5 @@
+//go:build !no_outbox
+
 package cmd
 
 import (
@@ -12,6 +14,7 @@ func init() {
 	registry.RegisterDetector(registry.DetectorEntry{
 		Name:        "outbox",
 		Description: "Transactional outbox table polling",
+		RequiresDB:  true,
 		ConfigKey:   "outbox",
 		DefaultConfig: func() any {
 			return &config.OutboxConfig{

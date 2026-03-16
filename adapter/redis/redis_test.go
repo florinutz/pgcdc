@@ -7,7 +7,9 @@ import (
 )
 
 func TestRedisAdapter_Name(t *testing.T) {
-	a := adapterredis.New("redis://localhost:6379", "", "", "", 0, 0, nil)
+	a := adapterredis.New(adapterredis.Config{
+		URL: "redis://localhost:6379",
+	}, nil)
 	if got := a.Name(); got != "redis" {
 		t.Errorf("Name() = %q, want %q", got, "redis")
 	}

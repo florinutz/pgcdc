@@ -105,7 +105,7 @@ func WALToWebhook(connStr, publication, webhookURL string, opts ...Option) *pgcd
 	if cfg.slotName != "" {
 		det.SetPersistentSlot(cfg.slotName)
 	}
-	a := webhook.New(webhookURL, nil, "", 0, 0, 0, 0, cfg.logger)
+	a := webhook.New(webhook.Config{URL: webhookURL}, cfg.logger)
 	return pgcdc.NewPipeline(det, pipelineOpts(cfg, pgcdc.WithAdapter(a))...)
 }
 
@@ -123,6 +123,6 @@ func ListenNotifyToStdout(connStr string, channels []string, opts ...Option) *pg
 func ListenNotifyToWebhook(connStr string, channels []string, webhookURL string, opts ...Option) *pgcdc.Pipeline {
 	cfg := applyOpts(opts)
 	det := listennotify.New(connStr, channels, 0, 0, cfg.logger)
-	a := webhook.New(webhookURL, nil, "", 0, 0, 0, 0, cfg.logger)
+	a := webhook.New(webhook.Config{URL: webhookURL}, cfg.logger)
 	return pgcdc.NewPipeline(det, pipelineOpts(cfg, pgcdc.WithAdapter(a))...)
 }

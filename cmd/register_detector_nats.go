@@ -14,6 +14,7 @@ func init() {
 	registry.RegisterDetector(registry.DetectorEntry{
 		Name:        "nats_consumer",
 		Description: "NATS JetStream consumer",
+		RequiresDB:  false,
 		ConfigKey:   "nats_consumer",
 		DefaultConfig: func() any {
 			return &config.NatsConsumerConfig{

@@ -12,10 +12,11 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/florinutz/pgcdc/event"
 	"github.com/florinutz/pgcdc/metrics"
 )
 
-const schemaChannel = "pgcdc:_schema"
+const schemaChannel = event.SchemaChangeChannel
 
 // schemaChange describes a single column-level change detected from RelationMessage diffs.
 type schemaChange struct {

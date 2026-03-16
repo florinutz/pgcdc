@@ -49,34 +49,45 @@ type Adapter struct {
 	inflight    sync.WaitGroup
 }
 
-// New creates a webhook adapter. If maxRetries is <= 0 it defaults to 5.
+// Config holds all parameters for the webhook adapter.
+type Config struct {
+	URL         string
+	Headers     map[string]string
+	SigningKey  string
+	MaxRetries  int
+	Timeout     time.Duration
+	BackoffBase time.Duration
+	BackoffCap  time.Duration
+}
+
+// New creates a webhook adapter. If MaxRetries is <= 0 it defaults to 5.
 // If logger is nil a no-op logger is used. Duration parameters default
 // to sensible values when zero.
-func New(url string, headers map[string]string, signingKey string, maxRetries int, timeout, backoffBase, backoffCap time.Duration, logger *slog.Logger) *Adapter {
-	if maxRetries <= 0 {
-		maxRetries = defaultMaxRetries
+func New(cfg Config, logger *slog.Logger) *Adapter {
+	if cfg.MaxRetries <= 0 {
+		cfg.MaxRetries = defaultMaxRetries
 	}
-	if timeout <= 0 {
-		timeout = defaultTimeout
+	if cfg.Timeout <= 0 {
+		cfg.Timeout = defaultTimeout
 	}
-	if backoffBase <= 0 {
-		backoffBase = defaultBackoffBase
+	if cfg.BackoffBase <= 0 {
+		cfg.BackoffBase = defaultBackoffBase
 	}
-	if backoffCap <= 0 {
-		backoffCap = defaultBackoffCap
+	if cfg.BackoffCap <= 0 {
+		cfg.BackoffCap = defaultBackoffCap
 	}
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &Adapter{
-		url:         url,
-		headers:     headers,
-		signingKey:  signingKey,
-		maxRetries:  maxRetries,
-		backoffBase: backoffBase,
-		backoffCap:  backoffCap,
+		url:         cfg.URL,
+		headers:     cfg.Headers,
+		signingKey:  cfg.SigningKey,
+		maxRetries:  cfg.MaxRetries,
+		backoffBase: cfg.BackoffBase,
+		backoffCap:  cfg.BackoffCap,
 		client: &http.Client{
-			Timeout: timeout,
+			Timeout: cfg.Timeout,
 		},
 		logger: logger,
 	}

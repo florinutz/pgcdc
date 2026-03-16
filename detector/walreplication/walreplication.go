@@ -26,7 +26,7 @@ import (
 
 const (
 	source     = "wal_replication"
-	txnChannel = "pgcdc:_txn"
+	txnChannel = event.TransactionMarkerChannel
 )
 
 const (

@@ -16,7 +16,7 @@ import (
 
 const (
 	incrementalSource  = "incremental_snapshot"
-	snapshotCtlChannel = "pgcdc:_snapshot"
+	snapshotCtlChannel = event.ChannelPrefix + "_snapshot"
 	chunkTimeout       = 60 * time.Second
 )
 
@@ -270,7 +270,7 @@ func (s *IncrementalSnapshot) readChunk(ctx context.Context, pkCols []string, af
 	defer rows.Close()
 
 	fieldDescs := rows.FieldDescriptions()
-	channel := "pgcdc:" + s.table
+	channel := event.ChannelPrefix + s.table
 	var count int
 	var lastPK []any
 

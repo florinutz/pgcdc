@@ -15,6 +15,7 @@ func init() {
 	registry.RegisterDetector(registry.DetectorEntry{
 		Name:        "sqlite",
 		Description: "SQLite change tracking (polling-based, local-first CDC)",
+		RequiresDB:  false,
 		ConfigKey:   "sqlite",
 		DefaultConfig: func() any {
 			return &config.SQLiteConfig{

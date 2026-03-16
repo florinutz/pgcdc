@@ -141,7 +141,7 @@ func startPipelineWithWS(t *testing.T, connStr string, channels []string) (strin
 
 	det := listennotify.New(connStr, channels, 0, 0, logger)
 	b := bus.New(64, logger)
-	wsBroker := ws.New(64, 15*time.Second, logger)
+	wsBroker := ws.New(64, 15*time.Second, 0, logger)
 
 	g, gCtx := errgroup.WithContext(ctx)
 	g.Go(func() error { return b.Start(gCtx) })

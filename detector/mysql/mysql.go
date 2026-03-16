@@ -55,40 +55,54 @@ type Detector struct {
 	schemaCache map[string][]string
 }
 
+// Config holds all parameters for the MySQL binlog detector.
+type Config struct {
+	Addr         string
+	User         string
+	Password     string
+	ServerID     uint32
+	Tables       []string
+	UseGTID      bool
+	Flavor       string
+	BinlogPrefix string
+	BackoffBase  time.Duration
+	BackoffCap   time.Duration
+}
+
 // New creates a MySQL binlog detector.
-func New(addr, user, password string, serverID uint32, tables []string, useGTID bool, flavor string, binlogPrefix string, backoffBase, backoffCap time.Duration, logger *slog.Logger) *Detector {
-	if backoffBase <= 0 {
-		backoffBase = defaultBackoffBase
+func New(cfg Config, logger *slog.Logger) *Detector {
+	if cfg.BackoffBase <= 0 {
+		cfg.BackoffBase = defaultBackoffBase
 	}
-	if backoffCap <= 0 {
-		backoffCap = defaultBackoffCap
+	if cfg.BackoffCap <= 0 {
+		cfg.BackoffCap = defaultBackoffCap
 	}
 	if logger == nil {
 		logger = slog.Default()
 	}
-	if flavor == "" {
-		flavor = "mysql"
+	if cfg.Flavor == "" {
+		cfg.Flavor = "mysql"
 	}
-	if binlogPrefix == "" {
-		binlogPrefix = "mysql-bin"
+	if cfg.BinlogPrefix == "" {
+		cfg.BinlogPrefix = "mysql-bin"
 	}
 
-	filter := make(map[string]bool, len(tables))
-	for _, t := range tables {
+	filter := make(map[string]bool, len(cfg.Tables))
+	for _, t := range cfg.Tables {
 		filter[t] = true
 	}
 
 	return &Detector{
-		addr:         addr,
-		user:         user,
-		password:     password,
-		serverID:     serverID,
-		tables:       tables,
-		useGTID:      useGTID,
-		flavor:       flavor,
-		binlogPrefix: binlogPrefix,
-		backoffBase:  backoffBase,
-		backoffCap:   backoffCap,
+		addr:         cfg.Addr,
+		user:         cfg.User,
+		password:     cfg.Password,
+		serverID:     cfg.ServerID,
+		tables:       cfg.Tables,
+		useGTID:      cfg.UseGTID,
+		flavor:       cfg.Flavor,
+		binlogPrefix: cfg.BinlogPrefix,
+		backoffBase:  cfg.BackoffBase,
+		backoffCap:   cfg.BackoffCap,
 		logger:       logger.With("detector", sourceName),
 		tableFilter:  filter,
 		schemaCache:  make(map[string][]string),
@@ -98,6 +112,14 @@ func New(addr, user, password string, serverID uint32, tables []string, useGTID 
 // Name returns the detector name.
 func (d *Detector) Name() string {
 	return sourceName
+}
+
+// Validate checks that required configuration is present.
+func (d *Detector) Validate(_ context.Context) error {
+	if d.addr == "" {
+		return fmt.Errorf("mysql: addr is required")
+	}
+	return nil
 }
 
 // SetTracer sets the OpenTelemetry tracer for creating per-event spans.

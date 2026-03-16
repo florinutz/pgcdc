@@ -1,3 +1,5 @@
+//go:build !no_mongodb
+
 package cmd
 
 import (
@@ -13,6 +15,7 @@ func init() {
 	registry.RegisterDetector(registry.DetectorEntry{
 		Name:        "mongodb",
 		Description: "MongoDB Change Streams",
+		RequiresDB:  false,
 		ConfigKey:   "mongodb",
 		DefaultConfig: func() any {
 			return &config.MongoDBConfig{
@@ -83,13 +86,17 @@ func init() {
 			if cfg.MongoDB.Scope != "cluster" && cfg.MongoDB.Database == "" {
 				return registry.DetectorResult{}, fmt.Errorf("--mongodb-database is required for MongoDB detector (unless --mongodb-scope=cluster)")
 			}
-			det := mongodbdetector.New(
-				cfg.MongoDB.URI, cfg.MongoDB.Scope, cfg.MongoDB.Database,
-				cfg.MongoDB.Collections, cfg.MongoDB.FullDocument,
-				cfg.MongoDB.MetadataDB, cfg.MongoDB.MetadataColl,
-				cfg.MongoDB.BackoffBase, cfg.MongoDB.BackoffCap,
-				ctx.Logger,
-			)
+			det := mongodbdetector.New(mongodbdetector.Config{
+				URI:          cfg.MongoDB.URI,
+				Scope:        cfg.MongoDB.Scope,
+				Database:     cfg.MongoDB.Database,
+				Collections:  cfg.MongoDB.Collections,
+				FullDocument: cfg.MongoDB.FullDocument,
+				MetadataDB:   cfg.MongoDB.MetadataDB,
+				MetadataColl: cfg.MongoDB.MetadataColl,
+				BackoffBase:  cfg.MongoDB.BackoffBase,
+				BackoffCap:   cfg.MongoDB.BackoffCap,
+			}, ctx.Logger)
 			if ctx.TracerProvider != nil {
 				det.SetTracer(ctx.TracerProvider.Tracer("pgcdc"))
 			}

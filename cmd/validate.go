@@ -90,19 +90,28 @@ func runValidate(cmd *cobra.Command, args []string) error {
 			message:   fmt.Sprintf("unmarshal: %s", err),
 		})
 		hasFailure = true
-	} else if err := cfg.Validate(); err != nil {
-		results = append(results, validationResult{
-			component: "config",
-			status:    "FAIL",
-			message:   err.Error(),
-		})
-		hasFailure = true
 	} else {
-		results = append(results, validationResult{
-			component: "config",
-			status:    "OK",
-			message:   "structural validation passed",
-		})
+		config.SetKnownAdapters(registry.AdapterNames())
+		requiresDB := make(map[string]bool)
+		for _, d := range registry.Detectors() {
+			requiresDB[d.Name] = d.RequiresDB
+		}
+		config.SetDetectorRequiresDB(requiresDB)
+
+		if err := cfg.Validate(); err != nil {
+			results = append(results, validationResult{
+				component: "config",
+				status:    "FAIL",
+				message:   err.Error(),
+			})
+			hasFailure = true
+		} else {
+			results = append(results, validationResult{
+				component: "config",
+				status:    "OK",
+				message:   "structural validation passed",
+			})
+		}
 	}
 
 	// ParamSpec-based validation (driven by registry declarations).

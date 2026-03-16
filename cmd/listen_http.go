@@ -34,6 +34,7 @@ func startHTTPServers(g *errgroup.Group, gCtx context.Context, cfg config.Config
 
 		g.Go(func() error {
 			logger.Info("http server starting", "addr", cfg.SSE.Addr)
+			logger.Info("HTTP endpoints are unauthenticated; deploy behind a reverse proxy (nginx, Caddy, Envoy) in production")
 			ln, err := net.Listen("tcp", cfg.SSE.Addr)
 			if err != nil {
 				return fmt.Errorf("http listen: %w", err)

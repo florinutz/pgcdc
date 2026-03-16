@@ -1,3 +1,5 @@
+//go:build !no_mysql
+
 package cmd
 
 import (
@@ -13,6 +15,7 @@ func init() {
 	registry.RegisterDetector(registry.DetectorEntry{
 		Name:        "mysql",
 		Description: "MySQL binlog replication",
+		RequiresDB:  false,
 		ConfigKey:   "mysql",
 		DefaultConfig: func() any {
 			return &config.MySQLConfig{
@@ -89,13 +92,18 @@ func init() {
 			if cfg.MySQL.Addr == "" {
 				return registry.DetectorResult{}, fmt.Errorf("--mysql-addr is required for MySQL detector")
 			}
-			det := mysqldetector.New(
-				cfg.MySQL.Addr, cfg.MySQL.User, cfg.MySQL.Password,
-				cfg.MySQL.ServerID, cfg.MySQL.Tables, cfg.MySQL.UseGTID,
-				cfg.MySQL.Flavor, cfg.MySQL.BinlogPrefix,
-				cfg.MySQL.BackoffBase, cfg.MySQL.BackoffCap,
-				ctx.Logger,
-			)
+			det := mysqldetector.New(mysqldetector.Config{
+				Addr:         cfg.MySQL.Addr,
+				User:         cfg.MySQL.User,
+				Password:     cfg.MySQL.Password,
+				ServerID:     cfg.MySQL.ServerID,
+				Tables:       cfg.MySQL.Tables,
+				UseGTID:      cfg.MySQL.UseGTID,
+				Flavor:       cfg.MySQL.Flavor,
+				BinlogPrefix: cfg.MySQL.BinlogPrefix,
+				BackoffBase:  cfg.MySQL.BackoffBase,
+				BackoffCap:   cfg.MySQL.BackoffCap,
+			}, ctx.Logger)
 			if ctx.TracerProvider != nil {
 				det.SetTracer(ctx.TracerProvider.Tracer("pgcdc"))
 			}

@@ -60,7 +60,7 @@ func TestScenario_Encoding(t *testing.T) {
 		logger := testLogger()
 		enc := encoding.NewAvroEncoder(logger)
 		capDLQ := &captureDLQ{}
-		a := kafkaadapter.New(brokers, "", "", "", "", "", false, 0, 0, enc, logger, "", 0, 0, 0, 0)
+		a := kafkaadapter.New(kafkaadapter.Config{Brokers: brokers, Encoder: enc}, logger)
 		a.SetDLQ(capDLQ)
 
 		// Pre-create the topic to avoid "Unknown Topic Or Partition" race.
@@ -156,7 +156,7 @@ func TestScenario_Encoding(t *testing.T) {
 		regClient := registry.New(mockReg.URL(), "", "")
 		enc := encoding.NewAvroEncoder(logger, encoding.WithRegistry(regClient))
 		capDLQ := &captureDLQ{}
-		a := kafkaadapter.New(brokers, "", "", "", "", "", false, 0, 0, enc, logger, "", 0, 0, 0, 0)
+		a := kafkaadapter.New(kafkaadapter.Config{Brokers: brokers, Encoder: enc}, logger)
 		a.SetDLQ(capDLQ)
 
 		// Pre-create the topic.
@@ -238,7 +238,7 @@ func TestScenario_Encoding(t *testing.T) {
 		enc := encoding.NewAvroEncoder(logger, encoding.WithRegistry(regClient))
 
 		capDLQ := &captureDLQ{}
-		a := kafkaadapter.New(brokers, "", "", "", "", "", false, 0, 0, enc, logger, "", 0, 0, 0, 0)
+		a := kafkaadapter.New(kafkaadapter.Config{Brokers: brokers, Encoder: enc}, logger)
 		a.SetDLQ(capDLQ)
 
 		// Wire pipeline.

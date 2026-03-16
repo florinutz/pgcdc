@@ -35,7 +35,7 @@ func TestScenario_Tracing(t *testing.T) {
 		defer shutdown()
 
 		receiver := newWebhookReceiver(t, alwaysOK)
-		whAdapter := webhook.New(receiver.Server.URL, nil, "", 3, 0, 0, 0, testLogger())
+		whAdapter := webhook.New(webhook.Config{URL: receiver.Server.URL, MaxRetries: 3}, testLogger())
 		det := listennotify.New(connStr, []string{"tracing_happy"}, 0, 0, testLogger())
 
 		ctx, cancel := context.WithCancel(context.Background())

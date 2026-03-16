@@ -2,6 +2,7 @@ package view
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"strings"
 
@@ -12,7 +13,7 @@ import (
 
 // viewChannelPrefix is the channel prefix for re-injected VIEW_RESULT events.
 // Events on this prefix are skipped to prevent infinite re-injection loops.
-const viewChannelPrefix = "pgcdc:_view:"
+const viewChannelPrefix = event.ChannelPrefix + "_view:"
 
 // Adapter is a view adapter that processes events through streaming SQL views
 // and re-injects VIEW_RESULT events back into the bus.
@@ -35,6 +36,14 @@ func New(engine *viewpkg.Engine, logger *slog.Logger) *Adapter {
 
 // Name returns the adapter name.
 func (a *Adapter) Name() string { return "view" }
+
+// Validate implements adapter.Validator: checks that the engine has valid view definitions.
+func (a *Adapter) Validate(_ context.Context) error {
+	if a.engine == nil {
+		return fmt.Errorf("view: engine is nil")
+	}
+	return nil
+}
 
 // SetIngestChan sets the bus ingest channel for re-injecting VIEW_RESULT events.
 func (a *Adapter) SetIngestChan(ch chan<- event.Event) {

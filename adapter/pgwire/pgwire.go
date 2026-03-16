@@ -63,6 +63,14 @@ func New(addr string, bufferSize int, password, tlsCert, tlsKey string, logger *
 // Name returns the adapter name.
 func (a *Adapter) Name() string { return "pgwire" }
 
+// Validate implements adapter.Validator: checks that the listen address is non-empty.
+func (a *Adapter) Validate(_ context.Context) error {
+	if a.addr == "" {
+		return fmt.Errorf("pgwire: addr is required")
+	}
+	return nil
+}
+
 // eventsColumns defines the column schema for pgcdc_events.
 var eventsColumns = wire.Columns{
 	{Table: 0, Name: "id", Oid: pgtype.TextOID, Width: 256},
@@ -150,7 +158,7 @@ func (a *Adapter) Start(ctx context.Context, events <-chan event.Event) error {
 		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := srv.Shutdown(shutCtx); err != nil {
-			a.logger.Warn("pgwire server shutdown error", "err", err)
+			a.logger.Warn("pgwire server shutdown error", "error", err)
 		}
 	}()
 

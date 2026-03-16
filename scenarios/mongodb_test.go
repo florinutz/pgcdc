@@ -117,7 +117,13 @@ func startMongoDBPipeline(t *testing.T, uri, database string, collections []stri
 	logger := testLogger()
 	ctx, cancel := context.WithCancel(context.Background())
 
-	det := mongodbdetector.New(uri, "collection", database, collections, "updateLookup", "", "", 0, 0, logger)
+	det := mongodbdetector.New(mongodbdetector.Config{
+		URI:          uri,
+		Scope:        "collection",
+		Database:     database,
+		Collections:  collections,
+		FullDocument: "updateLookup",
+	}, logger)
 	b := bus.New(64, logger)
 
 	g, gCtx := errgroup.WithContext(ctx)

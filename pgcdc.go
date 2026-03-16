@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"runtime/debug"
+	"sort"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -480,6 +482,25 @@ func (p *Pipeline) Run(ctx context.Context) error {
 		return fmt.Errorf("startup validation: %w", err)
 	}
 
+	// Run detector validation if supported.
+	if !p.skipValidation {
+		if v, ok := p.detector.(detector.Validator); ok {
+			if err := v.Validate(ctx); err != nil {
+				return fmt.Errorf("detector validation: %w", err)
+			}
+		}
+	}
+
+	// Reject cooperative checkpoint with non-Acknowledger adapters.
+	if p.cooperativeCheckpoint && len(p.autoAckAdapters) > 0 {
+		names := make([]string, 0, len(p.autoAckAdapters))
+		for n := range p.autoAckAdapters {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		return fmt.Errorf("cooperative checkpoint requires all adapters to implement Acknowledger; missing: %s", strings.Join(names, ", "))
+	}
+
 	// Wire cooperative checkpointing into the detector if supported.
 	if p.cooperativeCheckpoint && p.ackTracker != nil {
 		if cc, ok := p.detector.(CooperativeCheckpointer); ok {
@@ -638,8 +659,7 @@ func (p *Pipeline) subscribeAdapter(name string) (<-chan event.Event, error) {
 	cfgPtr := p.wrapperConfigs[name]
 	cfgPtr.Store(wcfg)
 
-	autoAck := p.autoAckAdapters[name]
-	return p.wrapSubscription(name, ch, cfgPtr, autoAck), nil
+	return p.wrapSubscription(name, ch, cfgPtr), nil
 }
 
 // buildTransformChain returns a composed TransformFunc for the named adapter by
@@ -656,7 +676,7 @@ func (p *Pipeline) buildTransformChain(name string) transform.TransformFunc {
 // wrapperConfig atomically on each event, applies route filtering and transforms,
 // and writes surviving events to outCh. The atomic pointer allows Reload() to
 // swap transforms and routes with zero event loss.
-func (p *Pipeline) wrapSubscription(name string, inCh <-chan event.Event, cfgPtr *atomic.Pointer[wrapperConfig], autoAck bool) <-chan event.Event {
+func (p *Pipeline) wrapSubscription(name string, inCh <-chan event.Event, cfgPtr *atomic.Pointer[wrapperConfig]) <-chan event.Event {
 	// Create per-adapter nack window if configured.
 	var nackWin *dlq.NackWindow
 	if p.nackWindowSize > 0 {
@@ -744,11 +764,6 @@ func (p *Pipeline) wrapSubscription(name string, inCh <-chan event.Event, cfgPtr
 			}
 
 			out <- ev
-
-			// Auto-ack for non-Acknowledger adapters: ack on channel send.
-			if autoAck && p.ackTracker != nil && origLSN > 0 {
-				p.ackTracker.Ack(name, origLSN)
-			}
 		}
 	}()
 	return out

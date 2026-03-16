@@ -2,7 +2,6 @@ package server
 
 import (
 	"net/http"
-	"net/http/pprof"
 	"time"
 
 	"github.com/florinutz/pgcdc/adapter/sse"
@@ -24,6 +23,7 @@ func New(sseBroker *sse.Broker, wsBroker *ws.Broker, corsOrigins []string, readT
 	r := chi.NewRouter()
 
 	r.Use(middleware.Recoverer)
+	r.Use(maxBodyMiddleware(10 << 20)) // 10 MB
 
 	if len(corsOrigins) > 0 {
 		r.Use(corsMiddleware(corsOrigins))
@@ -37,19 +37,6 @@ func New(sseBroker *sse.Broker, wsBroker *ws.Broker, corsOrigins []string, readT
 	}
 
 	r.Handle("/metrics", promhttp.Handler())
-
-	// Runtime profiling endpoints.
-	r.HandleFunc("/debug/pprof/", pprof.Index)
-	r.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
-	r.HandleFunc("/debug/pprof/profile", pprof.Profile)
-	r.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
-	r.HandleFunc("/debug/pprof/trace", pprof.Trace)
-	r.Handle("/debug/pprof/goroutine", pprof.Handler("goroutine"))
-	r.Handle("/debug/pprof/heap", pprof.Handler("heap"))
-	r.Handle("/debug/pprof/allocs", pprof.Handler("allocs"))
-	r.Handle("/debug/pprof/block", pprof.Handler("block"))
-	r.Handle("/debug/pprof/mutex", pprof.Handler("mutex"))
-	r.Handle("/debug/pprof/threadcreate", pprof.Handler("threadcreate"))
 
 	if sseBroker != nil {
 		r.Get("/events", sseBroker.ServeHTTP)
@@ -97,19 +84,6 @@ func NewMetricsServer(checker *health.Checker, readiness *health.ReadinessChecke
 	}
 	r.Handle("/metrics", promhttp.Handler())
 
-	// Runtime profiling endpoints.
-	r.HandleFunc("/debug/pprof/", pprof.Index)
-	r.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
-	r.HandleFunc("/debug/pprof/profile", pprof.Profile)
-	r.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
-	r.HandleFunc("/debug/pprof/trace", pprof.Trace)
-	r.Handle("/debug/pprof/goroutine", pprof.Handler("goroutine"))
-	r.Handle("/debug/pprof/heap", pprof.Handler("heap"))
-	r.Handle("/debug/pprof/allocs", pprof.Handler("allocs"))
-	r.Handle("/debug/pprof/block", pprof.Handler("block"))
-	r.Handle("/debug/pprof/mutex", pprof.Handler("mutex"))
-	r.Handle("/debug/pprof/threadcreate", pprof.Handler("threadcreate"))
-
 	return &http.Server{
 		Handler:      r,
 		ReadTimeout:  5 * time.Second,
@@ -138,6 +112,18 @@ func WithInspector(insp *inspect.Inspector) ServerOption {
 		}
 		r.Get("/inspect", inspect.Handler(insp))
 		r.Get("/inspect/stream", inspect.SSEHandler(insp))
+	}
+}
+
+// maxBodyMiddleware limits request body size for POST/PUT methods.
+func maxBodyMiddleware(maxBytes int64) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodPost || r.Method == http.MethodPut {
+				r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+			}
+			next.ServeHTTP(w, r)
+		})
 	}
 }
 

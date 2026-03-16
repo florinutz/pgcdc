@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -27,6 +28,7 @@ type Adapter struct {
 	retention     time.Duration
 	flushInterval time.Duration
 	flushSize     int
+	queryToken    string
 	logger        *slog.Logger
 
 	db    atomic.Pointer[sql.DB]
@@ -37,7 +39,7 @@ type Adapter struct {
 }
 
 // New creates a DuckDB analytics adapter.
-func New(path string, retention, flushInterval time.Duration, flushSize int, logger *slog.Logger) *Adapter {
+func New(path string, retention, flushInterval time.Duration, flushSize int, queryToken string, logger *slog.Logger) *Adapter {
 	if path == "" {
 		path = ":memory:"
 	}
@@ -58,6 +60,7 @@ func New(path string, retention, flushInterval time.Duration, flushSize int, log
 		retention:     retention,
 		flushInterval: flushInterval,
 		flushSize:     flushSize,
+		queryToken:    queryToken,
 		logger:        logger.With("adapter", "duckdb"),
 		ready:         make(chan struct{}),
 	}
@@ -125,8 +128,28 @@ func (a *Adapter) Start(ctx context.Context, events <-chan event.Event) error {
 
 // MountHTTP registers the adapter's HTTP routes on the given router.
 func (a *Adapter) MountHTTP(r chi.Router) {
-	r.Post("/query", a.QueryHandler)
-	r.Get("/query/tables", a.TablesHandler)
+	if a.queryToken == "" {
+		r.Post("/query", func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "set --duckdb-query-token to enable the query endpoint", http.StatusForbidden)
+		})
+		r.Get("/query/tables", func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "set --duckdb-query-token to enable the query endpoint", http.StatusForbidden)
+		})
+		return
+	}
+	r.Post("/query", a.requireToken(a.QueryHandler))
+	r.Get("/query/tables", a.requireToken(a.TablesHandler))
+}
+
+func (a *Adapter) requireToken(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		token := r.Header.Get("Authorization")
+		if token != "Bearer "+a.queryToken {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next(w, r)
+	}
 }
 
 // Drain flushes remaining buffered events on shutdown.

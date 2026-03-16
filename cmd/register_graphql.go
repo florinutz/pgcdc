@@ -20,6 +20,7 @@ func init() {
 				Path:              "/graphql",
 				BufferSize:        256,
 				KeepaliveInterval: 15 * time.Second,
+				MaxClients:        1000,
 			}
 		},
 		Create: func(ctx registry.AdapterContext) (registry.AdapterResult, error) {
@@ -30,6 +31,7 @@ func init() {
 					cfg.GraphQL.SchemaAware,
 					cfg.GraphQL.BufferSize,
 					cfg.GraphQL.KeepaliveInterval,
+					cfg.GraphQL.MaxClients,
 					nil, // schema store wired by pipeline when --schema-store is enabled
 					ctx.Logger,
 				),
@@ -40,6 +42,7 @@ func init() {
 			{"graphql-schema-aware", "graphql.schema_aware"},
 			{"graphql-buffer-size", "graphql.buffer_size"},
 			{"graphql-keepalive-interval", "graphql.keepalive_interval"},
+			{"graphql-max-clients", "graphql.max_clients"},
 		},
 		Spec: []registry.ParamSpec{
 			{Name: "graphql-path", Type: "string", Default: "/graphql", Description: "WebSocket endpoint path"},
@@ -54,4 +57,5 @@ func init() {
 	f.Bool("graphql-schema-aware", false, "auto-generate GraphQL types from schema store")
 	f.Int("graphql-buffer-size", 256, "per-client GraphQL subscription buffer size")
 	f.Duration("graphql-keepalive-interval", 15*time.Second, "GraphQL WebSocket keepalive ping interval")
+	f.Int("graphql-max-clients", 1000, "maximum concurrent GraphQL subscription clients")
 }

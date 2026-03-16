@@ -89,6 +89,14 @@ func (d *Detector) Name() string {
 	return source
 }
 
+// Validate checks that required configuration is present.
+func (d *Detector) Validate(_ context.Context) error {
+	if d.table == "" {
+		return fmt.Errorf("outbox: table is required")
+	}
+	return nil
+}
+
 // Start polls the outbox table and emits events. It blocks until ctx is
 // cancelled. On connection failure, it reconnects with exponential backoff.
 // The caller owns the events channel; Start does NOT close it.

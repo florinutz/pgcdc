@@ -22,20 +22,16 @@ func TestScenario_Iceberg(t *testing.T) {
 	t.Run("happy path append raw", func(t *testing.T) {
 		warehouse := t.TempDir()
 
-		a := icebergadapter.New(
-			"hadoop",      // catalog type
-			"",            // catalog URI (not needed for hadoop)
-			warehouse,     // warehouse path
-			"pgcdc",       // namespace
-			"orders_cdc",  // table
-			"append",      // mode
-			"raw",         // schema mode
-			nil,           // primary keys (not needed for append)
-			1*time.Second, // flush interval (fast for test)
-			100,           // flush size
-			0, 0,          // backoff defaults
-			testLogger(),
-		)
+		a := icebergadapter.New(icebergadapter.Config{
+			CatalogType:   "hadoop",
+			Warehouse:     warehouse,
+			Namespace:     "pgcdc",
+			TableName:     "orders_cdc",
+			Mode:          "append",
+			SchemaMode:    "raw",
+			FlushInterval: 1 * time.Second,
+			FlushSize:     100,
+		}, testLogger())
 
 		startPipeline(t, connStr, []string{channel}, a)
 
@@ -146,20 +142,16 @@ func TestScenario_Iceberg(t *testing.T) {
 	t.Run("flush failure and retry", func(t *testing.T) {
 		warehouse := t.TempDir()
 
-		a := icebergadapter.New(
-			"hadoop",
-			"",
-			warehouse,
-			"pgcdc",
-			"retry_test",
-			"append",
-			"raw",
-			nil,
-			500*time.Millisecond, // very fast flush
-			100,
-			0, 0,
-			testLogger(),
-		)
+		a := icebergadapter.New(icebergadapter.Config{
+			CatalogType:   "hadoop",
+			Warehouse:     warehouse,
+			Namespace:     "pgcdc",
+			TableName:     "retry_test",
+			Mode:          "append",
+			SchemaMode:    "raw",
+			FlushInterval: 500 * time.Millisecond,
+			FlushSize:     100,
+		}, testLogger())
 
 		startPipeline(t, connStr, []string{channel}, a)
 		time.Sleep(500 * time.Millisecond)

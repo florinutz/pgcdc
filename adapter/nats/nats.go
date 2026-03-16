@@ -51,41 +51,48 @@ func (a *Adapter) SetTracer(t trace.Tracer) { a.tracer = t }
 // SetAckFunc implements adapter.Acknowledger.
 func (a *Adapter) SetAckFunc(fn adapter.AckFunc) { a.ackFn = fn }
 
+// Config holds all parameters for the NATS JetStream adapter.
+type Config struct {
+	URL           string
+	SubjectPrefix string
+	StreamName    string
+	CredFile      string
+	MaxAge        time.Duration
+	BackoffBase   time.Duration
+	BackoffCap    time.Duration
+	Encoder       encoding.Encoder
+}
+
 // New creates a NATS JetStream adapter. Duration parameters default to sensible
-// values when zero. If encoder is nil, events are sent as JSON (current behavior).
-func New(
-	url, subjectPrefix, streamName, credFile string,
-	maxAge, backoffBase, backoffCap time.Duration,
-	encoder encoding.Encoder,
-	logger *slog.Logger,
-) *Adapter {
+// values when zero. If Encoder is nil, events are sent as JSON (current behavior).
+func New(cfg Config, logger *slog.Logger) *Adapter {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	if backoffBase <= 0 {
-		backoffBase = 1 * time.Second
+	if cfg.BackoffBase <= 0 {
+		cfg.BackoffBase = 1 * time.Second
 	}
-	if backoffCap <= 0 {
-		backoffCap = 30 * time.Second
+	if cfg.BackoffCap <= 0 {
+		cfg.BackoffCap = 30 * time.Second
 	}
-	if maxAge <= 0 {
-		maxAge = 24 * time.Hour
+	if cfg.MaxAge <= 0 {
+		cfg.MaxAge = 24 * time.Hour
 	}
-	if subjectPrefix == "" {
-		subjectPrefix = "pgcdc"
+	if cfg.SubjectPrefix == "" {
+		cfg.SubjectPrefix = "pgcdc"
 	}
-	if streamName == "" {
-		streamName = "pgcdc"
+	if cfg.StreamName == "" {
+		cfg.StreamName = "pgcdc"
 	}
 	return &Adapter{
-		url:           url,
-		subjectPrefix: subjectPrefix,
-		streamName:    streamName,
-		credFile:      credFile,
-		encoder:       encoder,
-		maxAge:        maxAge,
-		backoffBase:   backoffBase,
-		backoffCap:    backoffCap,
+		url:           cfg.URL,
+		subjectPrefix: cfg.SubjectPrefix,
+		streamName:    cfg.StreamName,
+		credFile:      cfg.CredFile,
+		encoder:       cfg.Encoder,
+		maxAge:        cfg.MaxAge,
+		backoffBase:   cfg.BackoffBase,
+		backoffCap:    cfg.BackoffCap,
 		logger:        logger.With("adapter", adapterName),
 		subjectCache:  make(map[string]string),
 	}

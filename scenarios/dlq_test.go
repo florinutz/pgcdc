@@ -37,7 +37,7 @@ func TestScenario_DLQCommands(t *testing.T) {
 			return http.StatusInternalServerError
 		})
 		// maxRetries=1, fast backoff so retries complete quickly.
-		a := webhook.New(receiver.Server.URL, nil, "", 1, 0, 50*time.Millisecond, 100*time.Millisecond, logger)
+		a := webhook.New(webhook.Config{URL: receiver.Server.URL, MaxRetries: 1, BackoffBase: 50 * time.Millisecond, BackoffCap: 100 * time.Millisecond}, logger)
 
 		pgDLQ := dlq.NewPGTableDLQ(connStr, dlqTable, logger)
 		t.Cleanup(func() { _ = pgDLQ.Close() })

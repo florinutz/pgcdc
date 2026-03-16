@@ -5,6 +5,21 @@ import (
 	"testing"
 )
 
+func init() {
+	// Populate validation sets that are normally populated from the registry at runtime.
+	SetKnownAdapters([]string{
+		"stdout", "webhook", "sse", "file", "exec", "pg_table", "ws",
+		"embedding", "iceberg", "nats", "search", "redis", "kafka",
+		"kafkaserver", "s3", "grpc", "view", "graphql", "arrow",
+		"duckdb", "clickhouse",
+	})
+	SetDetectorRequiresDB(map[string]bool{
+		"listen_notify": true,
+		"wal":           true,
+		"outbox":        true,
+	})
+}
+
 func validConfig() Config {
 	c := Default()
 	c.DatabaseURL = "postgres://localhost/test"

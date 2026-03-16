@@ -64,57 +64,64 @@ type Adapter struct {
 	logger *slog.Logger
 }
 
+// Config holds all parameters for the S3 adapter.
+type Config struct {
+	Bucket          string
+	Prefix          string
+	Endpoint        string
+	Region          string
+	AccessKeyID     string
+	SecretAccessKey string
+	Format          string
+	FlushInterval   time.Duration
+	FlushSize       int
+	DrainTimeout    time.Duration
+	BackoffBase     time.Duration
+	BackoffCap      time.Duration
+}
+
 // New creates an S3 adapter.
 // Duration parameters default to sensible values when zero.
-func New(
-	bucket, prefix, endpoint, region string,
-	accessKeyID, secretAccessKey string,
-	format string,
-	flushInterval time.Duration,
-	flushSize int,
-	drainTimeout time.Duration,
-	backoffBase, backoffCap time.Duration,
-	logger *slog.Logger,
-) *Adapter {
-	if flushInterval <= 0 {
-		flushInterval = defaultFlushInterval
+func New(cfg Config, logger *slog.Logger) *Adapter {
+	if cfg.FlushInterval <= 0 {
+		cfg.FlushInterval = defaultFlushInterval
 	}
-	if flushSize <= 0 {
-		flushSize = defaultFlushSize
+	if cfg.FlushSize <= 0 {
+		cfg.FlushSize = defaultFlushSize
 	}
-	if drainTimeout <= 0 {
-		drainTimeout = defaultDrainTimeout
+	if cfg.DrainTimeout <= 0 {
+		cfg.DrainTimeout = defaultDrainTimeout
 	}
-	if backoffBase <= 0 {
-		backoffBase = defaultBackoffBase
+	if cfg.BackoffBase <= 0 {
+		cfg.BackoffBase = defaultBackoffBase
 	}
-	if backoffCap <= 0 {
-		backoffCap = defaultBackoffCap
+	if cfg.BackoffCap <= 0 {
+		cfg.BackoffCap = defaultBackoffCap
 	}
 	if logger == nil {
 		logger = slog.Default()
 	}
-	if format == "" {
-		format = "jsonl"
+	if cfg.Format == "" {
+		cfg.Format = "jsonl"
 	}
-	if region == "" {
-		region = "us-east-1"
+	if cfg.Region == "" {
+		cfg.Region = "us-east-1"
 	}
 
 	return &Adapter{
-		bucket:          bucket,
-		prefix:          prefix,
-		endpoint:        endpoint,
-		region:          region,
-		accessKeyID:     accessKeyID,
-		secretAccessKey: secretAccessKey,
-		format:          format,
-		flushInterval:   flushInterval,
-		flushSize:       flushSize,
-		drainTimeout:    drainTimeout,
-		buffer:          make([]event.Event, 0, flushSize),
-		backoffBase:     backoffBase,
-		backoffCap:      backoffCap,
+		bucket:          cfg.Bucket,
+		prefix:          cfg.Prefix,
+		endpoint:        cfg.Endpoint,
+		region:          cfg.Region,
+		accessKeyID:     cfg.AccessKeyID,
+		secretAccessKey: cfg.SecretAccessKey,
+		format:          cfg.Format,
+		flushInterval:   cfg.FlushInterval,
+		flushSize:       cfg.FlushSize,
+		drainTimeout:    cfg.DrainTimeout,
+		buffer:          make([]event.Event, 0, cfg.FlushSize),
+		backoffBase:     cfg.BackoffBase,
+		backoffCap:      cfg.BackoffCap,
 		logger:          logger.With("adapter", "s3"),
 	}
 }
@@ -240,7 +247,7 @@ func (a *Adapter) run(ctx context.Context, events <-chan event.Event) error {
 			}
 
 			// Skip transaction markers.
-			if ev.Channel == "pgcdc:_txn" {
+			if ev.Channel == event.TransactionMarkerChannel {
 				continue
 			}
 
@@ -334,6 +341,13 @@ func (a *Adapter) flush(ctx context.Context) error {
 			if ev.LSN > 0 {
 				a.ackFn(ev.LSN)
 			}
+		}
+	}
+
+	// Report delivery lag for batch events.
+	for _, ev := range batch {
+		if !ev.CreatedAt.IsZero() {
+			metrics.EventDeliveryLag.WithLabelValues("s3").Observe(time.Since(ev.CreatedAt).Seconds())
 		}
 	}
 

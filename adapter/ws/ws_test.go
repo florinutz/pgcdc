@@ -15,6 +15,6 @@ func TestWSAdapter_Contract(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	adaptertest.RunContractTests(t, "ws", func(ctx context.Context, ch <-chan event.Event) error {
-		return ws.New(100, 0, logger).Start(ctx, ch)
+		return ws.New(100, 0, 0, logger).Start(ctx, ch)
 	})
 }

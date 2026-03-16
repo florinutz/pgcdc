@@ -31,6 +31,7 @@ func init() {
 					cfg.DuckDB.Retention,
 					cfg.DuckDB.FlushInterval,
 					cfg.DuckDB.FlushSize,
+					cfg.DuckDB.QueryToken,
 					ctx.Logger,
 				),
 			}, nil
@@ -40,6 +41,7 @@ func init() {
 			{"duckdb-retention", "duckdb.retention"},
 			{"duckdb-flush-interval", "duckdb.flush_interval"},
 			{"duckdb-flush-size", "duckdb.flush_size"},
+			{"duckdb-query-token", "duckdb.query_token"},
 		},
 		Spec: []registry.ParamSpec{
 			{Name: "duckdb-path", Type: "string", Default: ":memory:", Description: "DuckDB database path (:memory: for in-memory)"},
@@ -54,4 +56,5 @@ func init() {
 	f.Duration("duckdb-retention", 1*time.Hour, "DuckDB event retention duration")
 	f.Duration("duckdb-flush-interval", 5*time.Second, "DuckDB buffer flush interval")
 	f.Int("duckdb-flush-size", 1000, "DuckDB buffer flush size threshold")
+	f.String("duckdb-query-token", "", "Bearer token required for DuckDB /query endpoint (empty = disabled)")
 }

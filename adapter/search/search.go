@@ -16,6 +16,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/florinutz/pgcdc/adapter"
 	"github.com/florinutz/pgcdc/dlq"
 	"github.com/florinutz/pgcdc/event"
 	"github.com/florinutz/pgcdc/internal/backoff"
@@ -30,6 +31,7 @@ const (
 	defaultBatchInterval = 1 * time.Second
 	defaultBackoffBase   = 1 * time.Second
 	defaultBackoffCap    = 30 * time.Second
+	defaultMaxRetries    = 3
 )
 
 // Adapter syncs CDC events to a search engine (Typesense or Meilisearch).
@@ -45,10 +47,12 @@ type Adapter struct {
 	batchInterval time.Duration
 	backoffBase   time.Duration
 	backoffCap    time.Duration
+	maxRetries    int
 	client        *http.Client
 	logger        *slog.Logger
 	dlq           dlq.DLQ
 	tracer        trace.Tracer
+	ackFn         adapter.AckFunc
 }
 
 // SetTracer sets the OpenTelemetry tracer for per-event spans.
@@ -57,49 +61,65 @@ func (a *Adapter) SetTracer(t trace.Tracer) { a.tracer = t }
 // SetDLQ sets the dead letter queue for failed deliveries.
 func (a *Adapter) SetDLQ(d dlq.DLQ) { a.dlq = d }
 
-// New creates a search adapter. engine must be "typesense" or "meilisearch".
-func New(
-	engine, url, apiKey, index, idColumn string,
-	batchSize int,
-	batchInterval, backoffBase, backoffCap time.Duration,
-	logger *slog.Logger,
-) *Adapter {
-	switch engine {
+// SetAckFunc implements adapter.Acknowledger.
+func (a *Adapter) SetAckFunc(fn adapter.AckFunc) { a.ackFn = fn }
+
+// Config holds all parameters for the search adapter.
+type Config struct {
+	Engine        string
+	URL           string
+	APIKey        string
+	Index         string
+	IDColumn      string
+	BatchSize     int
+	BatchInterval time.Duration
+	BackoffBase   time.Duration
+	BackoffCap    time.Duration
+	MaxRetries    int
+}
+
+// New creates a search adapter. Engine must be "typesense" or "meilisearch".
+func New(cfg Config, logger *slog.Logger) *Adapter {
+	switch cfg.Engine {
 	case "typesense", "meilisearch":
 	default:
 		if logger != nil {
-			logger.Error("unsupported search engine, defaulting to typesense", "engine", engine)
+			logger.Error("unsupported search engine, defaulting to typesense", "engine", cfg.Engine)
 		}
-		engine = "typesense"
+		cfg.Engine = "typesense"
 	}
-	if idColumn == "" {
-		idColumn = defaultIDColumn
+	if cfg.IDColumn == "" {
+		cfg.IDColumn = defaultIDColumn
 	}
-	if batchSize <= 0 {
-		batchSize = defaultBatchSize
+	if cfg.BatchSize <= 0 {
+		cfg.BatchSize = defaultBatchSize
 	}
-	if batchInterval <= 0 {
-		batchInterval = defaultBatchInterval
+	if cfg.BatchInterval <= 0 {
+		cfg.BatchInterval = defaultBatchInterval
 	}
-	if backoffBase <= 0 {
-		backoffBase = defaultBackoffBase
+	if cfg.BackoffBase <= 0 {
+		cfg.BackoffBase = defaultBackoffBase
 	}
-	if backoffCap <= 0 {
-		backoffCap = defaultBackoffCap
+	if cfg.BackoffCap <= 0 {
+		cfg.BackoffCap = defaultBackoffCap
+	}
+	if cfg.MaxRetries <= 0 {
+		cfg.MaxRetries = defaultMaxRetries
 	}
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &Adapter{
-		engine:        engine,
-		url:           strings.TrimRight(url, "/"),
-		apiKey:        apiKey,
-		index:         index,
-		idColumn:      idColumn,
-		batchSize:     batchSize,
-		batchInterval: batchInterval,
-		backoffBase:   backoffBase,
-		backoffCap:    backoffCap,
+		engine:        cfg.Engine,
+		url:           strings.TrimRight(cfg.URL, "/"),
+		apiKey:        cfg.APIKey,
+		index:         cfg.Index,
+		idColumn:      cfg.IDColumn,
+		batchSize:     cfg.BatchSize,
+		batchInterval: cfg.BatchInterval,
+		backoffBase:   cfg.BackoffBase,
+		backoffCap:    cfg.BackoffCap,
+		maxRetries:    cfg.MaxRetries,
 		client:        &http.Client{Timeout: 30 * time.Second},
 		logger:        logger.With("adapter", "search"),
 	}
@@ -263,76 +283,29 @@ func (a *Adapter) Start(ctx context.Context, events <-chan event.Event) error {
 			}
 
 			metrics.EventsDelivered.WithLabelValues("search").Inc()
+			if a.ackFn != nil && ev.LSN > 0 {
+				a.ackFn(ev.LSN)
+			}
 		}
 	}
-}
-
-// payload is the decoded event payload.
-type payload struct {
-	Op             string                 `json:"op"`
-	Table          string                 `json:"table"`
-	Row            map[string]interface{} `json:"row"`
-	UnchangedToast []string               `json:"_unchanged_toast_columns"`
 }
 
 func (a *Adapter) extractPayload(ev event.Event) (doc map[string]interface{}, id string, isDel bool, partial bool) {
-	// Structured record path: zero JSON parsing.
-	if rec := ev.Record(); rec != nil && rec.Operation != 0 &&
-		(rec.Change.After != nil || rec.Change.Before != nil) {
-		isDel = rec.Operation == event.OperationDelete
-
-		var row map[string]any
-		if isDel {
-			if rec.Change.Before != nil {
-				row = rec.Change.Before.ToMap()
-			}
-		} else {
-			if rec.Change.After != nil {
-				row = rec.Change.After.ToMap()
-			}
-		}
-
-		if row == nil {
-			return nil, "", isDel, false
-		}
-		if v, ok := row[a.idColumn]; ok && v != nil {
-			id = fmt.Sprintf("%v", v)
-		}
-
-		// Check unchanged TOAST columns from metadata.
-		if toastCSV, ok := rec.Metadata[event.MetaUnchangedToastCols]; ok && toastCSV != "" {
-			for _, col := range strings.Split(toastCSV, ",") {
-				delete(row, col)
-			}
-			partial = true
-		}
-
-		return row, id, isDel, partial
-	}
-
-	// Legacy path: parse payload JSON.
-	var p payload
-	if err := json.Unmarshal(ev.Payload, &p); err != nil {
-		return nil, "", false, false
-	}
-	isDel = p.Op == "DELETE"
-	if p.Row == nil {
-		return nil, "", isDel, false
-	}
-	if v, ok := p.Row[a.idColumn]; ok && v != nil {
-		id = fmt.Sprintf("%v", v)
+	extracted := event.ExtractRow(ev, a.idColumn)
+	if extracted.Row == nil {
+		return nil, extracted.ID, extracted.IsDelete, false
 	}
 
 	// Strip unchanged TOAST columns from the document so they don't
 	// overwrite existing values in the search engine with null.
-	if len(p.UnchangedToast) > 0 {
-		for _, col := range p.UnchangedToast {
-			delete(p.Row, col)
+	if len(extracted.UnchangedToast) > 0 {
+		for _, col := range extracted.UnchangedToast {
+			delete(extracted.Row, col)
 		}
 		partial = true
 	}
 
-	return p.Row, id, isDel, partial
+	return extracted.Row, extracted.ID, extracted.IsDelete, partial
 }
 
 func (a *Adapter) upsertDocuments(ctx context.Context, docs []map[string]interface{}) error {
@@ -416,7 +389,7 @@ func (a *Adapter) deleteDocument(ctx context.Context, id string) error {
 
 func (a *Adapter) doRequest(ctx context.Context, method, url string, body []byte) error {
 	var lastErr error
-	for attempt := range 3 {
+	for attempt := range a.maxRetries {
 		if attempt > 0 {
 			wait := backoff.Jitter(attempt, a.backoffBase, a.backoffCap)
 			select {

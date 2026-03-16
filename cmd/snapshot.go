@@ -264,16 +264,15 @@ func runSnapshot(cmd *cobra.Command, args []string) error {
 		case "stdout":
 			opts = append(opts, pgcdc.WithAdapter(stdout.New(nil, logger)))
 		case "webhook":
-			opts = append(opts, pgcdc.WithAdapter(webhook.New(
-				cfg.Webhook.URL,
-				cfg.Webhook.Headers,
-				cfg.Webhook.SigningKey,
-				cfg.Webhook.MaxRetries,
-				cfg.Webhook.Timeout,
-				cfg.Webhook.BackoffBase,
-				cfg.Webhook.BackoffCap,
-				logger,
-			)))
+			opts = append(opts, pgcdc.WithAdapter(webhook.New(webhook.Config{
+				URL:         cfg.Webhook.URL,
+				Headers:     cfg.Webhook.Headers,
+				SigningKey:  cfg.Webhook.SigningKey,
+				MaxRetries:  cfg.Webhook.MaxRetries,
+				Timeout:     cfg.Webhook.Timeout,
+				BackoffBase: cfg.Webhook.BackoffBase,
+				BackoffCap:  cfg.Webhook.BackoffCap,
+			}, logger)))
 		case "file":
 			opts = append(opts, pgcdc.WithAdapter(fileadapter.New(cfg.File.Path, cfg.File.MaxSize, cfg.File.MaxFiles, logger)))
 		case "exec":
@@ -289,73 +288,67 @@ func runSnapshot(cmd *cobra.Command, args []string) error {
 			if embDBURL == "" {
 				embDBURL = cfg.DatabaseURL
 			}
-			opts = append(opts, pgcdc.WithAdapter(embeddingadapter.New(
-				cfg.Embedding.APIURL,
-				cfg.Embedding.APIKey,
-				cfg.Embedding.Model,
-				cfg.Embedding.Columns,
-				cfg.Embedding.IDColumn,
-				embDBURL,
-				cfg.Embedding.Table,
-				cfg.Embedding.Dimension,
-				cfg.Embedding.MaxRetries,
-				cfg.Embedding.Timeout,
-				cfg.Embedding.BackoffBase,
-				cfg.Embedding.BackoffCap,
-				cfg.Embedding.SkipUnchanged,
-				logger,
-			)))
+			opts = append(opts, pgcdc.WithAdapter(embeddingadapter.New(embeddingadapter.Config{
+				APIURL:        cfg.Embedding.APIURL,
+				APIKey:        cfg.Embedding.APIKey,
+				Model:         cfg.Embedding.Model,
+				Columns:       cfg.Embedding.Columns,
+				IDColumn:      cfg.Embedding.IDColumn,
+				DBURL:         embDBURL,
+				Table:         cfg.Embedding.Table,
+				Dimension:     cfg.Embedding.Dimension,
+				MaxRetries:    cfg.Embedding.MaxRetries,
+				Timeout:       cfg.Embedding.Timeout,
+				BackoffBase:   cfg.Embedding.BackoffBase,
+				BackoffCap:    cfg.Embedding.BackoffCap,
+				SkipUnchanged: cfg.Embedding.SkipUnchanged,
+			}, logger)))
 		case "iceberg":
-			opts = append(opts, pgcdc.WithAdapter(icebergadapter.New(
-				cfg.Iceberg.CatalogType,
-				cfg.Iceberg.CatalogURI,
-				cfg.Iceberg.Warehouse,
-				cfg.Iceberg.Namespace,
-				cfg.Iceberg.Table,
-				cfg.Iceberg.Mode,
-				cfg.Iceberg.SchemaMode,
-				cfg.Iceberg.PrimaryKeys,
-				cfg.Iceberg.FlushInterval,
-				cfg.Iceberg.FlushSize,
-				cfg.Iceberg.BackoffBase,
-				cfg.Iceberg.BackoffCap,
-				logger,
-			)))
+			opts = append(opts, pgcdc.WithAdapter(icebergadapter.New(icebergadapter.Config{
+				CatalogType:   cfg.Iceberg.CatalogType,
+				CatalogURI:    cfg.Iceberg.CatalogURI,
+				Warehouse:     cfg.Iceberg.Warehouse,
+				Namespace:     cfg.Iceberg.Namespace,
+				TableName:     cfg.Iceberg.Table,
+				Mode:          cfg.Iceberg.Mode,
+				SchemaMode:    cfg.Iceberg.SchemaMode,
+				PrimaryKeys:   cfg.Iceberg.PrimaryKeys,
+				FlushInterval: cfg.Iceberg.FlushInterval,
+				FlushSize:     cfg.Iceberg.FlushSize,
+				BackoffBase:   cfg.Iceberg.BackoffBase,
+				BackoffCap:    cfg.Iceberg.BackoffCap,
+			}, logger)))
 		case "nats":
-			opts = append(opts, pgcdc.WithAdapter(natsadapter.New(
-				cfg.Nats.URL,
-				cfg.Nats.Subject,
-				cfg.Nats.Stream,
-				cfg.Nats.CredFile,
-				cfg.Nats.MaxAge,
-				cfg.Nats.BackoffBase,
-				cfg.Nats.BackoffCap,
-				nil, // no encoding for snapshot
-				logger,
-			)))
+			opts = append(opts, pgcdc.WithAdapter(natsadapter.New(natsadapter.Config{
+				URL:           cfg.Nats.URL,
+				SubjectPrefix: cfg.Nats.Subject,
+				StreamName:    cfg.Nats.Stream,
+				CredFile:      cfg.Nats.CredFile,
+				MaxAge:        cfg.Nats.MaxAge,
+				BackoffBase:   cfg.Nats.BackoffBase,
+				BackoffCap:    cfg.Nats.BackoffCap,
+			}, logger)))
 		case "search":
-			opts = append(opts, pgcdc.WithAdapter(searchadapter.New(
-				cfg.Search.Engine,
-				cfg.Search.URL,
-				cfg.Search.APIKey,
-				cfg.Search.Index,
-				cfg.Search.IDColumn,
-				cfg.Search.BatchSize,
-				cfg.Search.BatchInterval,
-				cfg.Search.BackoffBase,
-				cfg.Search.BackoffCap,
-				logger,
-			)))
+			opts = append(opts, pgcdc.WithAdapter(searchadapter.New(searchadapter.Config{
+				Engine:        cfg.Search.Engine,
+				URL:           cfg.Search.URL,
+				APIKey:        cfg.Search.APIKey,
+				Index:         cfg.Search.Index,
+				IDColumn:      cfg.Search.IDColumn,
+				BatchSize:     cfg.Search.BatchSize,
+				BatchInterval: cfg.Search.BatchInterval,
+				BackoffBase:   cfg.Search.BackoffBase,
+				BackoffCap:    cfg.Search.BackoffCap,
+			}, logger)))
 		case "redis":
-			opts = append(opts, pgcdc.WithAdapter(redisadapter.New(
-				cfg.Redis.URL,
-				cfg.Redis.Mode,
-				cfg.Redis.KeyPrefix,
-				cfg.Redis.IDColumn,
-				cfg.Redis.BackoffBase,
-				cfg.Redis.BackoffCap,
-				logger,
-			)))
+			opts = append(opts, pgcdc.WithAdapter(redisadapter.New(redisadapter.Config{
+				URL:         cfg.Redis.URL,
+				Mode:        cfg.Redis.Mode,
+				KeyPrefix:   cfg.Redis.KeyPrefix,
+				IDColumn:    cfg.Redis.IDColumn,
+				BackoffBase: cfg.Redis.BackoffBase,
+				BackoffCap:  cfg.Redis.BackoffCap,
+			}, logger)))
 		}
 	}
 

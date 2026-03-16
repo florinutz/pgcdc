@@ -25,24 +25,23 @@ func init() {
 		Create: func(ctx registry.AdapterContext) (registry.AdapterResult, error) {
 			cfg := ctx.Cfg
 			return registry.AdapterResult{
-				Adapter: kafkaadapter.New(
-					cfg.Kafka.Brokers,
-					cfg.Kafka.Topic,
-					cfg.Kafka.SASLMechanism,
-					cfg.Kafka.SASLUsername,
-					cfg.Kafka.SASLPassword,
-					cfg.Kafka.TLSCAFile,
-					cfg.Kafka.TLS,
-					cfg.Kafka.BackoffBase,
-					cfg.Kafka.BackoffCap,
-					ctx.KafkaEncoder,
-					ctx.Logger,
-					cfg.Kafka.TransactionalID,
-					cfg.Kafka.CBMaxFailures,
-					cfg.Kafka.CBResetTimeout,
-					cfg.Kafka.RateLimit,
-					cfg.Kafka.RateLimitBurst,
-				),
+				Adapter: kafkaadapter.New(kafkaadapter.Config{
+					Brokers:         cfg.Kafka.Brokers,
+					Topic:           cfg.Kafka.Topic,
+					SASLMechanism:   cfg.Kafka.SASLMechanism,
+					SASLUsername:    cfg.Kafka.SASLUsername,
+					SASLPassword:    cfg.Kafka.SASLPassword,
+					TLSCAFile:       cfg.Kafka.TLSCAFile,
+					TLSEnabled:      cfg.Kafka.TLS,
+					BackoffBase:     cfg.Kafka.BackoffBase,
+					BackoffCap:      cfg.Kafka.BackoffCap,
+					Encoder:         ctx.KafkaEncoder,
+					TransactionalID: cfg.Kafka.TransactionalID,
+					CBMaxFailures:   cfg.Kafka.CBMaxFailures,
+					CBResetTimeout:  cfg.Kafka.CBResetTimeout,
+					RateLimit:       cfg.Kafka.RateLimit,
+					RateLimitBurst:  cfg.Kafka.RateLimitBurst,
+				}, ctx.Logger),
 			}, nil
 		},
 		ViperKeys: [][2]string{

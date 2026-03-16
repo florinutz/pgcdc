@@ -69,13 +69,15 @@ func TestScenario_Search(t *testing.T) {
 
 		// Create the search adapter.
 		logger := testLogger()
-		a := searchadapter.New(
-			"typesense", tsURL, apiKey, indexName, "id",
-			1,                    // batchSize=1 for immediate flush
-			100*time.Millisecond, // short batch interval
-			0, 0,
-			logger,
-		)
+		a := searchadapter.New(searchadapter.Config{
+			Engine:        "typesense",
+			URL:           tsURL,
+			APIKey:        apiKey,
+			Index:         indexName,
+			IDColumn:      "id",
+			BatchSize:     1,
+			BatchInterval: 100 * time.Millisecond,
+		}, logger)
 
 		// Wire pipeline: LISTEN/NOTIFY detector -> bus -> search adapter.
 		pipelineCtx, pipelineCancel := context.WithCancel(context.Background())

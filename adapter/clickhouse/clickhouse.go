@@ -42,46 +42,51 @@ type Adapter struct {
 	runner        *batch.Runner
 }
 
+// Config holds all parameters for the ClickHouse adapter.
+type Config struct {
+	DSN           string
+	Table         string
+	AutoCreate    bool
+	AsyncInsert   bool
+	Settings      map[string]string
+	BatchSize     int
+	FlushInterval time.Duration
+	BackoffBase   time.Duration
+	BackoffCap    time.Duration
+}
+
 // New creates a ClickHouse adapter.
 // Duration parameters default to sensible values when zero.
-func New(
-	dsn, table string,
-	autoCreate, asyncInsert bool,
-	settings map[string]string,
-	batchSize int,
-	flushInterval time.Duration,
-	backoffBase, backoffCap time.Duration,
-	logger *slog.Logger,
-) *Adapter {
-	if batchSize <= 0 {
-		batchSize = defaultBatchSize
+func New(cfg Config, logger *slog.Logger) *Adapter {
+	if cfg.BatchSize <= 0 {
+		cfg.BatchSize = defaultBatchSize
 	}
-	if flushInterval <= 0 {
-		flushInterval = defaultFlushInterval
+	if cfg.FlushInterval <= 0 {
+		cfg.FlushInterval = defaultFlushInterval
 	}
-	if backoffBase <= 0 {
-		backoffBase = defaultBackoffBase
+	if cfg.BackoffBase <= 0 {
+		cfg.BackoffBase = defaultBackoffBase
 	}
-	if backoffCap <= 0 {
-		backoffCap = defaultBackoffCap
+	if cfg.BackoffCap <= 0 {
+		cfg.BackoffCap = defaultBackoffCap
 	}
-	if table == "" {
-		table = "pgcdc_events"
+	if cfg.Table == "" {
+		cfg.Table = "pgcdc_events"
 	}
 	if logger == nil {
 		logger = slog.Default()
 	}
 
 	return &Adapter{
-		dsn:           dsn,
-		table:         table,
-		autoCreate:    autoCreate,
-		asyncInsert:   asyncInsert,
-		settings:      settings,
-		batchSize:     batchSize,
-		flushInterval: flushInterval,
-		backoffBase:   backoffBase,
-		backoffCap:    backoffCap,
+		dsn:           cfg.DSN,
+		table:         cfg.Table,
+		autoCreate:    cfg.AutoCreate,
+		asyncInsert:   cfg.AsyncInsert,
+		settings:      cfg.Settings,
+		batchSize:     cfg.BatchSize,
+		flushInterval: cfg.FlushInterval,
+		backoffBase:   cfg.BackoffBase,
+		backoffCap:    cfg.BackoffCap,
 		logger:        logger.With("adapter", "clickhouse"),
 	}
 }
@@ -220,6 +225,12 @@ func (a *Adapter) Flush(ctx context.Context, events []event.Event) adapter.Flush
 			return adapter.FlushResult{
 				Err: &pgcdcerr.ClickHouseFlushError{Table: a.table, Err: fmt.Errorf("send batch: %w", err)},
 			}
+		}
+	}
+
+	for _, ev := range events {
+		if !ev.CreatedAt.IsZero() {
+			metrics.EventDeliveryLag.WithLabelValues("clickhouse").Observe(time.Since(ev.CreatedAt).Seconds())
 		}
 	}
 

@@ -22,7 +22,7 @@ func TestScenario_GraphQL(t *testing.T) {
 		table := "gql_orders"
 		channel := createTrigger(t, connStr, table)
 
-		adapter := graphql.New("/graphql", false, 256, 0, nil, testLogger())
+		adapter := graphql.New("/graphql", false, 256, 0, 0, nil, testLogger())
 
 		r := chi.NewRouter()
 		adapter.MountHTTP(r)
@@ -128,7 +128,7 @@ func TestScenario_GraphQL(t *testing.T) {
 		channel1 := createTrigger(t, connStr, table1)
 		channel2 := createTrigger(t, connStr, table2)
 
-		adapter := graphql.New("/graphql", false, 256, 0, nil, testLogger())
+		adapter := graphql.New("/graphql", false, 256, 0, 0, nil, testLogger())
 
 		r := chi.NewRouter()
 		adapter.MountHTTP(r)

@@ -15,6 +15,7 @@ import (
 
 	"github.com/florinutz/pgcdc/internal/config"
 	"github.com/florinutz/pgcdc/internal/output"
+	"github.com/florinutz/pgcdc/registry"
 )
 
 type doctorCheck struct {
@@ -161,6 +162,13 @@ func checkConfig(checks *[]doctorCheck) (*config.Config, bool) {
 		})
 		return nil, false
 	}
+
+	config.SetKnownAdapters(registry.AdapterNames())
+	requiresDB := make(map[string]bool)
+	for _, d := range registry.Detectors() {
+		requiresDB[d.Name] = d.RequiresDB
+	}
+	config.SetDetectorRequiresDB(requiresDB)
 
 	if err := cfg.Validate(); err != nil {
 		*checks = append(*checks, doctorCheck{

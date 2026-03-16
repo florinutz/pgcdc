@@ -40,7 +40,10 @@ func TestWebhookAdapter_Contract(t *testing.T) {
 	defer srv.Close()
 
 	adaptertest.RunContractTests(t, "webhook", func(ctx context.Context, ch <-chan event.Event) error {
-		return webhook.New(srv.URL, nil, "", 1, 0, 0, 0, newTestLogger()).Start(ctx, ch)
+		return webhook.New(webhook.Config{
+			URL:        srv.URL,
+			MaxRetries: 1,
+		}, newTestLogger()).Start(ctx, ch)
 	})
 }
 
@@ -56,7 +59,11 @@ func TestHMACSigning(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	a := webhook.New(srv.URL, nil, signingKey, 1, 0, 0, 0, newTestLogger())
+	a := webhook.New(webhook.Config{
+		URL:        srv.URL,
+		SigningKey: signingKey,
+		MaxRetries: 1,
+	}, newTestLogger())
 
 	events := make(chan event.Event, 1)
 	events <- newTestEvent()
@@ -86,7 +93,10 @@ func TestHMACSigning_NotSetWhenNoKey(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	a := webhook.New(srv.URL, nil, "", 1, 0, 0, 0, newTestLogger())
+	a := webhook.New(webhook.Config{
+		URL:        srv.URL,
+		MaxRetries: 1,
+	}, newTestLogger())
 
 	events := make(chan event.Event, 1)
 	events <- newTestEvent()

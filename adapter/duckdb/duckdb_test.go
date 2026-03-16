@@ -26,7 +26,7 @@ func waitReady(t *testing.T, a *Adapter) {
 }
 
 func TestAdapter_IngestAndQuery(t *testing.T) {
-	a := New(":memory:", 1*time.Hour, 1*time.Second, 100, nil)
+	a := New(":memory:", 1*time.Hour, 1*time.Second, 100, "test-token", nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -60,6 +60,7 @@ func TestAdapter_IngestAndQuery(t *testing.T) {
 	body := `{"sql": "SELECT count(*) as cnt FROM cdc_events"}`
 	req := httptest.NewRequest(http.MethodPost, "/query", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer test-token")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -93,7 +94,7 @@ func TestAdapter_IngestAndQuery(t *testing.T) {
 }
 
 func TestAdapter_TablesHandler(t *testing.T) {
-	a := New(":memory:", 1*time.Hour, 1*time.Second, 100, nil)
+	a := New(":memory:", 1*time.Hour, 1*time.Second, 100, "test-token", nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -123,6 +124,7 @@ func TestAdapter_TablesHandler(t *testing.T) {
 	a.MountHTTP(r)
 
 	req := httptest.NewRequest(http.MethodGet, "/query/tables", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -141,7 +143,7 @@ func TestAdapter_TablesHandler(t *testing.T) {
 
 func TestAdapter_TTLCleanup(t *testing.T) {
 	// Use very short retention so cleanup fires quickly.
-	a := New(":memory:", 300*time.Millisecond, 100*time.Millisecond, 100, nil)
+	a := New(":memory:", 300*time.Millisecond, 100*time.Millisecond, 100, "test-token", nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -175,6 +177,7 @@ func TestAdapter_TTLCleanup(t *testing.T) {
 
 	body := `{"sql": "SELECT count(*) as cnt FROM cdc_events"}`
 	req := httptest.NewRequest(http.MethodPost, "/query", bytes.NewBufferString(body))
+	req.Header.Set("Authorization", "Bearer test-token")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -200,7 +203,7 @@ func TestAdapter_TTLCleanup(t *testing.T) {
 }
 
 func TestAdapter_QueryHandler_InvalidSQL(t *testing.T) {
-	a := New(":memory:", 1*time.Hour, 1*time.Second, 100, nil)
+	a := New(":memory:", 1*time.Hour, 1*time.Second, 100, "test-token", nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -220,6 +223,7 @@ func TestAdapter_QueryHandler_InvalidSQL(t *testing.T) {
 
 	body := `{"sql": "SELECT * FROM nonexistent_table"}`
 	req := httptest.NewRequest(http.MethodPost, "/query", bytes.NewBufferString(body))
+	req.Header.Set("Authorization", "Bearer test-token")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -232,7 +236,7 @@ func TestAdapter_QueryHandler_InvalidSQL(t *testing.T) {
 }
 
 func TestAdapter_QueryHandler_EmptySQL(t *testing.T) {
-	a := New(":memory:", 1*time.Hour, 1*time.Second, 100, nil)
+	a := New(":memory:", 1*time.Hour, 1*time.Second, 100, "test-token", nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -252,6 +256,7 @@ func TestAdapter_QueryHandler_EmptySQL(t *testing.T) {
 
 	body := `{"sql": ""}`
 	req := httptest.NewRequest(http.MethodPost, "/query", bytes.NewBufferString(body))
+	req.Header.Set("Authorization", "Bearer test-token")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -264,7 +269,7 @@ func TestAdapter_QueryHandler_EmptySQL(t *testing.T) {
 }
 
 func TestAdapter_QueryHandler_WithParams(t *testing.T) {
-	a := New(":memory:", 1*time.Hour, 1*time.Second, 100, nil)
+	a := New(":memory:", 1*time.Hour, 1*time.Second, 100, "test-token", nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -292,6 +297,7 @@ func TestAdapter_QueryHandler_WithParams(t *testing.T) {
 
 	body := `{"sql": "SELECT count(*) as cnt FROM cdc_events WHERE channel = ?", "params": ["users"]}`
 	req := httptest.NewRequest(http.MethodPost, "/query", bytes.NewBufferString(body))
+	req.Header.Set("Authorization", "Bearer test-token")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 

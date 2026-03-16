@@ -23,7 +23,7 @@ func TestScenario_DuckDB(t *testing.T) {
 		channel := createTrigger(t, connStr, table)
 
 		// In-memory DuckDB, fast flush interval.
-		adapter := duckdb.New(":memory:", 0, 500*time.Millisecond, 0, testLogger())
+		adapter := duckdb.New(":memory:", 0, 500*time.Millisecond, 0, "test-token", testLogger())
 
 		r := chi.NewRouter()
 		adapter.MountHTTP(r)
@@ -72,7 +72,7 @@ func TestScenario_DuckDB(t *testing.T) {
 		table := "duckdb_tables_orders"
 		channel := createTrigger(t, connStr, table)
 
-		adapter := duckdb.New(":memory:", 0, 500*time.Millisecond, 0, testLogger())
+		adapter := duckdb.New(":memory:", 0, 500*time.Millisecond, 0, "test-token", testLogger())
 
 		r := chi.NewRouter()
 		adapter.MountHTTP(r)
@@ -91,7 +91,12 @@ func TestScenario_DuckDB(t *testing.T) {
 		for time.Now().Before(deadline) {
 			time.Sleep(500 * time.Millisecond)
 
-			resp, err := http.Get(srv.URL + "/query/tables")
+			req, err := http.NewRequest(http.MethodGet, srv.URL+"/query/tables", nil)
+			if err != nil {
+				continue
+			}
+			req.Header.Set("Authorization", "Bearer test-token")
+			resp, err := http.DefaultClient.Do(req)
 			if err != nil {
 				continue
 			}
@@ -118,7 +123,13 @@ func TestScenario_DuckDB(t *testing.T) {
 func queryDuckDBEndpoint(t *testing.T, baseURL, sql string) []map[string]any {
 	t.Helper()
 	body, _ := json.Marshal(map[string]string{"sql": sql})
-	resp, err := http.Post(baseURL+"/query", "application/json", bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, baseURL+"/query", bytes.NewReader(body))
+	if err != nil {
+		return nil
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer test-token")
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil
 	}

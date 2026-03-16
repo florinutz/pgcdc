@@ -51,16 +51,15 @@ func init() {
 		},
 		Create: func(ctx registry.AdapterContext) (registry.AdapterResult, error) {
 			cfg := ctx.Cfg
-			a := webhook.New(
-				cfg.Webhook.URL,
-				cfg.Webhook.Headers,
-				cfg.Webhook.SigningKey,
-				cfg.Webhook.MaxRetries,
-				cfg.Webhook.Timeout,
-				cfg.Webhook.BackoffBase,
-				cfg.Webhook.BackoffCap,
-				ctx.Logger,
-			)
+			a := webhook.New(webhook.Config{
+				URL:         cfg.Webhook.URL,
+				Headers:     cfg.Webhook.Headers,
+				SigningKey:  cfg.Webhook.SigningKey,
+				MaxRetries:  cfg.Webhook.MaxRetries,
+				Timeout:     cfg.Webhook.Timeout,
+				BackoffBase: cfg.Webhook.BackoffBase,
+				BackoffCap:  cfg.Webhook.BackoffCap,
+			}, ctx.Logger)
 			mwCfg := webhookMiddlewareConfig(cfg)
 			return registry.AdapterResult{
 				Adapter:          a,
@@ -119,7 +118,7 @@ func init() {
 		DefaultConfig: func() any {
 			return &config.SSEConfig{
 				Addr:              ":8080",
-				CORSOrigins:       []string{"*"},
+				CORSOrigins:       []string{},
 				HeartbeatInterval: 15 * time.Second,
 				ReadTimeout:       5 * time.Second,
 				IdleTimeout:       120 * time.Second,
@@ -216,11 +215,12 @@ func init() {
 		DefaultConfig: func() any {
 			return &config.WebSocketConfig{
 				PingInterval: 15 * time.Second,
+				MaxClients:   1000,
 			}
 		},
 		Create: func(ctx registry.AdapterContext) (registry.AdapterResult, error) {
 			cfg := ctx.Cfg
-			broker := ws.New(cfg.Bus.BufferSize, cfg.WebSocket.PingInterval, ctx.Logger)
+			broker := ws.New(cfg.Bus.BufferSize, cfg.WebSocket.PingInterval, cfg.WebSocket.MaxClients, ctx.Logger)
 			return registry.AdapterResult{
 				Adapter:  broker,
 				WSBroker: broker,
@@ -228,6 +228,7 @@ func init() {
 		},
 		ViperKeys: [][2]string{
 			{"ws-ping-interval", "websocket.ping_interval"},
+			{"ws-max-clients", "websocket.max_clients"},
 		},
 	})
 
@@ -258,22 +259,21 @@ func init() {
 				RateLimit:      rlConfig(cfg.Embedding.RateLimit, cfg.Embedding.RateLimitBurst),
 			}
 			return registry.AdapterResult{
-				Adapter: embeddingadapter.New(
-					cfg.Embedding.APIURL,
-					cfg.Embedding.APIKey,
-					cfg.Embedding.Model,
-					cfg.Embedding.Columns,
-					cfg.Embedding.IDColumn,
-					embDBURL,
-					cfg.Embedding.Table,
-					cfg.Embedding.Dimension,
-					cfg.Embedding.MaxRetries,
-					cfg.Embedding.Timeout,
-					cfg.Embedding.BackoffBase,
-					cfg.Embedding.BackoffCap,
-					cfg.Embedding.SkipUnchanged,
-					ctx.Logger,
-				),
+				Adapter: embeddingadapter.New(embeddingadapter.Config{
+					APIURL:        cfg.Embedding.APIURL,
+					APIKey:        cfg.Embedding.APIKey,
+					Model:         cfg.Embedding.Model,
+					Columns:       cfg.Embedding.Columns,
+					IDColumn:      cfg.Embedding.IDColumn,
+					DBURL:         embDBURL,
+					Table:         cfg.Embedding.Table,
+					Dimension:     cfg.Embedding.Dimension,
+					MaxRetries:    cfg.Embedding.MaxRetries,
+					Timeout:       cfg.Embedding.Timeout,
+					BackoffBase:   cfg.Embedding.BackoffBase,
+					BackoffCap:    cfg.Embedding.BackoffCap,
+					SkipUnchanged: cfg.Embedding.SkipUnchanged,
+				}, ctx.Logger),
 				MiddlewareConfig: &mwCfg,
 			}, nil
 		},
@@ -306,23 +306,24 @@ func init() {
 				BatchInterval: 1 * time.Second,
 				BackoffBase:   1 * time.Second,
 				BackoffCap:    30 * time.Second,
+				MaxRetries:    3,
 			}
 		},
 		Create: func(ctx registry.AdapterContext) (registry.AdapterResult, error) {
 			cfg := ctx.Cfg
 			return registry.AdapterResult{
-				Adapter: searchadapter.New(
-					cfg.Search.Engine,
-					cfg.Search.URL,
-					cfg.Search.APIKey,
-					cfg.Search.Index,
-					cfg.Search.IDColumn,
-					cfg.Search.BatchSize,
-					cfg.Search.BatchInterval,
-					cfg.Search.BackoffBase,
-					cfg.Search.BackoffCap,
-					ctx.Logger,
-				),
+				Adapter: searchadapter.New(searchadapter.Config{
+					Engine:        cfg.Search.Engine,
+					URL:           cfg.Search.URL,
+					APIKey:        cfg.Search.APIKey,
+					Index:         cfg.Search.Index,
+					IDColumn:      cfg.Search.IDColumn,
+					BatchSize:     cfg.Search.BatchSize,
+					BatchInterval: cfg.Search.BatchInterval,
+					BackoffBase:   cfg.Search.BackoffBase,
+					BackoffCap:    cfg.Search.BackoffCap,
+					MaxRetries:    cfg.Search.MaxRetries,
+				}, ctx.Logger),
 			}, nil
 		},
 		ViperKeys: [][2]string{
@@ -367,6 +368,7 @@ func init() {
 
 	// WebSocket adapter flags.
 	f.Duration("ws-ping-interval", 0, "WebSocket ping interval (default 15s)")
+	f.Int("ws-max-clients", 1000, "maximum concurrent WebSocket clients")
 
 	// Embedding adapter flags.
 	f.String("embedding-api-url", "", "OpenAI-compatible embedding API URL")

@@ -54,42 +54,45 @@ type Adapter struct {
 	logger *slog.Logger
 }
 
+// Config holds all parameters for the Iceberg adapter.
+type Config struct {
+	CatalogType   string
+	CatalogURI    string
+	Warehouse     string
+	Namespace     string
+	TableName     string
+	Mode          string
+	SchemaMode    string
+	PrimaryKeys   []string
+	FlushInterval time.Duration
+	FlushSize     int
+	BackoffBase   time.Duration
+	BackoffCap    time.Duration
+}
+
 // New creates an Iceberg adapter.
 // Duration parameters default to sensible values when zero.
-func New(
-	catalogType string,
-	catalogURI string,
-	warehouse string,
-	namespace string,
-	tableName string,
-	mode string,
-	schemaMode string,
-	primaryKeys []string,
-	flushInterval time.Duration,
-	flushSize int,
-	backoffBase, backoffCap time.Duration,
-	logger *slog.Logger,
-) *Adapter {
-	if flushInterval <= 0 {
-		flushInterval = defaultFlushInterval
+func New(cfg Config, logger *slog.Logger) *Adapter {
+	if cfg.FlushInterval <= 0 {
+		cfg.FlushInterval = defaultFlushInterval
 	}
-	if flushSize <= 0 {
-		flushSize = defaultFlushSize
+	if cfg.FlushSize <= 0 {
+		cfg.FlushSize = defaultFlushSize
 	}
-	if backoffBase <= 0 {
-		backoffBase = defaultBackoffBase
+	if cfg.BackoffBase <= 0 {
+		cfg.BackoffBase = defaultBackoffBase
 	}
-	if backoffCap <= 0 {
-		backoffCap = defaultBackoffCap
+	if cfg.BackoffCap <= 0 {
+		cfg.BackoffCap = defaultBackoffCap
 	}
 	if logger == nil {
 		logger = slog.Default()
 	}
 
-	ns := parseNamespace(namespace)
+	ns := parseNamespace(cfg.Namespace)
 
 	var m Mode
-	switch strings.ToLower(mode) {
+	switch strings.ToLower(cfg.Mode) {
 	case "upsert":
 		m = ModeUpsert
 	default:
@@ -97,7 +100,7 @@ func New(
 	}
 
 	var sm SchemaMode
-	switch strings.ToLower(schemaMode) {
+	switch strings.ToLower(cfg.SchemaMode) {
 	case "raw":
 		sm = SchemaModeRaw
 	default:
@@ -107,27 +110,27 @@ func New(
 	// Build catalog and storage.
 	storage := &LocalStorage{}
 	var cat Catalog
-	switch strings.ToLower(catalogType) {
+	switch strings.ToLower(cfg.CatalogType) {
 	case "hadoop", "":
-		cat = NewHadoopCatalog(warehouse, storage)
+		cat = NewHadoopCatalog(cfg.Warehouse, storage)
 	default:
-		cat = NewHadoopCatalog(warehouse, storage) // Phase 1: only hadoop
+		cat = NewHadoopCatalog(cfg.Warehouse, storage) // Phase 1: only hadoop
 	}
 
 	return &Adapter{
 		catalog:       cat,
 		storage:       storage,
-		warehouse:     warehouse,
+		warehouse:     cfg.Warehouse,
 		namespace:     ns,
-		tableName:     tableName,
+		tableName:     cfg.TableName,
 		mode:          m,
 		schemaMode:    sm,
-		primaryKeys:   primaryKeys,
-		flushInterval: flushInterval,
-		flushSize:     flushSize,
-		buffer:        make([]event.Event, 0, flushSize),
-		backoffBase:   backoffBase,
-		backoffCap:    backoffCap,
+		primaryKeys:   cfg.PrimaryKeys,
+		flushInterval: cfg.FlushInterval,
+		flushSize:     cfg.FlushSize,
+		buffer:        make([]event.Event, 0, cfg.FlushSize),
+		backoffBase:   cfg.BackoffBase,
+		backoffCap:    cfg.BackoffCap,
 		logger:        logger.With("adapter", "iceberg"),
 	}
 }
@@ -209,7 +212,7 @@ func (a *Adapter) run(ctx context.Context, events <-chan event.Event) error {
 			}
 
 			// Skip transaction markers.
-			if ev.Channel == "pgcdc:_txn" {
+			if ev.Channel == event.TransactionMarkerChannel {
 				continue
 			}
 

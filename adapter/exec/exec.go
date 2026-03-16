@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/florinutz/pgcdc/event"
-	"github.com/florinutz/pgcdc/internal/backoff"
+	"github.com/florinutz/pgcdc/internal/reconnect"
 	"github.com/florinutz/pgcdc/metrics"
 	"github.com/florinutz/pgcdc/pgcdcerr"
 )
@@ -70,29 +70,12 @@ func (a *Adapter) Validate(_ context.Context) error {
 func (a *Adapter) Start(ctx context.Context, events <-chan event.Event) error {
 	a.logger.Info("exec adapter started", "command", a.command)
 
-	var attempt int
 	var pending *event.Event
-	for {
-		runErr := a.run(ctx, events, &pending)
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-
-		delay := backoff.Jitter(attempt, a.backoffBase, a.backoffCap)
-		a.logger.Error("process exited, restarting",
-			"error", runErr,
-			"attempt", attempt+1,
-			"delay", delay,
-		)
-		metrics.ExecRestarts.Inc()
-		attempt++
-
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(delay):
-		}
-	}
+	return reconnect.Loop(ctx, "exec", a.backoffBase, a.backoffCap,
+		a.logger, metrics.ExecRestarts,
+		func(ctx context.Context) error {
+			return a.run(ctx, events, &pending)
+		})
 }
 
 // run starts one process and streams events to it. If pending is non-nil, it

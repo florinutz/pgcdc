@@ -91,7 +91,7 @@ func (s *Snapshot) Run(ctx context.Context, events chan<- event.Event) error {
 		}
 	}
 
-	channel := "pgcdc:" + s.table
+	channel := event.ChannelPrefix + s.table
 
 	// Build the query.
 	safeTable := pgx.Identifier{s.table}.Sanitize()

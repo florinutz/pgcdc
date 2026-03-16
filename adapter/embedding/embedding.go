@@ -58,66 +58,73 @@ type Adapter struct {
 	conn          *pgx.Conn // persistent connection; lazily initialized in Deliver/run
 }
 
+// Config holds all parameters for the embedding adapter.
+type Config struct {
+	APIURL        string
+	APIKey        string
+	Model         string
+	Columns       []string
+	IDColumn      string
+	DBURL         string
+	Table         string
+	Dimension     int
+	MaxRetries    int
+	Timeout       time.Duration
+	BackoffBase   time.Duration
+	BackoffCap    time.Duration
+	SkipUnchanged bool
+}
+
 // New creates an embedding adapter.
-// apiURL is an OpenAI-compatible endpoint (e.g. https://api.openai.com/v1/embeddings).
-// columns is the list of payload row fields to concatenate for embedding.
-// idColumn is the payload row field used as the source primary key for UPSERT/DELETE.
+// Config.APIURL is an OpenAI-compatible endpoint (e.g. https://api.openai.com/v1/embeddings).
+// Config.Columns is the list of payload row fields to concatenate for embedding.
+// Config.IDColumn is the payload row field used as the source primary key for UPSERT/DELETE.
 // Duration parameters default to sensible values when zero.
 // CB, rate-limit, retry, DLQ, and tracing are handled by the middleware chain — use
 // registry.AdapterResult.MiddlewareConfig to configure them.
-func New(
-	apiURL, apiKey, model string,
-	columns []string,
-	idColumn string,
-	dbURL, table string,
-	dimension int,
-	maxRetries int,
-	timeout, backoffBase, backoffCap time.Duration,
-	skipUnchanged bool,
-	logger *slog.Logger,
-) *Adapter {
-	if model == "" {
-		model = defaultModel
+func New(cfg Config, logger *slog.Logger) *Adapter {
+	if cfg.Model == "" {
+		cfg.Model = defaultModel
 	}
-	if idColumn == "" {
-		idColumn = defaultIDColumn
+	if cfg.IDColumn == "" {
+		cfg.IDColumn = defaultIDColumn
 	}
-	if table == "" {
-		table = defaultTable
+	if cfg.Table == "" {
+		cfg.Table = defaultTable
 	}
-	if dimension <= 0 {
-		dimension = defaultDimension
+	if cfg.Dimension <= 0 {
+		cfg.Dimension = defaultDimension
 	}
-	if maxRetries <= 0 {
-		maxRetries = defaultMaxRetries
+	if cfg.MaxRetries <= 0 {
+		cfg.MaxRetries = defaultMaxRetries
 	}
-	if timeout <= 0 {
-		timeout = defaultTimeout
+	if cfg.Timeout <= 0 {
+		cfg.Timeout = defaultTimeout
 	}
-	if backoffBase <= 0 {
-		backoffBase = defaultBackoffBase
+	if cfg.BackoffBase <= 0 {
+		cfg.BackoffBase = defaultBackoffBase
 	}
-	if backoffCap <= 0 {
-		backoffCap = defaultBackoffCap
+	if cfg.BackoffCap <= 0 {
+		cfg.BackoffCap = defaultBackoffCap
 	}
 	if logger == nil {
 		logger = slog.Default()
 	}
-	safeTable := pgx.Identifier{table}.Sanitize()
+	safeTable := pgx.Identifier{cfg.Table}.Sanitize()
 	return &Adapter{
-		apiURL:        apiURL,
-		apiKey:        apiKey,
-		model:         model,
-		columns:       columns,
-		idColumn:      idColumn,
-		dbURL:         dbURL,
-		table:         table,
-		dimension:     dimension,
-		maxRetries:    maxRetries,
-		backoffBase:   backoffBase,
-		backoffCap:    backoffCap,
-		skipUnchanged: skipUnchanged,
-		client:        &http.Client{Timeout: timeout},
+		apiURL:        cfg.APIURL,
+		apiKey:        cfg.APIKey,
+		model:         cfg.Model,
+		columns:       cfg.Columns,
+		idColumn:      cfg.IDColumn,
+		dbURL:         cfg.DBURL,
+		table:         cfg.Table,
+		dimension:     cfg.Dimension,
+		maxRetries:    cfg.MaxRetries,
+		backoffBase:   cfg.BackoffBase,
+		backoffCap:    cfg.BackoffCap,
+		skipUnchanged: cfg.SkipUnchanged,
+		client:        &http.Client{Timeout: cfg.Timeout},
 		logger:        logger.With("adapter", "embedding"),
 		upsertSQL: fmt.Sprintf(`
 			INSERT INTO %s (source_id, source_table, content, embedding, event_id, updated_at)
@@ -159,6 +166,14 @@ func (a *Adapter) Validate(ctx context.Context) error {
 		return fmt.Errorf("pgvector db connect: %w", err)
 	}
 	_ = conn.Close(ctx)
+	return nil
+}
+
+// Drain implements adapter.Drainer: closes the persistent pgvector connection.
+func (a *Adapter) Drain(ctx context.Context) error {
+	if a.conn != nil && !a.conn.IsClosed() {
+		return a.conn.Close(ctx)
+	}
 	return nil
 }
 
@@ -385,7 +400,7 @@ func (a *Adapter) embed(ctx context.Context, eventID, text string) ([]float64, e
 	}
 }
 
-// payload is the decoded event payload structure shared across all event sources.
+// payload is used by embeddingColumnsChanged to compare old and new row values.
 type payload struct {
 	Op    string                 `json:"op"`
 	Table string                 `json:"table"`
@@ -397,88 +412,19 @@ type payload struct {
 // concatenated text content, whether this is a DELETE operation, and the
 // parsed payload (for change detection).
 func (a *Adapter) extractPayload(ev event.Event) (sourceID, sourceTable, content string, isDel bool, p payload) {
-	// Structured record path: zero JSON parsing.
-	if rec := ev.Record(); rec != nil && rec.Operation != 0 &&
-		(rec.Change.After != nil || rec.Change.Before != nil) {
-		isDel = rec.Operation == event.OperationDelete
-		sourceTable = rec.Metadata[event.MetaTable]
+	extracted := event.ExtractRow(ev, a.idColumn)
+	sourceID = extracted.ID
+	sourceTable = extracted.Table
+	isDel = extracted.IsDelete
 
-		var row map[string]any
-		var old map[string]any
-		if rec.Change.After != nil {
-			row = rec.Change.After.ToMap()
-		}
-		if rec.Change.Before != nil {
-			old = rec.Change.Before.ToMap()
-		}
-
-		// For DELETE, row data is in Before.
-		if isDel && row == nil {
-			row = old
-			old = nil
-		}
-
-		if row == nil {
-			return "", sourceTable, "", isDel, p
-		}
-
-		// Extract source ID.
-		if v, ok := row[a.idColumn]; ok && v != nil {
-			if s, ok := v.(string); ok {
-				sourceID = s
-			} else {
-				sourceID = fmt.Sprintf("%v", v)
-			}
-		}
-
-		// Concatenate text columns.
-		var parts []string
-		for _, col := range a.columns {
-			if v, ok := row[col]; ok && v != nil {
-				if s, ok := v.(string); ok {
-					parts = append(parts, s)
-				} else {
-					parts = append(parts, fmt.Sprintf("%v", v))
-				}
-			}
-		}
-		content = strings.Join(parts, " ")
-
-		// Populate p for embeddingColumnsChanged compatibility.
-		p.Op = rec.Operation.String()
-		p.Table = sourceTable
-		p.Row = row
-		p.Old = old
-
-		return sourceID, sourceTable, content, isDel, p
+	if extracted.Row == nil {
+		return sourceID, sourceTable, "", isDel, p
 	}
 
-	// Legacy path: parse payload JSON.
-	if err := json.Unmarshal(ev.Payload, &p); err != nil {
-		a.logger.Warn("failed to parse event payload", "event_id", ev.ID, "error", err)
-		return "", "", "", false, p
-	}
-
-	sourceTable = p.Table
-	isDel = p.Op == "DELETE"
-
-	if p.Row == nil {
-		return "", sourceTable, "", isDel, p
-	}
-
-	// Extract source ID.
-	if v, ok := p.Row[a.idColumn]; ok && v != nil {
-		if s, ok := v.(string); ok {
-			sourceID = s
-		} else {
-			sourceID = fmt.Sprintf("%v", v)
-		}
-	}
-
-	// Concatenate text columns.
+	// Concatenate text columns for embedding.
 	var parts []string
 	for _, col := range a.columns {
-		if v, ok := p.Row[col]; ok && v != nil {
+		if v, ok := extracted.Row[col]; ok && v != nil {
 			if s, ok := v.(string); ok {
 				parts = append(parts, s)
 			} else {
@@ -487,6 +433,16 @@ func (a *Adapter) extractPayload(ev event.Event) (sourceID, sourceTable, content
 		}
 	}
 	content = strings.Join(parts, " ")
+
+	// Populate p for embeddingColumnsChanged compatibility.
+	if isDel {
+		p.Op = "DELETE"
+	} else {
+		p.Op = ev.Operation
+	}
+	p.Table = sourceTable
+	p.Row = extracted.Row
+	p.Old = extracted.Old
 
 	return sourceID, sourceTable, content, isDel, p
 }

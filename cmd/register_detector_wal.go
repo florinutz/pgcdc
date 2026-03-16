@@ -2,9 +2,11 @@ package cmd
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/florinutz/pgcdc/checkpoint"
 	"github.com/florinutz/pgcdc/detector/walreplication"
+	"github.com/florinutz/pgcdc/internal/config"
 	"github.com/florinutz/pgcdc/registry"
 	"github.com/florinutz/pgcdc/snapshot"
 )
@@ -13,6 +15,7 @@ func init() {
 	registry.RegisterDetector(registry.DetectorEntry{
 		Name:        "wal",
 		Description: "PostgreSQL WAL logical replication",
+		RequiresDB:  true,
 		ViperKeys: [][2]string{
 			{"publication", "detector.publication"},
 			{"persistent-slot", "detector.persistent_slot"},
@@ -51,6 +54,14 @@ func init() {
 				Default:     false,
 				Description: "Add column type metadata (name, type_oid, type_name) to WAL events",
 			},
+		},
+		ConfigKey: "detector",
+		DefaultConfig: func() any {
+			return &config.DetectorConfig{
+				Type:        "wal",
+				BackoffBase: 5 * time.Second,
+				BackoffCap:  60 * time.Second,
+			}
 		},
 		Create: func(ctx registry.DetectorContext) (registry.DetectorResult, error) {
 			cfg := ctx.Cfg

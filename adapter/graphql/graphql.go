@@ -2,6 +2,7 @@ package graphql
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -21,6 +22,7 @@ type Adapter struct {
 	schemaAware       bool
 	bufferSize        int
 	keepaliveInterval time.Duration
+	maxClients        int
 	logger            *slog.Logger
 	schemaStore       schema.Store
 
@@ -32,7 +34,7 @@ type Adapter struct {
 }
 
 // New creates a new GraphQL subscriptions adapter.
-func New(path string, schemaAware bool, bufferSize int, keepaliveInterval time.Duration, schemaStore schema.Store, logger *slog.Logger) *Adapter {
+func New(path string, schemaAware bool, bufferSize int, keepaliveInterval time.Duration, maxClients int, schemaStore schema.Store, logger *slog.Logger) *Adapter {
 	if path == "" {
 		path = "/graphql"
 	}
@@ -42,6 +44,9 @@ func New(path string, schemaAware bool, bufferSize int, keepaliveInterval time.D
 	if keepaliveInterval <= 0 {
 		keepaliveInterval = 15 * time.Second
 	}
+	if maxClients <= 0 {
+		maxClients = 1000
+	}
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -50,6 +55,7 @@ func New(path string, schemaAware bool, bufferSize int, keepaliveInterval time.D
 		schemaAware:       schemaAware,
 		bufferSize:        bufferSize,
 		keepaliveInterval: keepaliveInterval,
+		maxClients:        maxClients,
 		logger:            logger.With("component", "graphql"),
 		schemaStore:       schemaStore,
 		clients:           make(map[*client]struct{}),
@@ -60,6 +66,14 @@ func New(path string, schemaAware bool, bufferSize int, keepaliveInterval time.D
 // Name returns the adapter name.
 func (a *Adapter) Name() string {
 	return "graphql"
+}
+
+// Validate checks required configuration.
+func (a *Adapter) Validate(_ context.Context) error {
+	if a.bufferSize <= 0 {
+		return fmt.Errorf("graphql: buffer_size must be > 0")
+	}
+	return nil
 }
 
 // Drain implements adapter.Drainer. The GraphQL adapter closes all
@@ -118,10 +132,17 @@ func (a *Adapter) broadcast(ev event.Event) {
 	}
 }
 
-// addSubscription registers a subscription for broadcast.
-func (a *Adapter) addSubscription(c *client, sub *subscription) {
+// addSubscription registers a subscription for broadcast. It returns false
+// if the maximum number of clients has been reached.
+func (a *Adapter) addSubscription(c *client, sub *subscription) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.maxClients > 0 && len(a.clients) >= a.maxClients {
+		a.logger.Warn("max GraphQL clients reached, rejecting subscription",
+			"max_clients", a.maxClients,
+		)
+		return false
+	}
 	a.subs[sub] = c
 	a.clients[c] = struct{}{}
 	a.logger.Debug("subscription added",
@@ -129,6 +150,7 @@ func (a *Adapter) addSubscription(c *client, sub *subscription) {
 		"channel_filter", sub.filter.Channel,
 		"total_subs", len(a.subs),
 	)
+	return true
 }
 
 // removeSubscription removes a single subscription.

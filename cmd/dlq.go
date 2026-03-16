@@ -337,7 +337,7 @@ func buildReplayAdapter(name string, cmd *cobra.Command, logger *slog.Logger) (a
 		if url == "" {
 			return nil, fmt.Errorf("--webhook-url required for webhook replay")
 		}
-		return webhook.New(url, nil, "", 3, 0, 0, 0, logger), nil
+		return webhook.New(webhook.Config{URL: url, MaxRetries: 3}, logger), nil
 	case "kafka":
 		return buildKafkaReplayAdapter(cmd, logger)
 	default:

@@ -50,50 +50,53 @@ type Detector struct {
 	pendingClient       *mongo.Client // client for flushing pending token
 }
 
+// Config holds all parameters for the MongoDB Change Streams detector.
+type Config struct {
+	URI          string
+	Scope        string
+	Database     string
+	Collections  []string
+	FullDocument string
+	MetadataDB   string
+	MetadataColl string
+	BackoffBase  time.Duration
+	BackoffCap   time.Duration
+}
+
 // New creates a MongoDB Change Streams detector.
-func New(
-	uri string,
-	scope string,
-	database string,
-	collections []string,
-	fullDocument string,
-	metadataDB string,
-	metadataColl string,
-	backoffBase, backoffCap time.Duration,
-	logger *slog.Logger,
-) *Detector {
-	if backoffBase <= 0 {
-		backoffBase = defaultBackoffBase
+func New(cfg Config, logger *slog.Logger) *Detector {
+	if cfg.BackoffBase <= 0 {
+		cfg.BackoffBase = defaultBackoffBase
 	}
-	if backoffCap <= 0 {
-		backoffCap = defaultBackoffCap
+	if cfg.BackoffCap <= 0 {
+		cfg.BackoffCap = defaultBackoffCap
 	}
 	if logger == nil {
 		logger = slog.Default()
 	}
-	if scope == "" {
-		scope = "collection"
+	if cfg.Scope == "" {
+		cfg.Scope = "collection"
 	}
-	if fullDocument == "" {
-		fullDocument = "updateLookup"
+	if cfg.FullDocument == "" {
+		cfg.FullDocument = "updateLookup"
 	}
-	if metadataDB == "" {
-		metadataDB = database
+	if cfg.MetadataDB == "" {
+		cfg.MetadataDB = cfg.Database
 	}
-	if metadataColl == "" {
-		metadataColl = "pgcdc_resume_tokens"
+	if cfg.MetadataColl == "" {
+		cfg.MetadataColl = "pgcdc_resume_tokens"
 	}
 
 	return &Detector{
-		uri:                 uri,
-		scope:               scope,
-		database:            database,
-		collections:         collections,
-		fullDocument:        fullDocument,
-		metadataDB:          metadataDB,
-		metadataColl:        metadataColl,
-		backoffBase:         backoffBase,
-		backoffCap:          backoffCap,
+		uri:                 cfg.URI,
+		scope:               cfg.Scope,
+		database:            cfg.Database,
+		collections:         cfg.Collections,
+		fullDocument:        cfg.FullDocument,
+		metadataDB:          cfg.MetadataDB,
+		metadataColl:        cfg.MetadataColl,
+		backoffBase:         cfg.BackoffBase,
+		backoffCap:          cfg.BackoffCap,
 		logger:              logger.With("detector", sourceName),
 		resumeTokenInterval: 5 * time.Second,
 		resumeTokenBatch:    100,
@@ -103,6 +106,14 @@ func New(
 // Name returns the detector name.
 func (d *Detector) Name() string {
 	return sourceName
+}
+
+// Validate checks that required configuration is present.
+func (d *Detector) Validate(_ context.Context) error {
+	if d.uri == "" {
+		return fmt.Errorf("mongodb: uri is required")
+	}
+	return nil
 }
 
 // SetTracer sets the OpenTelemetry tracer for creating per-event spans.

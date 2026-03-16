@@ -26,15 +26,14 @@ func init() {
 		Create: func(ctx registry.AdapterContext) (registry.AdapterResult, error) {
 			cfg := ctx.Cfg
 			return registry.AdapterResult{
-				Adapter: redisadapter.New(
-					cfg.Redis.URL,
-					cfg.Redis.Mode,
-					cfg.Redis.KeyPrefix,
-					cfg.Redis.IDColumn,
-					cfg.Redis.BackoffBase,
-					cfg.Redis.BackoffCap,
-					ctx.Logger,
-				),
+				Adapter: redisadapter.New(redisadapter.Config{
+					URL:         cfg.Redis.URL,
+					Mode:        cfg.Redis.Mode,
+					KeyPrefix:   cfg.Redis.KeyPrefix,
+					IDColumn:    cfg.Redis.IDColumn,
+					BackoffBase: cfg.Redis.BackoffBase,
+					BackoffCap:  cfg.Redis.BackoffCap,
+				}, ctx.Logger),
 			}, nil
 		},
 		ViperKeys: [][2]string{

@@ -47,6 +47,14 @@ func (a *Adapter) flush(ctx context.Context) error {
 
 	metrics.IcebergFlushes.WithLabelValues("append").Inc()
 	metrics.IcebergFlushSize.Observe(float64(len(batch)))
+
+	// Report delivery lag for batch events.
+	for _, ev := range batch {
+		if !ev.CreatedAt.IsZero() {
+			metrics.EventDeliveryLag.WithLabelValues("iceberg").Observe(time.Since(ev.CreatedAt).Seconds())
+		}
+	}
+
 	a.logger.Info("flush complete",
 		"events", len(batch),
 		"duration_s", fmt.Sprintf("%.3f", duration),

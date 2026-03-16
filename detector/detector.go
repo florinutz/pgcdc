@@ -13,6 +13,12 @@ type Detector interface {
 	Name() string
 }
 
+// Validator is optionally implemented by detectors that support startup
+// validation. When implemented, the pipeline calls Validate() before Start().
+type Validator interface {
+	Validate(ctx context.Context) error
+}
+
 // HTTPMountable is optionally implemented by detectors that serve HTTP routes
 // (e.g., the webhook gateway detector). When a detector implements this
 // interface, the pipeline mounts its routes on the shared HTTP server.

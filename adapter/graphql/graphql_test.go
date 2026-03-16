@@ -357,14 +357,14 @@ func TestMessageMarshalUnmarshal(t *testing.T) {
 }
 
 func TestAdapterName(t *testing.T) {
-	a := New("/graphql", false, 0, 0, nil, nil)
+	a := New("/graphql", false, 0, 0, 0, nil, nil)
 	if a.Name() != "graphql" {
 		t.Errorf("Name() = %q, want %q", a.Name(), "graphql")
 	}
 }
 
 func TestNewDefaults(t *testing.T) {
-	a := New("", false, 0, 0, nil, nil)
+	a := New("", false, 0, 0, 0, nil, nil)
 	if a.path != "/graphql" {
 		t.Errorf("path = %q, want %q", a.path, "/graphql")
 	}

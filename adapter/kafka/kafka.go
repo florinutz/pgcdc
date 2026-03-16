@@ -93,52 +93,62 @@ func (a *Adapter) Drain(ctx context.Context) error {
 	return nil
 }
 
+// Config holds all parameters for the Kafka adapter.
+type Config struct {
+	Brokers         []string
+	Topic           string
+	SASLMechanism   string
+	SASLUsername    string
+	SASLPassword    string
+	TLSCAFile       string
+	TLSEnabled      bool
+	BackoffBase     time.Duration
+	BackoffCap      time.Duration
+	Encoder         encoding.Encoder
+	TransactionalID string
+	CBMaxFailures   int
+	CBResetTimeout  time.Duration
+	RateLimit       float64
+	RateLimitBurst  int
+}
+
 // New creates a Kafka adapter. Duration parameters default to sensible values
-// when zero. If encoder is nil, events are sent as raw JSON (current behavior).
-// When transactionalID is non-empty, each event is produced inside its own
+// when zero. If Encoder is nil, events are sent as raw JSON (current behavior).
+// When TransactionalID is non-empty, each event is produced inside its own
 // Kafka transaction for exactly-once delivery.
-func New(
-	brokers []string,
-	topic, saslMechanism, saslUser, saslPass, tlsCAFile string,
-	tlsEnabled bool,
-	backoffBase, backoffCap time.Duration,
-	encoder encoding.Encoder,
-	logger *slog.Logger,
-	transactionalID string,
-	cbMaxFailures int, cbResetTimeout time.Duration,
-	rateLimitVal float64, rateBurst int,
-) *Adapter {
+func New(cfg Config, logger *slog.Logger) *Adapter {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	if backoffBase <= 0 {
-		backoffBase = 1 * time.Second
+	if cfg.BackoffBase <= 0 {
+		cfg.BackoffBase = 1 * time.Second
 	}
-	if backoffCap <= 0 {
-		backoffCap = 30 * time.Second
+	if cfg.BackoffCap <= 0 {
+		cfg.BackoffCap = 30 * time.Second
 	}
-	if len(brokers) == 0 {
-		brokers = []string{"localhost:9092"}
+	if len(cfg.Brokers) == 0 {
+		cfg.Brokers = []string{"localhost:9092"}
 	}
 
 	opts := []kgo.Opt{
-		kgo.SeedBrokers(brokers...),
+		kgo.SeedBrokers(cfg.Brokers...),
 		kgo.RequiredAcks(kgo.AllISRAcks()),
 	}
 
-	switch saslMechanism {
+	switch cfg.SASLMechanism {
 	case "plain":
-		opts = append(opts, kgo.SASL(plain.Auth{User: saslUser, Pass: saslPass}.AsMechanism()))
+		opts = append(opts, kgo.SASL(plain.Auth{User: cfg.SASLUsername, Pass: cfg.SASLPassword}.AsMechanism()))
 	case "scram-sha-256":
-		opts = append(opts, kgo.SASL(scram.Auth{User: saslUser, Pass: saslPass}.AsSha256Mechanism()))
+		opts = append(opts, kgo.SASL(scram.Auth{User: cfg.SASLUsername, Pass: cfg.SASLPassword}.AsSha256Mechanism()))
 	case "scram-sha-512":
-		opts = append(opts, kgo.SASL(scram.Auth{User: saslUser, Pass: saslPass}.AsSha512Mechanism()))
+		opts = append(opts, kgo.SASL(scram.Auth{User: cfg.SASLUsername, Pass: cfg.SASLPassword}.AsSha512Mechanism()))
 	}
 
-	if tlsEnabled {
+	if cfg.TLSEnabled {
 		tlsCfg := &tls.Config{}
-		if tlsCAFile != "" {
-			pem, err := os.ReadFile(tlsCAFile)
+		tlsCfg.MinVersion = tls.VersionTLS12
+		if cfg.TLSCAFile != "" {
+			pem, err := os.ReadFile(cfg.TLSCAFile)
 			if err == nil {
 				pool := x509.NewCertPool()
 				if pool.AppendCertsFromPEM(pem) {
@@ -149,24 +159,24 @@ func New(
 		opts = append(opts, kgo.DialTLSConfig(tlsCfg))
 	}
 
-	transactional := transactionalID != ""
+	transactional := cfg.TransactionalID != ""
 	if transactional {
-		opts = append(opts, kgo.TransactionalID(transactionalID))
+		opts = append(opts, kgo.TransactionalID(cfg.TransactionalID))
 	}
 
 	a := &Adapter{
 		opts:          opts,
-		topic:         topic,
+		topic:         cfg.Topic,
 		transactional: transactional,
-		encoder:       encoder,
-		backoffBase:   backoffBase,
-		backoffCap:    backoffCap,
+		encoder:       cfg.Encoder,
+		backoffBase:   cfg.BackoffBase,
+		backoffCap:    cfg.BackoffCap,
 		logger:        logger.With("adapter", adapterName),
-		limiter:       ratelimit.New(rateLimitVal, rateBurst, adapterName, logger),
+		limiter:       ratelimit.New(cfg.RateLimit, cfg.RateLimitBurst, adapterName, logger),
 		topicCache:    make(map[string]string),
 	}
-	if cbMaxFailures > 0 {
-		a.cb = circuitbreaker.New(cbMaxFailures, cbResetTimeout, logger)
+	if cfg.CBMaxFailures > 0 {
+		a.cb = circuitbreaker.New(cfg.CBMaxFailures, cfg.CBResetTimeout, logger)
 	}
 	return a
 }

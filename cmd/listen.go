@@ -19,6 +19,7 @@ import (
 	"github.com/florinutz/pgcdc/internal/migrate"
 	"github.com/florinutz/pgcdc/internal/output"
 	"github.com/florinutz/pgcdc/metrics"
+	"github.com/florinutz/pgcdc/registry"
 	"github.com/florinutz/pgcdc/schema"
 	"github.com/florinutz/pgcdc/tracing"
 	"github.com/florinutz/pgcdc/transform"
@@ -73,6 +74,15 @@ func runListen(cmd *cobra.Command, args []string) error {
 	default:
 		return fmt.Errorf("unknown bus mode: %q (expected fast or reliable)", cfg.Bus.Mode)
 	}
+
+	// Populate validation sets from registry before validating config.
+	config.SetKnownAdapters(registry.AdapterNames())
+
+	requiresDB := make(map[string]bool)
+	for _, d := range registry.Detectors() {
+		requiresDB[d.Name] = d.RequiresDB
+	}
+	config.SetDetectorRequiresDB(requiresDB)
 
 	// Run unified config validation.
 	if err := cfg.Validate(); err != nil {
@@ -325,6 +335,14 @@ func startSIGHUPHandler(g *errgroup.Group, gCtx context.Context, p *pgcdc.Pipeli
 					continue
 				}
 
+				// Warn if adapters changed — they cannot be hot-reloaded.
+				if !slicesEqual(initialCfg.Adapters, newCfg.Adapters) {
+					logger.Warn("adapters changed in config file but cannot be hot-reloaded; restart required",
+						"initial", initialCfg.Adapters,
+						"new", newCfg.Adapters,
+					)
+				}
+
 				yamlGlobal, yamlAdapter := buildYAMLTransforms(newCfg)
 
 				allGlobal := make([]transform.TransformFunc, 0, len(immutableCLI)+len(plugTfx.global)+len(yamlGlobal))
@@ -359,4 +377,17 @@ func startSIGHUPHandler(g *errgroup.Group, gCtx context.Context, p *pgcdc.Pipeli
 			}
 		}
 	})
+}
+
+// slicesEqual reports whether two string slices have the same elements in the same order.
+func slicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

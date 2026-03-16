@@ -76,6 +76,7 @@ type DetectorResult struct {
 type DetectorEntry struct {
 	Name          string
 	Description   string
+	RequiresDB    bool // true if detector needs DatabaseURL
 	Create        func(ctx DetectorContext) (DetectorResult, error)
 	BindFlags     func(f *pflag.FlagSet)
 	ViperKeys     [][2]string // flag-name → viper-key pairs for validation

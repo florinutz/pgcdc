@@ -9,7 +9,7 @@ import (
 
 	"github.com/florinutz/pgcdc/adapter"
 	"github.com/florinutz/pgcdc/event"
-	"github.com/florinutz/pgcdc/internal/backoff"
+	"github.com/florinutz/pgcdc/internal/reconnect"
 	"github.com/florinutz/pgcdc/metrics"
 	"github.com/jackc/pgx/v5"
 )
@@ -84,32 +84,15 @@ func (a *Adapter) Validate(ctx context.Context) error {
 func (a *Adapter) Start(ctx context.Context, events <-chan event.Event) error {
 	a.logger.Info("pg_table adapter started", "table", a.table)
 
-	var attempt int
-	for {
-		runErr := a.run(ctx, events)
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		// Channel closed means clean shutdown.
-		if runErr == nil {
-			return nil
-		}
-
-		delay := backoff.Jitter(attempt, a.backoffBase, a.backoffCap)
-		a.logger.Error("connection lost, reconnecting",
-			"error", runErr,
-			"attempt", attempt+1,
-			"delay", delay,
-		)
-		attempt++
-
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(delay):
-		}
-	}
+	return reconnect.Loop(ctx, "pg_table", a.backoffBase, a.backoffCap,
+		a.logger, nil,
+		func(ctx context.Context) error {
+			return a.run(ctx, events)
+		})
 }
+
+// Drain is a no-op for the pg_table adapter (connection-based, no buffer).
+func (a *Adapter) Drain(_ context.Context) error { return nil }
 
 func (a *Adapter) run(ctx context.Context, events <-chan event.Event) error {
 	conn, err := pgx.Connect(ctx, a.dbURL)

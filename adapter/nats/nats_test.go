@@ -7,7 +7,9 @@ import (
 )
 
 func TestNATSAdapter_Name(t *testing.T) {
-	a := adapternats.New("nats://localhost:4222", "", "", "", 0, 0, 0, nil, nil)
+	a := adapternats.New(adapternats.Config{
+		URL: "nats://localhost:4222",
+	}, nil)
 	if got := a.Name(); got != "nats" {
 		t.Errorf("Name() = %q, want %q", got, "nats")
 	}

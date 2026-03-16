@@ -10,12 +10,21 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
+// ChannelPrefix is the standard channel prefix for all pgcdc events.
+const ChannelPrefix = "pgcdc:"
+
 // Common operation constants.
 const (
 	OpSnapshot          = "SNAPSHOT"
 	OpSnapshotStarted   = "SNAPSHOT_STARTED"
 	OpSnapshotCompleted = "SNAPSHOT_COMPLETED"
 )
+
+// TransactionMarkerChannel is the well-known channel for BEGIN/COMMIT marker events.
+const TransactionMarkerChannel = ChannelPrefix + "_txn"
+
+// SchemaChangeChannel is the well-known channel for SCHEMA_CHANGE events.
+const SchemaChangeChannel = ChannelPrefix + "_schema"
 
 // TransactionInfo contains optional PostgreSQL transaction metadata.
 // Only populated by the WAL detector when --tx-metadata is enabled.

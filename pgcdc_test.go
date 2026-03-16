@@ -77,6 +77,44 @@ func assertNoEvent(t *testing.T, ch <-chan event.Event, wait time.Duration) {
 	}
 }
 
+func TestPipeline_CooperativeCheckpoint_RejectsNonAcknowledger(t *testing.T) {
+	det := &testDetector{events: make(chan event.Event, 10)}
+	// collectAdapter does not implement Acknowledger.
+	collector := &collectAdapter{name: "no-ack", received: make(chan event.Event, 10)}
+
+	p := NewPipeline(det,
+		WithAdapter(collector),
+		WithCooperativeCheckpoint(true),
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	err := p.Run(ctx)
+	if err == nil {
+		t.Fatal("expected error when cooperative checkpoint used with non-Acknowledger adapter")
+	}
+	if !contains(err.Error(), "cooperative checkpoint requires all adapters to implement Acknowledger") {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if !contains(err.Error(), "no-ack") {
+		t.Errorf("expected adapter name in error, got: %v", err)
+	}
+}
+
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && searchString(s, substr)
+}
+
+func searchString(s, sub string) bool {
+	for i := 0; i <= len(s)-len(sub); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
+}
+
 func TestPipeline_Reload_SwapsTransforms(t *testing.T) {
 	det := &testDetector{events: make(chan event.Event, 10)}
 	collector := &collectAdapter{name: "test-adapter", received: make(chan event.Event, 10)}

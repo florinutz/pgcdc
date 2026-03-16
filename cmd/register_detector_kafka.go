@@ -14,6 +14,7 @@ func init() {
 	registry.RegisterDetector(registry.DetectorEntry{
 		Name:        "kafka_consumer",
 		Description: "Kafka topic consumer (consumer group)",
+		RequiresDB:  false,
 		ConfigKey:   "kafka_consumer",
 		DefaultConfig: func() any {
 			return &config.KafkaConsumerConfig{

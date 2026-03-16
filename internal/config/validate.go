@@ -6,14 +6,22 @@ import (
 	"time"
 )
 
-// knownAdapters is the set of valid adapter names.
-var knownAdapters = map[string]bool{
-	"stdout": true, "webhook": true, "sse": true, "file": true,
-	"exec": true, "pg_table": true, "ws": true, "embedding": true,
-	"iceberg": true, "nats": true, "search": true, "redis": true,
-	"kafka": true, "kafkaserver": true, "s3": true, "grpc": true,
-	"view": true, "graphql": true, "arrow": true, "duckdb": true,
-	"clickhouse": true,
+var knownAdapters = map[string]bool{}
+
+// SetKnownAdapters populates the adapter validation set from the registry.
+func SetKnownAdapters(names []string) {
+	m := make(map[string]bool, len(names))
+	for _, n := range names {
+		m[n] = true
+	}
+	knownAdapters = m
+}
+
+var detectorRequiresDB = map[string]bool{}
+
+// SetDetectorRequiresDB populates the detector-requires-DB set from the registry.
+func SetDetectorRequiresDB(m map[string]bool) {
+	detectorRequiresDB = m
 }
 
 // Validate performs structural validation on the config.
@@ -21,7 +29,7 @@ func (c Config) Validate() error {
 	var errs []string
 
 	// --- Top-level ---
-	if c.DatabaseURL == "" && c.Detector.Type != "mysql" && c.Detector.Type != "mongodb" && c.Detector.Type != "kafka_consumer" && c.Detector.Type != "nats_consumer" {
+	if c.DatabaseURL == "" && detectorRequiresDB[c.Detector.Type] {
 		errs = append(errs, "database_url is required")
 	}
 	if c.Bus.BufferSize <= 0 {
@@ -222,6 +230,20 @@ func (c Config) Validate() error {
 		}
 	}
 
+	if adapterSet["pgwire"] {
+		if c.PGWire.Addr == "" {
+			errs = append(errs, "pgwire.addr is required")
+		}
+	}
+
+	if adapterSet["chain"] {
+		if c.Chain.Terminal == "" {
+			errs = append(errs, "chain.terminal is required")
+		} else if !adapterSet[c.Chain.Terminal] {
+			errs = append(errs, fmt.Sprintf("chain.terminal references unknown adapter %q", c.Chain.Terminal))
+		}
+	}
+
 	// --- Outbox detector durations ---
 	if c.Detector.Type == "outbox" {
 		checkDur("outbox.poll_interval", c.Outbox.PollInterval)
@@ -252,6 +274,12 @@ func (c Config) Validate() error {
 	if c.Detector.Type == "kafka_consumer" {
 		if len(c.KafkaConsumer.Topics) == 0 {
 			errs = append(errs, "kafka_consumer.topics must not be empty")
+		}
+		if c.KafkaConsumer.Group == "" {
+			errs = append(errs, "kafka_consumer.group is required")
+		}
+		if len(c.Kafka.Brokers) == 0 {
+			errs = append(errs, "kafka_consumer.brokers must not be empty")
 		}
 	}
 

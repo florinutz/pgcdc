@@ -69,22 +69,16 @@ func TestScenario_Embedding(t *testing.T) {
 		defer apiServer.Close()
 
 		// Wire: LISTEN/NOTIFY → bus → embedding adapter.
-		adapter := embeddingadapter.New(
-			apiServer.URL,
-			"",
-			"test-model",
-			[]string{"data"}, // embed the "data" column
-			"id",
-			connStr,
-			embTable,
-			4, // dimension
-			3, // maxRetries
-			0, // timeout (default)
-			0, // backoffBase (default)
-			0, // backoffCap (default)
-			false,
-			testLogger(),
-		)
+		adapter := embeddingadapter.New(embeddingadapter.Config{
+			APIURL:     apiServer.URL,
+			Model:      "test-model",
+			Columns:    []string{"data"},
+			IDColumn:   "id",
+			DBURL:      connStr,
+			Table:      embTable,
+			Dimension:  4,
+			MaxRetries: 3,
+		}, testLogger())
 		startPipeline(t, connStr, []string{channel}, adapter)
 
 		// Brief pause for LISTEN/NOTIFY detector to connect before the initial INSERT.
@@ -197,14 +191,18 @@ func TestScenario_Embedding(t *testing.T) {
 		}))
 		defer apiServer.Close()
 
-		adapter := embeddingadapter.New(
-			apiServer.URL, "", "test-model",
-			[]string{"data"}, "id",
-			connStr, embTable, 4,
-			5, 0, 100*time.Millisecond, 500*time.Millisecond,
-			false,
-			testLogger(),
-		)
+		adapter := embeddingadapter.New(embeddingadapter.Config{
+			APIURL:      apiServer.URL,
+			Model:       "test-model",
+			Columns:     []string{"data"},
+			IDColumn:    "id",
+			DBURL:       connStr,
+			Table:       embTable,
+			Dimension:   4,
+			MaxRetries:  5,
+			BackoffBase: 100 * time.Millisecond,
+			BackoffCap:  500 * time.Millisecond,
+		}, testLogger())
 		startPipeline(t, connStr, []string{channel}, adapter)
 
 		// Brief pause for LISTEN/NOTIFY detector to connect before sending the

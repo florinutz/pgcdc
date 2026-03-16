@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"text/template"
 
+	"github.com/florinutz/pgcdc/event"
 	"github.com/jackc/pgx/v5"
 	"github.com/spf13/cobra"
 )
@@ -136,7 +137,7 @@ func runInitListenNotify(cmd *cobra.Command, table string) error {
 	channel, _ := cmd.Flags().GetString("channel")
 
 	if channel == "" {
-		channel = "pgcdc:" + table
+		channel = event.ChannelPrefix + table
 	}
 
 	if !validChannelName.MatchString(channel) {

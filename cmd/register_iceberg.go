@@ -30,21 +30,20 @@ func init() {
 		Create: func(ctx registry.AdapterContext) (registry.AdapterResult, error) {
 			cfg := ctx.Cfg
 			return registry.AdapterResult{
-				Adapter: icebergadapter.New(
-					cfg.Iceberg.CatalogType,
-					cfg.Iceberg.CatalogURI,
-					cfg.Iceberg.Warehouse,
-					cfg.Iceberg.Namespace,
-					cfg.Iceberg.Table,
-					cfg.Iceberg.Mode,
-					cfg.Iceberg.SchemaMode,
-					cfg.Iceberg.PrimaryKeys,
-					cfg.Iceberg.FlushInterval,
-					cfg.Iceberg.FlushSize,
-					cfg.Iceberg.BackoffBase,
-					cfg.Iceberg.BackoffCap,
-					ctx.Logger,
-				),
+				Adapter: icebergadapter.New(icebergadapter.Config{
+					CatalogType:   cfg.Iceberg.CatalogType,
+					CatalogURI:    cfg.Iceberg.CatalogURI,
+					Warehouse:     cfg.Iceberg.Warehouse,
+					Namespace:     cfg.Iceberg.Namespace,
+					TableName:     cfg.Iceberg.Table,
+					Mode:          cfg.Iceberg.Mode,
+					SchemaMode:    cfg.Iceberg.SchemaMode,
+					PrimaryKeys:   cfg.Iceberg.PrimaryKeys,
+					FlushInterval: cfg.Iceberg.FlushInterval,
+					FlushSize:     cfg.Iceberg.FlushSize,
+					BackoffBase:   cfg.Iceberg.BackoffBase,
+					BackoffCap:    cfg.Iceberg.BackoffCap,
+				}, ctx.Logger),
 			}, nil
 		},
 		ViperKeys: [][2]string{

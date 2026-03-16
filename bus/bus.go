@@ -116,6 +116,11 @@ func (b *Bus) Start(ctx context.Context) error {
 			metrics.EventsReceived.Inc()
 			// Load the subscriber list atomically — no mutex on the hot path.
 			subs := b.subsPtr.Load().subs
+			// Reliable mode: block until the subscriber channel has capacity.
+			// WARNING: In reliable mode, if ANY adapter blocks indefinitely without
+			// consuming from its channel (e.g., deadlock, infinite loop), the bus
+			// will block here and ALL other adapters will stop receiving events.
+			// Ensure all adapters process events promptly or use fast mode.
 			if b.mode == BusModeReliable {
 				for _, sub := range subs {
 					select {

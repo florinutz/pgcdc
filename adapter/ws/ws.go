@@ -25,18 +25,23 @@ type Broker struct {
 	mu           sync.RWMutex
 	bufferSize   int
 	pingInterval time.Duration
+	maxClients   int
 	logger       *slog.Logger
 }
 
 // New creates a Broker. bufferSize controls per-client channel capacity
 // (defaults to 256 if <= 0). pingInterval sets the WebSocket ping interval
-// (defaults to 15s if <= 0).
-func New(bufferSize int, pingInterval time.Duration, logger *slog.Logger) *Broker {
+// (defaults to 15s if <= 0). maxClients limits concurrent WebSocket
+// connections (defaults to 1000 if <= 0).
+func New(bufferSize int, pingInterval time.Duration, maxClients int, logger *slog.Logger) *Broker {
 	if bufferSize <= 0 {
 		bufferSize = defaultBufferSize
 	}
 	if pingInterval <= 0 {
 		pingInterval = defaultPingInterval
+	}
+	if maxClients <= 0 {
+		maxClients = 1000
 	}
 	if logger == nil {
 		logger = slog.Default()
@@ -45,6 +50,7 @@ func New(bufferSize int, pingInterval time.Duration, logger *slog.Logger) *Broke
 		clients:      make(map[chan event.Event]string),
 		bufferSize:   bufferSize,
 		pingInterval: pingInterval,
+		maxClients:   maxClients,
 		logger:       logger,
 	}
 }
@@ -106,6 +112,11 @@ func (b *Broker) Subscribe(channelFilter string) (<-chan event.Event, func()) {
 
 // ServeHTTP upgrades the connection to WebSocket and streams events.
 func (b *Broker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if b.maxClients > 0 && b.clientCount() >= b.maxClients {
+		http.Error(w, "too many WebSocket clients", http.StatusServiceUnavailable)
+		return
+	}
+
 	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		InsecureSkipVerify: true, // CORS handled by middleware
 	})

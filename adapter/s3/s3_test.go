@@ -7,7 +7,9 @@ import (
 )
 
 func TestS3Adapter_Name(t *testing.T) {
-	a := adapters3.New("test-bucket", "", "", "", "", "", "", 0, 0, 0, 0, 0, nil)
+	a := adapters3.New(adapters3.Config{
+		Bucket: "test-bucket",
+	}, nil)
 	if got := a.Name(); got != "s3" {
 		t.Errorf("Name() = %q, want %q", got, "s3")
 	}

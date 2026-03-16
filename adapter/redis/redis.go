@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"strings"
 	"sync"
 	"time"
 
@@ -42,30 +41,40 @@ type Adapter struct {
 // SetDLQ sets the dead letter queue for failed deliveries.
 func (a *Adapter) SetDLQ(d dlq.DLQ) { a.dlq = d }
 
+// Config holds all parameters for the Redis adapter.
+type Config struct {
+	URL         string
+	Mode        string
+	KeyPrefix   string
+	IDColumn    string
+	BackoffBase time.Duration
+	BackoffCap  time.Duration
+}
+
 // New creates a Redis cache invalidation/sync adapter.
-func New(url, mode, keyPrefix, idColumn string, backoffBase, backoffCap time.Duration, logger *slog.Logger) *Adapter {
-	if mode == "" {
-		mode = "invalidate"
+func New(cfg Config, logger *slog.Logger) *Adapter {
+	if cfg.Mode == "" {
+		cfg.Mode = "invalidate"
 	}
-	if idColumn == "" {
-		idColumn = defaultIDColumn
+	if cfg.IDColumn == "" {
+		cfg.IDColumn = defaultIDColumn
 	}
-	if backoffBase <= 0 {
-		backoffBase = defaultBackoffBase
+	if cfg.BackoffBase <= 0 {
+		cfg.BackoffBase = defaultBackoffBase
 	}
-	if backoffCap <= 0 {
-		backoffCap = defaultBackoffCap
+	if cfg.BackoffCap <= 0 {
+		cfg.BackoffCap = defaultBackoffCap
 	}
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &Adapter{
-		url:         url,
-		mode:        mode,
-		keyPrefix:   keyPrefix,
-		idColumn:    idColumn,
-		backoffBase: backoffBase,
-		backoffCap:  backoffCap,
+		url:         cfg.URL,
+		mode:        cfg.Mode,
+		keyPrefix:   cfg.KeyPrefix,
+		idColumn:    cfg.IDColumn,
+		backoffBase: cfg.BackoffBase,
+		backoffCap:  cfg.BackoffCap,
 		logger:      logger.With("adapter", "redis"),
 	}
 }
@@ -222,65 +231,9 @@ func (a *Adapter) Drain(_ context.Context) error {
 	return nil
 }
 
-type payload struct {
-	Op             string                 `json:"op"`
-	Table          string                 `json:"table"`
-	Row            map[string]interface{} `json:"row"`
-	UnchangedToast []string               `json:"_unchanged_toast_columns"`
-}
-
 func (a *Adapter) extractPayload(ev event.Event) (id string, row map[string]interface{}, isDel bool, unchangedToast []string) {
-	// Structured record path: zero JSON parsing.
-	if rec := ev.Record(); rec != nil && rec.Operation != 0 &&
-		(rec.Change.After != nil || rec.Change.Before != nil) {
-		isDel = rec.Operation == event.OperationDelete
-
-		if isDel {
-			if rec.Change.Before != nil {
-				row = rec.Change.Before.ToMap()
-			}
-		} else {
-			if rec.Change.After != nil {
-				row = rec.Change.After.ToMap()
-			}
-		}
-
-		if row == nil {
-			return "", nil, isDel, nil
-		}
-		if v, ok := row[a.idColumn]; ok && v != nil {
-			if s, ok := v.(string); ok {
-				id = s
-			} else {
-				id = fmt.Sprintf("%v", v)
-			}
-		}
-
-		// Unchanged TOAST columns from metadata.
-		if toastCSV, ok := rec.Metadata[event.MetaUnchangedToastCols]; ok && toastCSV != "" {
-			unchangedToast = strings.Split(toastCSV, ",")
-		}
-
-		return id, row, isDel, unchangedToast
-	}
-
-	// Legacy path: parse payload JSON.
-	var p payload
-	if err := json.Unmarshal(ev.Payload, &p); err != nil {
-		return "", nil, false, nil
-	}
-	isDel = p.Op == "DELETE"
-	if p.Row == nil {
-		return "", nil, isDel, nil
-	}
-	if v, ok := p.Row[a.idColumn]; ok && v != nil {
-		if s, ok := v.(string); ok {
-			id = s
-		} else {
-			id = fmt.Sprintf("%v", v)
-		}
-	}
-	return id, p.Row, isDel, p.UnchangedToast
+	extracted := event.ExtractRow(ev, a.idColumn)
+	return extracted.ID, extracted.Row, extracted.IsDelete, extracted.UnchangedToast
 }
 
 func (a *Adapter) recordDLQ(ctx context.Context, ev event.Event, err error) {

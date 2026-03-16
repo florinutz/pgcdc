@@ -2,18 +2,24 @@ package config
 
 import "time"
 
+// MiddlewareParams holds circuit breaker and rate limiter configuration
+// shared by adapters that use the middleware chain (Deliverer adapters).
+type MiddlewareParams struct {
+	CBMaxFailures  int           `mapstructure:"cb_max_failures"`
+	CBResetTimeout time.Duration `mapstructure:"cb_reset_timeout"`
+	RateLimit      float64       `mapstructure:"rate_limit"`
+	RateLimitBurst int           `mapstructure:"rate_limit_burst"`
+}
+
 type WebhookConfig struct {
-	URL            string            `mapstructure:"url"`
-	Headers        map[string]string `mapstructure:"headers"`
-	SigningKey     string            `mapstructure:"signing_key"`
-	MaxRetries     int               `mapstructure:"max_retries"`
-	Timeout        time.Duration     `mapstructure:"timeout"`
-	BackoffBase    time.Duration     `mapstructure:"backoff_base"`
-	BackoffCap     time.Duration     `mapstructure:"backoff_cap"`
-	CBMaxFailures  int               `mapstructure:"cb_max_failures"`
-	CBResetTimeout time.Duration     `mapstructure:"cb_reset_timeout"`
-	RateLimit      float64           `mapstructure:"rate_limit"`
-	RateLimitBurst int               `mapstructure:"rate_limit_burst"`
+	URL              string            `mapstructure:"url"`
+	Headers          map[string]string `mapstructure:"headers"`
+	SigningKey       string            `mapstructure:"signing_key"`
+	MaxRetries       int               `mapstructure:"max_retries"`
+	Timeout          time.Duration     `mapstructure:"timeout"`
+	BackoffBase      time.Duration     `mapstructure:"backoff_base"`
+	BackoffCap       time.Duration     `mapstructure:"backoff_cap"`
+	MiddlewareParams `mapstructure:",squash"`
 }
 
 type SSEConfig struct {
@@ -47,26 +53,24 @@ type PGTableConfig struct {
 
 type WebSocketConfig struct {
 	PingInterval time.Duration `mapstructure:"ping_interval"`
+	MaxClients   int           `mapstructure:"max_clients"`
 }
 
 type EmbeddingConfig struct {
-	APIURL         string        `mapstructure:"api_url"`
-	APIKey         string        `mapstructure:"api_key"`
-	Model          string        `mapstructure:"model"`
-	Columns        []string      `mapstructure:"columns"`
-	IDColumn       string        `mapstructure:"id_column"`
-	Table          string        `mapstructure:"table"`
-	DBURL          string        `mapstructure:"db_url"`
-	Dimension      int           `mapstructure:"dimension"`
-	MaxRetries     int           `mapstructure:"max_retries"`
-	Timeout        time.Duration `mapstructure:"timeout"`
-	BackoffBase    time.Duration `mapstructure:"backoff_base"`
-	BackoffCap     time.Duration `mapstructure:"backoff_cap"`
-	CBMaxFailures  int           `mapstructure:"cb_max_failures"`
-	CBResetTimeout time.Duration `mapstructure:"cb_reset_timeout"`
-	RateLimit      float64       `mapstructure:"rate_limit"`
-	RateLimitBurst int           `mapstructure:"rate_limit_burst"`
-	SkipUnchanged  bool          `mapstructure:"skip_unchanged"`
+	APIURL           string        `mapstructure:"api_url"`
+	APIKey           string        `mapstructure:"api_key"`
+	Model            string        `mapstructure:"model"`
+	Columns          []string      `mapstructure:"columns"`
+	IDColumn         string        `mapstructure:"id_column"`
+	Table            string        `mapstructure:"table"`
+	DBURL            string        `mapstructure:"db_url"`
+	Dimension        int           `mapstructure:"dimension"`
+	MaxRetries       int           `mapstructure:"max_retries"`
+	Timeout          time.Duration `mapstructure:"timeout"`
+	BackoffBase      time.Duration `mapstructure:"backoff_base"`
+	BackoffCap       time.Duration `mapstructure:"backoff_cap"`
+	SkipUnchanged    bool          `mapstructure:"skip_unchanged"`
+	MiddlewareParams `mapstructure:",squash"`
 }
 
 type IcebergConfig struct {
@@ -105,6 +109,7 @@ type SearchConfig struct {
 	BatchInterval time.Duration `mapstructure:"batch_interval"`
 	BackoffBase   time.Duration `mapstructure:"backoff_base"`
 	BackoffCap    time.Duration `mapstructure:"backoff_cap"`
+	MaxRetries    int           `mapstructure:"max_retries"`
 }
 
 type RedisConfig struct {
@@ -121,21 +126,18 @@ type GRPCConfig struct {
 }
 
 type KafkaConfig struct {
-	Brokers         []string      `mapstructure:"brokers"`
-	Topic           string        `mapstructure:"topic"`
-	SASLMechanism   string        `mapstructure:"sasl_mechanism"`
-	SASLUsername    string        `mapstructure:"sasl_username"`
-	SASLPassword    string        `mapstructure:"sasl_password"`
-	TLS             bool          `mapstructure:"tls"`
-	TLSCAFile       string        `mapstructure:"tls_ca_file"`
-	BackoffBase     time.Duration `mapstructure:"backoff_base"`
-	BackoffCap      time.Duration `mapstructure:"backoff_cap"`
-	Encoding        string        `mapstructure:"encoding"`         // json, avro, protobuf
-	TransactionalID string        `mapstructure:"transactional_id"` // empty = idempotent only
-	CBMaxFailures   int           `mapstructure:"cb_max_failures"`
-	CBResetTimeout  time.Duration `mapstructure:"cb_reset_timeout"`
-	RateLimit       float64       `mapstructure:"rate_limit"`
-	RateLimitBurst  int           `mapstructure:"rate_limit_burst"`
+	Brokers          []string      `mapstructure:"brokers"`
+	Topic            string        `mapstructure:"topic"`
+	SASLMechanism    string        `mapstructure:"sasl_mechanism"`
+	SASLUsername     string        `mapstructure:"sasl_username"`
+	SASLPassword     string        `mapstructure:"sasl_password"`
+	TLS              bool          `mapstructure:"tls"`
+	TLSCAFile        string        `mapstructure:"tls_ca_file"`
+	BackoffBase      time.Duration `mapstructure:"backoff_base"`
+	BackoffCap       time.Duration `mapstructure:"backoff_cap"`
+	Encoding         string        `mapstructure:"encoding"`         // json, avro, protobuf
+	TransactionalID  string        `mapstructure:"transactional_id"` // empty = idempotent only
+	MiddlewareParams `mapstructure:",squash"`
 }
 
 type S3Config struct {
@@ -180,6 +182,7 @@ type GraphQLConfig struct {
 	SchemaAware       bool          `mapstructure:"schema_aware"`
 	BufferSize        int           `mapstructure:"buffer_size"`
 	KeepaliveInterval time.Duration `mapstructure:"keepalive_interval"`
+	MaxClients        int           `mapstructure:"max_clients"`
 }
 
 type DuckDBConfig struct {
@@ -187,6 +190,7 @@ type DuckDBConfig struct {
 	Retention     time.Duration `mapstructure:"retention"`
 	FlushInterval time.Duration `mapstructure:"flush_interval"`
 	FlushSize     int           `mapstructure:"flush_size"`
+	QueryToken    string        `mapstructure:"query_token"`
 }
 
 type ClickHouseConfig struct {

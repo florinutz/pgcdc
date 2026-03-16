@@ -93,7 +93,15 @@ func startMySQLPipeline(t *testing.T, addr, user, password string, tables []stri
 	logger := testLogger()
 	ctx, cancel := context.WithCancel(context.Background())
 
-	det := mysqldetector.New(addr, user, password, 100, tables, false, "mysql", "mysql-bin", 0, 0, logger)
+	det := mysqldetector.New(mysqldetector.Config{
+		Addr:         addr,
+		User:         user,
+		Password:     password,
+		ServerID:     100,
+		Tables:       tables,
+		Flavor:       "mysql",
+		BinlogPrefix: "mysql-bin",
+	}, logger)
 	b := bus.New(64, logger)
 
 	g, gCtx := errgroup.WithContext(ctx)

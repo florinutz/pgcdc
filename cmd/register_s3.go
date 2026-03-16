@@ -29,21 +29,20 @@ func init() {
 		Create: func(ctx registry.AdapterContext) (registry.AdapterResult, error) {
 			cfg := ctx.Cfg
 			return registry.AdapterResult{
-				Adapter: s3adapter.New(
-					cfg.S3.Bucket,
-					cfg.S3.Prefix,
-					cfg.S3.Endpoint,
-					cfg.S3.Region,
-					cfg.S3.AccessKeyID,
-					cfg.S3.SecretAccessKey,
-					cfg.S3.Format,
-					cfg.S3.FlushInterval,
-					cfg.S3.FlushSize,
-					cfg.S3.DrainTimeout,
-					cfg.S3.BackoffBase,
-					cfg.S3.BackoffCap,
-					ctx.Logger,
-				),
+				Adapter: s3adapter.New(s3adapter.Config{
+					Bucket:          cfg.S3.Bucket,
+					Prefix:          cfg.S3.Prefix,
+					Endpoint:        cfg.S3.Endpoint,
+					Region:          cfg.S3.Region,
+					AccessKeyID:     cfg.S3.AccessKeyID,
+					SecretAccessKey: cfg.S3.SecretAccessKey,
+					Format:          cfg.S3.Format,
+					FlushInterval:   cfg.S3.FlushInterval,
+					FlushSize:       cfg.S3.FlushSize,
+					DrainTimeout:    cfg.S3.DrainTimeout,
+					BackoffBase:     cfg.S3.BackoffBase,
+					BackoffCap:      cfg.S3.BackoffCap,
+				}, ctx.Logger),
 			}, nil
 		},
 		ViperKeys: [][2]string{

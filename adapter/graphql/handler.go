@@ -171,8 +171,12 @@ func (a *Adapter) handleSubscribe(c *client, msg Message) {
 		ch:         make(chan event.Event, a.bufferSize),
 	}
 
+	if !a.addSubscription(c, sub) {
+		close(sub.ch)
+		a.sendError(c, msg.ID, "max clients reached")
+		return
+	}
 	c.subs[msg.ID] = sub
-	a.addSubscription(c, sub)
 
 	metrics.GraphQLSubscriptionsActive.Inc()
 

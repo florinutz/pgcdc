@@ -1,3 +1,5 @@
+//go:build !no_webhookgw
+
 package cmd
 
 import (
@@ -5,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/florinutz/pgcdc/detector/webhookgw"
+	"github.com/florinutz/pgcdc/event"
 	"github.com/florinutz/pgcdc/internal/config"
 	"github.com/florinutz/pgcdc/registry"
 )
@@ -13,6 +16,7 @@ func init() {
 	registry.RegisterDetector(registry.DetectorEntry{
 		Name:        "webhook-gateway",
 		Description: "Inbound webhook gateway (receives HTTP webhooks from external services)",
+		RequiresDB:  false,
 		ConfigKey:   "webhook_gateway",
 		DefaultConfig: func() any {
 			return &config.WebhookGatewayConfig{
@@ -40,7 +44,7 @@ func init() {
 			for name, sc := range cfg.WebhookGateway.Sources {
 				prefix := sc.ChannelPrefix
 				if prefix == "" {
-					prefix = "pgcdc:" + name
+					prefix = event.ChannelPrefix + name
 				}
 				sources = append(sources, &webhookgw.Source{
 					Name:            name,
@@ -106,7 +110,7 @@ func parseSourceFlag(raw string) (*webhookgw.Source, error) {
 	}
 
 	if src.ChannelPrefix == "" {
-		src.ChannelPrefix = "pgcdc:" + src.Name
+		src.ChannelPrefix = event.ChannelPrefix + src.Name
 	}
 
 	return src, nil

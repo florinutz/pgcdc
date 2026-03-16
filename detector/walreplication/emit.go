@@ -185,7 +185,7 @@ func (d *Detector) emitEvent(
 	ev, err := event.NewFromRecord(channel, rec, source)
 	if err != nil {
 		d.logger.Error("create event failed", "error", err)
-		return nil
+		return err
 	}
 
 	if tx != nil {
@@ -234,13 +234,13 @@ func (d *Detector) emitMarker(ctx context.Context, events chan<- event.Event, op
 	payloadJSON, err := json.Marshal(payload)
 	if err != nil {
 		d.logger.Error("marshal marker payload failed", "error", err)
-		return nil
+		return err
 	}
 
 	ev, err := event.New(txnChannel, op, payloadJSON, source)
 	if err != nil {
 		d.logger.Error("create marker event failed", "error", err)
-		return nil
+		return err
 	}
 
 	ev.LSN = uint64(currentLSN)
@@ -287,13 +287,13 @@ func (d *Detector) emitSchemaChange(ctx context.Context, events chan<- event.Eve
 	payloadJSON, err := json.Marshal(payload)
 	if err != nil {
 		d.logger.Error("marshal schema change payload failed", "error", err)
-		return nil
+		return err
 	}
 
 	ev, err := event.New(schemaChannel, "SCHEMA_CHANGE", payloadJSON, source)
 	if err != nil {
 		d.logger.Error("create schema change event failed", "error", err)
-		return nil
+		return err
 	}
 
 	ev.LSN = uint64(currentLSN)

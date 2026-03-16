@@ -41,18 +41,17 @@ func init() {
 				}
 			}
 			return registry.AdapterResult{
-				Adapter: clickhouseadapter.New(
-					cfg.ClickHouse.DSN,
-					cfg.ClickHouse.Table,
-					cfg.ClickHouse.AutoCreate,
-					cfg.ClickHouse.AsyncInsert,
-					settings,
-					cfg.ClickHouse.BatchSize,
-					cfg.ClickHouse.FlushInterval,
-					cfg.ClickHouse.BackoffBase,
-					cfg.ClickHouse.BackoffCap,
-					ctx.Logger,
-				),
+				Adapter: clickhouseadapter.New(clickhouseadapter.Config{
+					DSN:           cfg.ClickHouse.DSN,
+					Table:         cfg.ClickHouse.Table,
+					AutoCreate:    cfg.ClickHouse.AutoCreate,
+					AsyncInsert:   cfg.ClickHouse.AsyncInsert,
+					Settings:      settings,
+					BatchSize:     cfg.ClickHouse.BatchSize,
+					FlushInterval: cfg.ClickHouse.FlushInterval,
+					BackoffBase:   cfg.ClickHouse.BackoffBase,
+					BackoffCap:    cfg.ClickHouse.BackoffCap,
+				}, ctx.Logger),
 			}, nil
 		},
 		ViperKeys: [][2]string{

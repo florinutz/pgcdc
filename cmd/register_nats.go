@@ -27,17 +27,16 @@ func init() {
 		Create: func(ctx registry.AdapterContext) (registry.AdapterResult, error) {
 			cfg := ctx.Cfg
 			return registry.AdapterResult{
-				Adapter: natsadapter.New(
-					cfg.Nats.URL,
-					cfg.Nats.Subject,
-					cfg.Nats.Stream,
-					cfg.Nats.CredFile,
-					cfg.Nats.MaxAge,
-					cfg.Nats.BackoffBase,
-					cfg.Nats.BackoffCap,
-					ctx.NatsEncoder,
-					ctx.Logger,
-				),
+				Adapter: natsadapter.New(natsadapter.Config{
+					URL:           cfg.Nats.URL,
+					SubjectPrefix: cfg.Nats.Subject,
+					StreamName:    cfg.Nats.Stream,
+					CredFile:      cfg.Nats.CredFile,
+					MaxAge:        cfg.Nats.MaxAge,
+					BackoffBase:   cfg.Nats.BackoffBase,
+					BackoffCap:    cfg.Nats.BackoffCap,
+					Encoder:       ctx.NatsEncoder,
+				}, ctx.Logger),
 			}, nil
 		},
 		ViperKeys: [][2]string{

@@ -91,6 +91,14 @@ func New(addr string, bufferSize int, schemaStore schema.Store, logger *slog.Log
 
 func (a *Adapter) Name() string { return "arrow" }
 
+// Validate checks required configuration.
+func (a *Adapter) Validate(_ context.Context) error {
+	if a.addr == "" {
+		return fmt.Errorf("arrow: addr is required")
+	}
+	return nil
+}
+
 // Drain implements adapter.Drainer. The Arrow Flight adapter shuts down
 // the gRPC server in Start() on context cancellation, so Drain is a no-op.
 func (a *Adapter) Drain(_ context.Context) error { return nil }
