@@ -122,8 +122,16 @@ func TestScenario_DLQCommands(t *testing.T) {
 		if err := json.Unmarshal(req.Body, &ev); err != nil {
 			t.Fatalf("unmarshal replayed event: %v", err)
 		}
-		if ev.Operation != "INSERT" {
-			t.Errorf("replayed operation = %q, want INSERT", ev.Operation)
+		// listen_notify detector sets Operation to "NOTIFY"; the user-level
+		// operation lives inside the JSON payload's "op" field.
+		var payloadOp struct {
+			Op string `json:"op"`
+		}
+		if err := json.Unmarshal(ev.Payload, &payloadOp); err != nil {
+			t.Fatalf("unmarshal replayed payload: %v", err)
+		}
+		if payloadOp.Op != "INSERT" {
+			t.Errorf("replayed payload op = %q, want INSERT", payloadOp.Op)
 		}
 
 		// 6. pgcdc dlq list --pending → no records.
